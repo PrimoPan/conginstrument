@@ -41,6 +41,15 @@ function normalizeTags(tags: any): string[] | undefined {
   return out.length ? out : undefined;
 }
 
+function normalizeStringArray(input: any, max = 8): string[] | undefined {
+  if (!Array.isArray(input)) return undefined;
+  const out = input
+    .map((x) => String(x ?? "").trim())
+    .filter(Boolean)
+    .slice(0, max);
+  return out.length ? out : undefined;
+}
+
 function makeTempId(prefix: "n" | "e") {
   return `t_${prefix}_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
 }
@@ -208,6 +217,8 @@ export function sanitizeGraphPatchStrict(raw: any): GraphPatch {
       const severity = normalizeSeverity(node?.severity);
       const importance = node?.importance != null ? clamp01(node?.importance, 0.7) : undefined;
       const tags = normalizeTags(node?.tags);
+      const evidenceIds = normalizeStringArray(node?.evidenceIds, 6);
+      const sourceMsgIds = normalizeStringArray(node?.sourceMsgIds, 6);
 
       opsOut.push({
         op: "add_node",
@@ -221,6 +232,8 @@ export function sanitizeGraphPatchStrict(raw: any): GraphPatch {
           severity,
           importance,
           tags,
+          evidenceIds,
+          sourceMsgIds,
         },
       });
       continue;
@@ -253,6 +266,12 @@ export function sanitizeGraphPatchStrict(raw: any): GraphPatch {
 
       const tags = normalizeTags((patchSrc as any).tags);
       if (tags) outPatch.tags = tags;
+
+      const evidenceIds = normalizeStringArray((patchSrc as any).evidenceIds, 6);
+      if (evidenceIds) outPatch.evidenceIds = evidenceIds;
+
+      const sourceMsgIds = normalizeStringArray((patchSrc as any).sourceMsgIds, 6);
+      if (sourceMsgIds) outPatch.sourceMsgIds = sourceMsgIds;
 
       if (Object.keys(outPatch).length === 0) {
         notes.push("drop:update_node_empty_patch");

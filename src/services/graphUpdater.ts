@@ -51,6 +51,34 @@ function mergeTags(a?: string[], b?: string[]) {
   return set.size ? Array.from(set).slice(0, 8) : undefined;
 }
 
+function mergeEvidence(a?: string[], b?: string[]) {
+  const set = new Set<string>([...(a || []), ...(b || [])].map((x) => cleanStatement(x, 60)).filter(Boolean));
+  return set.size ? Array.from(set).slice(0, 6) : undefined;
+}
+
+function inferEvidenceFromStatement(userText: string, statement: string): string[] | undefined {
+  const t = String(userText || "");
+  const s = cleanStatement(statement, 120);
+  if (!t || !s) return undefined;
+
+  const colonIdx = s.indexOf("：");
+  if (colonIdx > 0) {
+    const rhs = cleanStatement(s.slice(colonIdx + 1), 40);
+    if (rhs && t.includes(rhs)) return [rhs];
+  }
+
+  const words = s
+    .split(/[，。,；;、\s]/)
+    .map((x) => cleanStatement(x, 24))
+    .filter((x) => x.length >= 2);
+
+  const hit = words.find((w) => t.includes(w));
+  if (hit) return [hit];
+
+  if (t.includes(s)) return [s];
+  return undefined;
+}
+
 function enrichNodeRisk(node: any) {
   if (!node || typeof node !== "object") return node;
 
@@ -73,10 +101,19 @@ function enrichNodeRisk(node: any) {
   return out;
 }
 
-function enrichPatchRiskAndText(patch: GraphPatch): GraphPatch {
+function enrichPatchRiskAndText(patch: GraphPatch, latestUserText: string): GraphPatch {
   const ops = (patch.ops || []).map((op: any) => {
     if (op?.op === "add_node" && op.node) {
-      return { ...op, node: enrichNodeRisk(op.node) };
+      const node = enrichNodeRisk(op.node);
+      const inferredEvidence = inferEvidenceFromStatement(latestUserText, node?.statement || "");
+      return {
+        ...op,
+        node: {
+          ...node,
+          evidenceIds: mergeEvidence(node?.evidenceIds, inferredEvidence),
+          sourceMsgIds: mergeEvidence(node?.sourceMsgIds, ["latest_user"]),
+        },
+      };
     }
     if (op?.op === "update_node" && op.patch && typeof op.patch === "object") {
       const p = { ...op.patch };
@@ -88,6 +125,9 @@ function enrichPatchRiskAndText(patch: GraphPatch): GraphPatch {
         p.tags = mergeTags(p.tags, risk.tags);
       }
       if (p.statement && HARD_CONSTRAINT_RE.test(p.statement) && !p.strength) p.strength = "hard";
+      const inferredEvidence = inferEvidenceFromStatement(latestUserText, p.statement || "");
+      p.evidenceIds = mergeEvidence(p.evidenceIds, inferredEvidence);
+      p.sourceMsgIds = mergeEvidence(p.sourceMsgIds, ["latest_user"]);
       return { ...op, patch: p };
     }
     return op;
@@ -137,13 +177,29 @@ function normalizeDestination(raw: string): string {
   return s;
 }
 
+function isLikelyDestinationCandidate(x: string): boolean {
+  const s = normalizeDestination(x);
+  if (!s) return false;
+  if (s.length < 2 || s.length > 10) return false;
+  if (/心脏|母亲|父亲|家人|预算|人数|行程|计划|注意|高强度|旅行时|旅游时|需要|限制|不能|安排/i.test(s)) {
+    return false;
+  }
+  return true;
+}
+
 type IntentSignals = {
   peopleCount?: number;
+  peopleEvidence?: string;
   destination?: string;
+  destinationEvidence?: string;
   durationDays?: number;
+  durationEvidence?: string;
   durationUnknown?: boolean;
+  durationUnknownEvidence?: string;
   budgetCny?: number;
+  budgetEvidence?: string;
   healthConstraint?: string;
+  healthEvidence?: string;
 };
 
 function isTravelIntentText(text: string, signals: IntentSignals) {
@@ -191,7 +247,10 @@ function extractIntentSignals(userText: string): IntentSignals {
     text.match(/([0-9一二三四五六七八九十两]{1,3})\s*(?:口|人)(?:同行|一起|出游|旅游|出行)?/);
   if (peopleM?.[1]) {
     const n = parseCnInt(peopleM[1]);
-    if (n && n > 0 && n < 30) out.peopleCount = n;
+    if (n && n > 0 && n < 30) {
+      out.peopleCount = n;
+      out.peopleEvidence = cleanStatement(peopleM[0] || peopleM[1], 40);
+    }
   }
 
   const destM =
@@ -199,26 +258,40 @@ function extractIntentSignals(userText: string): IntentSignals {
     text.match(/目的地(?:是|为)?\s*([^\s，。,；;！!？?\d]{2,16})/);
   if (destM?.[1]) {
     const d = normalizeDestination(destM[1]);
-    if (d) out.destination = d;
+    if (d && isLikelyDestinationCandidate(d)) {
+      out.destination = d;
+      out.destinationEvidence = cleanStatement(destM[1], 32);
+    }
   }
 
   const daysM = text.match(/([0-9一二三四五六七八九十两]{1,3})\s*天/);
   if (daysM?.[1]) {
     const d = parseCnInt(daysM[1]);
-    if (d && d > 0 && d <= 60) out.durationDays = d;
+    if (d && d > 0 && d <= 60) {
+      out.durationDays = d;
+      out.durationEvidence = cleanStatement(daysM[0] || daysM[1], 24);
+    }
   }
   if (!out.durationDays && /几天|多少天|天数待定|时长待定/i.test(text)) {
     out.durationUnknown = true;
+    const du = text.match(/几天|多少天|天数待定|时长待定/i);
+    out.durationUnknownEvidence = du?.[0] || "时长待确认";
   }
 
   const budgetM = text.match(/预算[为是]?\s*([0-9]{3,8})\s*(?:元|块|人民币)?/);
   if (budgetM?.[1]) {
     const b = Number(budgetM[1]);
-    if (Number.isFinite(b) && b > 0) out.budgetCny = b;
+    if (Number.isFinite(b) && b > 0) {
+      out.budgetCny = b;
+      out.budgetEvidence = cleanStatement(budgetM[0] || budgetM[1], 32);
+    }
   }
 
   const healthClause = pickHealthClause(text);
-  if (healthClause) out.healthConstraint = healthClause;
+  if (healthClause) {
+    out.healthConstraint = healthClause;
+    out.healthEvidence = healthClause;
+  }
 
   return out;
 }
@@ -250,9 +323,11 @@ function buildHeuristicIntentOps(graph: CDG, userText: string, knownStmt: Set<st
     if (!key || knownStmt.has(key)) return null;
     knownStmt.add(key);
     const id = makeTempId("n");
+    const evidenceIds = mergeEvidence(node.evidenceIds, inferEvidenceFromStatement(userText, statement));
+    const sourceMsgIds = mergeEvidence(node.sourceMsgIds, ["latest_user"]);
     ops.push({
       op: "add_node",
-      node: { ...node, id, statement },
+      node: { ...node, id, statement, evidenceIds, sourceMsgIds },
     });
     return id;
   };
@@ -281,7 +356,39 @@ function buildHeuristicIntentOps(graph: CDG, userText: string, knownStmt: Set<st
       status: "proposed",
       confidence: 0.9,
       importance: 0.85,
+      evidenceIds: [
+        signals.destinationEvidence,
+        signals.durationEvidence,
+        signals.durationUnknownEvidence,
+        signals.budgetEvidence,
+        signals.peopleEvidence,
+      ].filter(Boolean),
     });
+  }
+  if (rootId && canonicalIntent) {
+    const rootNode = (graph.nodes || []).find((n: any) => n.id === rootId);
+    if (rootNode?.statement && shouldNormalizeGoalStatement(rootNode.statement, signals, userText)) {
+      ops.push({
+        op: "update_node",
+        id: rootId,
+        patch: {
+          statement: canonicalIntent,
+          confidence: Math.max(Number(rootNode.confidence) || 0.6, 0.85),
+          importance: Math.max(Number(rootNode.importance) || 0, 0.8),
+          evidenceIds: mergeEvidence(
+            rootNode.evidenceIds,
+            [
+              signals.destinationEvidence,
+              signals.durationEvidence,
+              signals.durationUnknownEvidence,
+              signals.budgetEvidence,
+              signals.peopleEvidence,
+            ].filter(Boolean)
+          ),
+          sourceMsgIds: mergeEvidence(rootNode.sourceMsgIds, ["latest_user"]),
+        },
+      } as any);
+    }
   }
 
   if (signals.peopleCount) {
@@ -291,6 +398,7 @@ function buildHeuristicIntentOps(graph: CDG, userText: string, knownStmt: Set<st
       status: "proposed",
       confidence: 0.9,
       importance: 0.72,
+      evidenceIds: [signals.peopleEvidence || `${signals.peopleCount}人`],
     });
     if (id) layer2Set.add(id);
     if (id && rootId) pushEdge(id, rootId, "enable");
@@ -303,6 +411,7 @@ function buildHeuristicIntentOps(graph: CDG, userText: string, knownStmt: Set<st
       status: "proposed",
       confidence: 0.9,
       importance: 0.8,
+      evidenceIds: [signals.destinationEvidence || signals.destination],
     });
     if (id) layer2Set.add(id);
     if (id && rootId) pushEdge(id, rootId, "enable");
@@ -316,6 +425,7 @@ function buildHeuristicIntentOps(graph: CDG, userText: string, knownStmt: Set<st
       status: "proposed",
       confidence: 0.88,
       importance: 0.78,
+      evidenceIds: [signals.durationEvidence || `${signals.durationDays}天`],
     });
     if (id) layer2Set.add(id);
     if (id && rootId) pushEdge(id, rootId, "constraint");
@@ -327,6 +437,7 @@ function buildHeuristicIntentOps(graph: CDG, userText: string, knownStmt: Set<st
       status: "proposed",
       confidence: 0.78,
       importance: 0.62,
+      evidenceIds: [signals.durationUnknownEvidence || "几天"],
     });
     if (id) layer2Set.add(id);
     if (id && rootId) pushEdge(id, rootId, "determine");
@@ -340,6 +451,7 @@ function buildHeuristicIntentOps(graph: CDG, userText: string, knownStmt: Set<st
       status: "proposed",
       confidence: 0.92,
       importance: 0.86,
+      evidenceIds: [signals.budgetEvidence || `${signals.budgetCny}元`],
     });
     if (id) layer2Set.add(id);
     if (id && rootId) pushEdge(id, rootId, "constraint");
@@ -362,6 +474,7 @@ function buildHeuristicIntentOps(graph: CDG, userText: string, knownStmt: Set<st
       importance: 0.98,
       tags: ["health", "safety"],
       locked: true,
+      evidenceIds: [signals.healthEvidence || signals.healthConstraint],
     });
     if (id) healthId = id;
   }
@@ -373,6 +486,16 @@ function buildHeuristicIntentOps(graph: CDG, userText: string, knownStmt: Set<st
     for (const sid of layer2Set) {
       if (!sid || sid === healthId) continue;
       pushEdge(sid, healthId, "determine");
+    }
+  }
+
+  if (rootId) {
+    for (const n of graph.nodes || []) {
+      if (!n?.id || n.id === rootId || n.type === "goal") continue;
+      const connected = (graph.edges || []).some((e: any) => e?.from === n.id || e?.to === n.id);
+      if (!connected) {
+        pushEdge(n.id, rootId, n.type === "constraint" ? "constraint" : "enable");
+      }
     }
   }
 
@@ -435,6 +558,8 @@ function fallbackPatch(graph: CDG, userText: string, reason: string): GraphPatch
             statement: canonicalIntent || short || "未提供任务",
             status: "proposed",
             confidence: canonicalIntent ? 0.85 : 0.55,
+            evidenceIds: [signals.destinationEvidence, signals.durationEvidence, signals.budgetEvidence, signals.peopleEvidence].filter(Boolean),
+            sourceMsgIds: ["latest_user"],
           },
         },
       ],
@@ -459,6 +584,8 @@ function fallbackPatch(graph: CDG, userText: string, reason: string): GraphPatch
           severity: risk?.severity,
           importance: risk?.importance,
           tags: risk?.tags,
+          evidenceIds: [signals.healthEvidence, signals.budgetEvidence, signals.durationEvidence, signals.destinationEvidence, signals.peopleEvidence].filter(Boolean),
+          sourceMsgIds: ["latest_user"],
         },
       },
       {
@@ -478,7 +605,7 @@ function fallbackPatch(graph: CDG, userText: string, reason: string): GraphPatch
 
 /** 后处理：去重 + 自动补边 + 限制 op 数量 */
 function postProcessPatch(graph: CDG, patch: GraphPatch, latestUserText: string): GraphPatch {
-  const enriched = enrichPatchRiskAndText(patch);
+  const enriched = enrichPatchRiskAndText(patch, latestUserText);
   const signals = extractIntentSignals(latestUserText);
   const canonicalIntent = buildTravelIntentStatement(signals, latestUserText);
   const existingByStmt = new Map<string, string>();
@@ -536,20 +663,26 @@ function postProcessPatch(graph: CDG, patch: GraphPatch, latestUserText: string)
     kept.push(op);
   }
 
-  if (root) {
+  const rootForEdge =
+    root ||
+    (kept.find((x: any) => x?.op === "add_node" && x?.node?.type === "goal" && typeof x?.node?.id === "string")
+      ?.node?.id as string | undefined) ||
+    null;
+
+  if (rootForEdge) {
     const hasEdge = (from: string, to: string) =>
       kept.some((x) => x?.op === "add_edge" && x?.edge?.from === from && x?.edge?.to === to);
 
     let k = 1;
     for (const n of newNodes) {
       if (!["constraint", "preference", "fact", "belief"].includes(n.type)) continue;
-      if (hasEdge(n.id, root)) continue;
+      if (hasEdge(n.id, rootForEdge)) continue;
       kept.push({
         op: "add_edge",
         edge: {
           id: makeTempId(`e_auto${k++}`),
           from: n.id,
-          to: root,
+          to: rootForEdge,
           type: n.type === "constraint" ? "constraint" : "enable",
           confidence: 0.65,
         },
@@ -578,6 +711,9 @@ const GRAPH_SYSTEM_PROMPT = `
 - 若信息表达“不能/必须/禁忌”等限制，优先用 constraint，且 strength 优先 hard。
 - statement 保持简洁，不要加“用户补充：/用户任务：”前缀。
 - 旅行类请求优先拆分成原子节点：人数、目的地、时长、预算、健康限制，不要把所有信息塞进一个节点。
+- 意图（goal）作为根节点，子节点尽量与根节点连通，避免孤立节点。
+- 若有健康/安全硬约束，可作为第三层约束节点，第二层关键节点可用 determine 指向它。
+- 节点尽量附 evidenceIds（来自用户原句的短片段），用于前端高亮证据文本。
 - 边类型：enable / constraint / determine / conflicts_with
 - 去重：已有等价节点优先 update_node
 - 连边克制：有 root_goal_id 时，constraint/preference/fact/belief 可以连到 root_goal_id
