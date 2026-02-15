@@ -85,6 +85,8 @@ const GENERIC_RESOURCE_HINT_RE = /预算|经费|成本|资源|工时|算力|内�
 const GENERIC_TIMELINE_HINT_RE = /截止|deadline|里程碑|周期|排期|冲刺|迭代|时长|天|周|月|季度|timeline|schedule/i;
 const GENERIC_STAKEHOLDER_HINT_RE = /用户|客户|老板|团队|同事|角色|stakeholder|owner|reviewer|审批/i;
 const GENERIC_RISK_HINT_RE = /风险|故障|安全|合规|隐私|法律|阻塞|依赖|上线事故|risk|security|privacy|compliance/i;
+const DESTINATION_BAD_TOKEN_RE =
+  /我|你|他|她|我们|时间|之外|之前|之后|必须|到场|安排|计划|pre|chi|会议|汇报|报告|论文|一天|两天|三天|四天|五天/i;
 
 type TopologyTuning = {
   lambdaSparsity: number;
@@ -159,14 +161,22 @@ function slotKeyOfNode(node: ConceptNode): string | null {
   }
   if ((node.type === "fact" || node.type === "constraint") && /^(?:城市时长|停留时长)[:：]\s*.+\s+[0-9]{1,3}\s*天$/.test(s)) {
     const m = s.match(/^(?:城市时长|停留时长)[:：]\s*(.+?)\s+([0-9]{1,3})\s*天$/);
-    const city = normalizePlaceToken(m?.[1] || "");
+    const rawCity = cleanText(m?.[1] || "");
+    if (!rawCity) return null;
+    if (DESTINATION_BAD_TOKEN_RE.test(rawCity)) return null;
+    if (/[A-Za-z]/.test(rawCity) && /[\u4e00-\u9fff]/.test(rawCity)) return null;
+    const city = normalizePlaceToken(rawCity);
     if (city) return `slot:duration_city:${city}`;
     return "slot:duration_city:unknown";
   }
   if (node.type === "fact" && /^同行人数[:：]\s*[0-9]{1,3}\s*人$/.test(s)) return "slot:people";
   if (node.type === "fact" && /^目的地[:：]\s*.+$/.test(s)) {
     const m = s.match(/^目的地[:：]\s*(.+)$/);
-    const city = normalizePlaceToken(m?.[1] || "");
+    const rawCity = cleanText(m?.[1] || "");
+    if (!rawCity) return null;
+    if (DESTINATION_BAD_TOKEN_RE.test(rawCity)) return null;
+    if (/[A-Za-z]/.test(rawCity) && /[\u4e00-\u9fff]/.test(rawCity)) return null;
+    const city = normalizePlaceToken(rawCity);
     if (city) return `slot:destination:${city}`;
     return "slot:destination:unknown";
   }
@@ -209,20 +219,26 @@ function chooseDurationTotalWinner(nodes: ConceptNode[], touched: Set<string>): 
   return nodes
     .slice()
     .sort((a, b) => {
-      const daysDiff = durationDaysOfNode(b) - durationDaysOfNode(a);
-      if (daysDiff !== 0) return daysDiff;
+      const touchScore = (touched.has(b.id) ? 1 : 0) - (touched.has(a.id) ? 1 : 0);
+      if (touchScore !== 0) return touchScore;
+
+      const statusScore = (b.status === "confirmed" ? 1 : 0) - (a.status === "confirmed" ? 1 : 0);
+      if (statusScore !== 0) return statusScore;
+
+      const confScore = (Number(b.confidence) || 0) - (Number(a.confidence) || 0);
+      if (confScore !== 0) return confScore;
+
+      const impScore = (Number(b.importance) || 0) - (Number(a.importance) || 0);
+      if (impScore !== 0) return impScore;
+
       const explicitTotalScore =
         (/^总行程时长[:：]/.test(cleanText(b.statement)) ? 1 : 0) -
         (/^总行程时长[:：]/.test(cleanText(a.statement)) ? 1 : 0);
       if (explicitTotalScore !== 0) return explicitTotalScore;
-      const statusScore = (b.status === "confirmed" ? 1 : 0) - (a.status === "confirmed" ? 1 : 0);
-      if (statusScore !== 0) return statusScore;
-      const confScore = (Number(b.confidence) || 0) - (Number(a.confidence) || 0);
-      if (confScore !== 0) return confScore;
-      const impScore = (Number(b.importance) || 0) - (Number(a.importance) || 0);
-      if (impScore !== 0) return impScore;
-      const touchScore = (touched.has(b.id) ? 1 : 0) - (touched.has(a.id) ? 1 : 0);
-      if (touchScore !== 0) return touchScore;
+
+      const daysDiff = durationDaysOfNode(b) - durationDaysOfNode(a);
+      if (daysDiff !== 0) return daysDiff;
+
       return cleanText(b.id).localeCompare(cleanText(a.id));
     })[0];
 }
@@ -338,6 +354,31 @@ function chooseRootGoal(nodesById: Map<string, ConceptNode>, touched: Set<string
       if (confScore !== 0) return confScore;
       return cleanText(a.statement).length - cleanText(b.statement).length;
     })[0];
+}
+
+function buildSyntheticGoalStatement(nodesById: Map<string, ConceptNode>): string {
+  const destinations: string[] = [];
+  let durationDays: number | null = null;
+
+  for (const n of nodesById.values()) {
+    const s = cleanText(n.statement);
+    const dm = s.match(/^目的地[:：]\s*(.+)$/);
+    if (dm?.[1]) {
+      const city = cleanText(dm[1]).slice(0, 20);
+      if (city && !destinations.includes(city)) destinations.push(city);
+    }
+    const tm = s.match(/^(?:总)?行程时长[:：]\s*([0-9]{1,3})\s*天$/);
+    if (tm?.[1]) {
+      const days = Number(tm[1]);
+      if (Number.isFinite(days) && days > 0) durationDays = Math.max(durationDays || 0, days);
+    }
+  }
+
+  const destinationPhrase = destinations.slice(0, 2).join("和");
+  if (destinationPhrase && durationDays) return `意图：去${destinationPhrase}旅游${durationDays}天`;
+  if (destinationPhrase) return `意图：去${destinationPhrase}旅游`;
+  if (durationDays) return `意图：制定${durationDays}天计划`;
+  return "意图：制定任务计划";
 }
 
 function tokenizeForSimilarity(text: string): Set<string> {
@@ -826,8 +867,56 @@ function rebalanceIntentTopology(
   touched: Set<string>
 ): boolean {
   let changed = false;
-  const rootGoal = chooseRootGoal(nodesById, touched);
-  if (!rootGoal) return false;
+
+  // Prune obviously malformed destination/duration nodes to keep topology stable.
+  for (const n of Array.from(nodesById.values())) {
+    const s = cleanText(n.statement);
+    const isBadDestination =
+      n.type === "fact" &&
+      /^目的地[:：]\s*(.+)$/.test(s) &&
+      (() => {
+        const raw = cleanText((s.match(/^目的地[:：]\s*(.+)$/)?.[1] || ""));
+        if (!raw) return true;
+        if (DESTINATION_BAD_TOKEN_RE.test(raw)) return true;
+        if (/[A-Za-z]/.test(raw) && /[\u4e00-\u9fff]/.test(raw)) return true;
+        return false;
+      })();
+    const isBadCityDuration =
+      (n.type === "fact" || n.type === "constraint") &&
+      /^(?:城市时长|停留时长)[:：]\s*(.+?)\s+[0-9]{1,3}\s*天$/.test(s) &&
+      (() => {
+        const raw = cleanText((s.match(/^(?:城市时长|停留时长)[:：]\s*(.+?)\s+[0-9]{1,3}\s*天$/)?.[1] || ""));
+        if (!raw) return true;
+        if (DESTINATION_BAD_TOKEN_RE.test(raw)) return true;
+        if (/[A-Za-z]/.test(raw) && /[\u4e00-\u9fff]/.test(raw)) return true;
+        return false;
+      })();
+
+    if (!isBadDestination && !isBadCityDuration) continue;
+
+    nodesById.delete(n.id);
+    changed = true;
+    for (const [eid, e] of edgesById.entries()) {
+      if (e.from === n.id || e.to === n.id) edgesById.delete(eid);
+    }
+  }
+
+  let rootGoal = chooseRootGoal(nodesById, touched);
+  if (!rootGoal) {
+    const synthetic: ConceptNode = {
+      id: `n_${randomUUID()}`,
+      type: "goal",
+      layer: "intent",
+      statement: buildSyntheticGoalStatement(nodesById),
+      status: "proposed",
+      confidence: 0.82,
+      importance: 0.8,
+    };
+    nodesById.set(synthetic.id, synthetic);
+    touched.add(synthetic.id);
+    changed = true;
+    rootGoal = synthetic;
+  }
   const rootId = rootGoal.id;
 
   for (const n of Array.from(nodesById.values())) {

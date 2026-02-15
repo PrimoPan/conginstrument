@@ -52,9 +52,6 @@ function hasRiskTags(tags: string[] | null | undefined): boolean {
 }
 
 export function inferNodeLayer(node: NodeLayerHint): NodeLayer {
-  const explicit = normalizeNodeLayer(node.layer);
-  if (explicit) return explicit;
-
   const type = cleanText(node.type).toLowerCase();
   const statement = cleanText(node.statement);
   const strength = cleanText(node.strength).toLowerCase();
@@ -63,7 +60,14 @@ export function inferNodeLayer(node: NodeLayerHint): NodeLayer {
   const tags = Array.isArray(node.tags) ? node.tags : [];
   const locked = !!node.locked;
 
-  if (type === "goal" || /^意图[:：]/.test(statement) || /^intent[:：]/i.test(statement)) {
+  // Goal is always the intent layer.
+  if (type === "goal") return "intent";
+
+  // Respect explicit layer except the invalid case: non-goal cannot be intent.
+  const explicit = normalizeNodeLayer(node.layer);
+  if (explicit && explicit !== "intent") return explicit;
+
+  if (/^意图[:：]/.test(statement) || /^intent[:：]/i.test(statement)) {
     return "intent";
   }
 

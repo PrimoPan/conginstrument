@@ -30,6 +30,10 @@ const PREFERENCE_MARKER_RE = /喜欢|更喜欢|偏好|倾向|感兴趣|想看|�
 const ITINERARY_NOISE_RE = /第[一二三四五六七八九十0-9]+天|上午|中午|下午|晚上|行程|建议|入住|晚餐|午餐|景点|游览|返回|酒店|餐馆|安排如下/i;
 const STRUCTURED_PREFIX_RE =
   /^(意图|目的地|同行人数|预算(?:上限)?|行程时长|总行程时长|会议时长|城市时长|停留时长|会议关键日|关键会议日|论文汇报日|健康约束|景点偏好|活动偏好|住宿偏好|交通偏好|饮食偏好|人数|时长)[:：]/;
+const DESTINATION_NOISE_RE =
+  /之外|其他时间|这座城|这座城市|城市里|到场|pre|汇报|报告|论文|会议|参加一个|必须|想逛|逛一逛|计划|安排|一天|两天|三天|四天|五天|六天|七天|八天|之前|之后|然后|并且|但是|同时/i;
+const PLACE_STOPWORD_RE =
+  /我|你|他|她|我们|你们|他们|除了|其他|时间|必须|到场|之前|之后|然后|安排|计划|参加|会议|汇报|报告|pre|chi|天|行程/i;
 
 function cleanStatement(s: any, maxLen = 180) {
   return String(s ?? "")
@@ -190,6 +194,13 @@ function mergeTextSegments(parts: string[]) {
     out.push(s);
   }
   return out.join("\n");
+}
+
+function statementDedupKey(statement: string, type?: string) {
+  const core = normalizeForMatch(statement);
+  if (!core) return "";
+  const t = String(type || "").trim().toLowerCase();
+  return t ? `${t}|${core}` : core;
 }
 
 type BudgetMatch = { value: number; evidence: string; index: number };
@@ -462,7 +473,11 @@ function extractDurationCandidates(text: string): DurationCandidate[] {
   return out;
 }
 
-function inferDurationFromText(text: string): { days: number; evidence: string; strength: number } | null {
+function inferDurationFromText(
+  text: string,
+  opts?: { historyMode?: boolean }
+): { days: number; evidence: string; strength: number } | null {
+  const historyMode = !!opts?.historyMode;
   const durationCandidates = extractDurationCandidates(text);
   const dateMentions = parseDateMentions(text);
   const uniqueDateMentions = dateMentions.filter(
@@ -513,7 +528,7 @@ function inferDurationFromText(text: string): { days: number; evidence: string; 
   const segmentMax = durationCandidates
     .filter((x) => x.kind === "segment")
     .sort((a, b) => b.days - a.days || b.index - a.index)[0];
-  if (meetingMax && segmentMax) {
+  if (!historyMode && meetingMax && segmentMax) {
     consider(
       meetingMax.days + segmentMax.days,
       `${segmentMax.evidence} + ${meetingMax.evidence}`,
@@ -521,7 +536,7 @@ function inferDurationFromText(text: string): { days: number; evidence: string; 
     );
   }
 
-  if (uniqueDateMentions.length >= 2) {
+  if (!historyMode && uniqueDateMentions.length >= 2) {
     const ordinals = uniqueDateMentions.map((d) => d.ordinal);
     const minOrdinal = Math.min(...ordinals);
     const maxOrdinal = Math.max(...ordinals);
@@ -533,7 +548,7 @@ function inferDurationFromText(text: string): { days: number; evidence: string; 
     }
   }
 
-  if (uniqueDateMentions.length >= 1) {
+  if (!historyMode && uniqueDateMentions.length >= 1) {
     const earliest = uniqueDateMentions.slice().sort((a, b) => a.ordinal - b.ordinal)[0];
     const confRe =
       /([0-9]{1,2})月([0-9]{1,2})日[\s\S]{0,40}?([0-9一二三四五六七八九十两]{1,3})\s*(天|周|星期)[\s\S]{0,20}?(学术会议|会议|开会|chi|conference|workshop)/gi;
@@ -615,6 +630,9 @@ function extractCriticalPresentationRequirement(text: string): { days: number; r
 function normalizeDestination(raw: string): string {
   let s = cleanStatement(raw, 24);
   s = s.replace(/^(在|于|到|去|从|飞到|前往|抵达)\s*/i, "");
+  s = s.replace(/^(我想|想|想去|想到|想逛|逛一逛|逛逛|逛|游览|游玩|探索|体验)\s*/i, "");
+  s = s.replace(/(这座城市|这座城|这座|城市|城区|城)$/i, "");
+  s = s.replace(/(之外|之内|以内|以内地区)$/i, "");
   s = s.replace(/(参加|参会|开会|会议|chi|conference|workshop|summit|论坛|峰会)$/i, "");
   s = s.replace(/省/g, "").replace(/市/g, "");
   s = s.replace(/^(江苏|浙江|广东|山东|四川|云南|福建|安徽|江西|河北|河南|湖北|湖南|广西|海南|黑龙江|吉林|辽宁|山西|陕西|甘肃|青海|贵州|内蒙古|宁夏|新疆|西藏|北京|上海|天津|重庆)/, "$1");
@@ -626,10 +644,14 @@ function normalizeDestination(raw: string): string {
 function isLikelyDestinationCandidate(x: string): boolean {
   const s = normalizeDestination(x);
   if (!s) return false;
-  if (s.length < 2 || s.length > 18) return false;
+  if (s.length < 2 || s.length > 16) return false;
   if (!/^[A-Za-z\u4e00-\u9fff]+$/.test(s)) return false;
+  if (DESTINATION_NOISE_RE.test(s)) return false;
+  if (PLACE_STOPWORD_RE.test(s)) return false;
+  if (/[A-Za-z]/.test(s) && /[\u4e00-\u9fff]/.test(s)) return false;
+  if (/^[A-Za-z]+$/.test(s) && s.length <= 2) return false;
   if (
-    /心脏|母亲|父亲|家人|预算|人数|行程|计划|注意|高强度|旅行时|旅游时|需要|限制|不能|安排|在此之前|此前|之前|之后|然后|再从|我会|我要|参会|参加|开会|会议|飞到|出发|机场|航班/i.test(
+    /心脏|母亲|父亲|家人|预算|人数|行程|计划|注意|高强度|旅行时|旅游时|需要|限制|不能|安排|在此之前|此前|之前|之后|然后|再从|我会|我要|参会|参加|开会|会议|飞到|出发|机场|航班|汇报|论文|报告/i.test(
       s
     )
   ) {
@@ -657,8 +679,14 @@ function extractDestinationList(text: string): Array<{ city: string; evidence: s
     push(m[2], m[0] || m[2], Number(m.index) || 0);
   }
 
-  const goRe = /(?:去|到|前往|飞到|抵达)\s*([A-Za-z\u4e00-\u9fff]{2,20}?)(?=参加|参会|开会|会议|玩|旅游|旅行|度假|[，。,；;！!？?\s]|$)/gi;
+  const goRe = /(?:去|到|前往|飞到|抵达)\s*([A-Za-z\u4e00-\u9fff]{2,14}?)(?=参加|参会|开会|会议|玩|旅游|旅行|度假|逛|游|[，。,；;！!？?\s]|$)/gi;
   for (const m of text.matchAll(goRe)) {
+    if (!m?.[1]) continue;
+    push(m[1], m[1], Number(m.index) || 0);
+  }
+
+  const visitRe = /(?:逛|游览|游玩|探索|体验)\s*(?:一逛|一下|一圈|一遍)?\s*([A-Za-z\u4e00-\u9fff]{2,14})(?:这座城市|这座城|城市|城)?/gi;
+  for (const m of text.matchAll(visitRe)) {
     if (!m?.[1]) continue;
     push(m[1], m[1], Number(m.index) || 0);
   }
@@ -691,7 +719,7 @@ function extractDestinationList(text: string): Array<{ city: string; evidence: s
 
 function extractCityDurationSegments(text: string): Array<{ city: string; days: number; evidence: string; kind: "travel" | "meeting"; index: number }> {
   const out: Array<{ city: string; days: number; evidence: string; kind: "travel" | "meeting"; index: number }> = [];
-  const re = /(?:在)?([^\s，。,；;！!？?\d]{2,16})[^\n。；;，,]{0,12}?([0-9一二三四五六七八九十两]{1,3})\s*天/g;
+  const re = /(?:在|于|到|去)?([^\s，。,；;！!？?\d]{2,14})[^\n。；;，,]{0,10}?([0-9一二三四五六七八九十两]{1,3})\s*天/g;
   for (const m of text.matchAll(re)) {
     const rawCity = m?.[1] || "";
     const rawDays = m?.[2] || "";
@@ -699,6 +727,7 @@ function extractCityDurationSegments(text: string): Array<{ city: string; days: 
     const days = parseCnInt(rawDays);
     if (!city || !days || days <= 0 || days > 60) continue;
     if (!isLikelyDestinationCandidate(city)) continue;
+    if (DESTINATION_NOISE_RE.test(city) || PLACE_STOPWORD_RE.test(city)) continue;
 
     const idx = Number(m.index) || 0;
     const right = Math.min(text.length, idx + String(m[0] || "").length + 26);
@@ -724,7 +753,7 @@ function extractCityDurationSegments(text: string): Array<{ city: string; days: 
     const city = normalizeDestination(m[4] || "");
     if (!Number.isFinite(startDay) || !Number.isFinite(endDay)) continue;
     if (!city || !isLikelyDestinationCandidate(city)) continue;
-    let days = endDay - startDay;
+    let days = endDay - startDay + 1;
     if (days <= 0) days += 31;
     if (days <= 0 || days > 31) continue;
     const action = String(m[5] || "");
@@ -816,6 +845,8 @@ type IntentSignals = {
   durationDays?: number;
   durationEvidence?: string;
   durationStrength?: number;
+  hasTemporalAnchor?: boolean;
+  hasDurationUpdateCue?: boolean;
   cityDurations?: Array<{
     city: string;
     days: number;
@@ -878,9 +909,11 @@ function pickHealthClause(userText: string): string | undefined {
   return hit || undefined;
 }
 
-function extractIntentSignals(userText: string): IntentSignals {
+function extractIntentSignals(userText: string, opts?: { historyMode?: boolean }): IntentSignals {
   const text = String(userText || "");
   const out: IntentSignals = {};
+  out.hasTemporalAnchor = /([0-9]{1,2})月([0-9]{1,2})日?(?:\s*[-~到至]\s*([0-9]{1,2})日?)?/.test(text);
+  out.hasDurationUpdateCue = /改成|改为|更新|调整|变为|变成|改到|上调|下调|放宽|改成了|改成到|从.*改到/i.test(text);
 
   const peopleM =
     text.match(/(?:一家|全家|我们|同行)[^\d一二三四五六七八九十两]{0,4}([0-9一二三四五六七八九十两]{1,3})\s*(?:口|人)/) ||
@@ -914,7 +947,7 @@ function extractIntentSignals(userText: string): IntentSignals {
     }
   }
 
-  const duration = inferDurationFromText(text);
+  const duration = inferDurationFromText(text, { historyMode: !!opts?.historyMode });
   if (duration?.days) {
     out.durationDays = duration.days;
     out.durationEvidence = duration.evidence;
@@ -939,8 +972,11 @@ function extractIntentSignals(userText: string): IntentSignals {
     }
 
     const sumDays = citySegments.reduce((acc, x) => acc + x.days, 0);
+    const distinctCities = new Set(citySegments.map((x) => x.city)).size;
     const hasTravelSegment = citySegments.some((x) => x.kind === "travel");
-    const shouldPromoteAsTotal = hasTravelSegment || citySegments.length >= 2 || sumDays >= 3;
+    const hasExplicitTotalCue = /(总共|一共|全程|总计|整体|整个(?:行程|旅行)?|总行程|行程时长)/.test(text);
+    const shouldPromoteAsTotal =
+      hasExplicitTotalCue || (distinctCities >= 2 && hasTravelSegment);
     if (sumDays > 0 && shouldPromoteAsTotal) {
       const segmentStrength = citySegments.some((x) => x.kind === "meeting") ? 0.9 : 0.8;
       const shouldTakeSegments =
@@ -1013,6 +1049,7 @@ function mergeSignalsWithLatest(history: IntentSignals, latest: IntentSignals): 
       const city = normalizeDestination(seg?.city || "");
       const days = Number(seg?.days) || 0;
       if (!city || days <= 0 || days > 60) continue;
+      if (!isLikelyDestinationCandidate(city)) continue;
       const cur = map.get(city);
       const kind: "travel" | "meeting" = seg?.kind === "meeting" ? "meeting" : "travel";
       const cand = {
@@ -1039,7 +1076,18 @@ function mergeSignalsWithLatest(history: IntentSignals, latest: IntentSignals): 
     out.destinationEvidence = latest.destinationEvidence || out.destinationEvidence;
     out.destinations = mergeDestinations(out.destinations, [latest.destination]);
   }
-  out.cityDurations = mergeCityDurations(out.cityDurations, latest.cityDurations);
+  const latestHasSnapshotDuration =
+    latest.durationDays != null &&
+    (!!latest.hasTemporalAnchor || !!latest.hasDurationUpdateCue || (latest.cityDurations?.length || 0) > 0);
+
+  if (latest.cityDurations?.length) {
+    out.cityDurations = latestHasSnapshotDuration
+      ? mergeCityDurations(undefined, latest.cityDurations)
+      : mergeCityDurations(out.cityDurations, latest.cityDurations);
+  } else {
+    out.cityDurations = mergeCityDurations(out.cityDurations, latest.cityDurations);
+  }
+
   if (latest.criticalPresentation) {
     out.criticalPresentation = latest.criticalPresentation;
   }
@@ -1047,11 +1095,18 @@ function mergeSignalsWithLatest(history: IntentSignals, latest: IntentSignals): 
   if (latest.durationDays != null) {
     const latestStrength = Number(latest.durationStrength) || 0.55;
     const historyStrength = Number(out.durationStrength) || 0;
+    const tinyCriticalOnly =
+      !!latest.criticalPresentation &&
+      latest.durationDays <= 2 &&
+      !latest.hasTemporalAnchor &&
+      !latest.hasDurationUpdateCue;
     const shouldUseLatest =
-      out.durationDays == null ||
-      latestStrength >= 0.9 ||
-      latestStrength + 0.08 >= historyStrength ||
-      latest.durationDays > (out.durationDays || 0);
+      !tinyCriticalOnly &&
+      (out.durationDays == null ||
+        latestHasSnapshotDuration ||
+        latestStrength >= 0.9 ||
+        latest.durationDays > (out.durationDays || 0) ||
+        latestStrength + 0.06 >= historyStrength);
 
     if (shouldUseLatest) {
       out.durationDays = latest.durationDays;
@@ -1067,8 +1122,12 @@ function mergeSignalsWithLatest(history: IntentSignals, latest: IntentSignals): 
 
   if (out.cityDurations?.length) {
     const segSum = out.cityDurations.reduce((acc, x) => acc + (Number(x.days) || 0), 0);
+    const distinctCities = new Set(out.cityDurations.map((x) => x.city)).size;
+    const hasTravelSegment = out.cityDurations.some((x) => x.kind === "travel");
+    const canPromoteBySegments = distinctCities >= 2 && hasTravelSegment;
     const segStrength = out.cityDurations.some((x) => x.kind === "meeting") ? 0.9 : 0.82;
     const shouldTakeSeg =
+      canPromoteBySegments &&
       segSum > 0 &&
       (!out.durationDays ||
         segSum > out.durationDays ||
@@ -1106,7 +1165,7 @@ function mergeSignalsWithLatest(history: IntentSignals, latest: IntentSignals): 
 }
 
 function extractIntentSignalsWithRecency(historyText: string, latestUserText: string): IntentSignals {
-  const fromHistory = extractIntentSignals(historyText);
+  const fromHistory = extractIntentSignals(historyText, { historyMode: true });
   const fromLatest = extractIntentSignals(latestUserText);
   return mergeSignalsWithLatest(fromHistory, fromLatest);
 }
@@ -1142,7 +1201,7 @@ function buildHeuristicIntentOps(
   const pushNode = (node: any): string | null => {
     const statement = cleanStatement(node.statement);
     if (!statement) return null;
-    const key = normalizeForMatch(statement);
+    const key = statementDedupKey(statement, node?.type);
     if (!key || knownStmt.has(key)) return null;
     knownStmt.add(key);
     const id = makeTempId("n");
@@ -1175,23 +1234,32 @@ function buildHeuristicIntentOps(
     });
   };
 
-  // 无 root 且出现可识别目标信号时，先补一个目标节点。
-  if (!rootId && canonicalIntent) {
-    rootId = pushNode({
-      type: "goal",
-      statement: canonicalIntent,
-      status: "proposed",
-      confidence: 0.9,
-      importance: 0.85,
-      evidenceIds: [
-        ...(signals.destinationEvidences || []),
-        signals.destinationEvidence,
-        signals.durationEvidence,
-        signals.durationUnknownEvidence,
-        signals.budgetEvidence,
-        signals.peopleEvidence,
-      ].filter((x): x is string => Boolean(x)),
-    });
+  // 无 root 时强制补一个目标节点，避免图断连。
+  if (!rootId) {
+    const fallbackIntent = canonicalIntent || "意图：制定旅行计划";
+    const existingGoal = (graph.nodes || []).find(
+      (n: any) => n?.type === "goal" && normalizeForMatch(n.statement) === normalizeForMatch(fallbackIntent)
+    );
+    if (existingGoal?.id) {
+      rootId = existingGoal.id;
+    } else {
+      rootId = pushNode({
+        type: "goal",
+        statement: fallbackIntent,
+        layer: "intent",
+        status: "proposed",
+        confidence: 0.9,
+        importance: 0.85,
+        evidenceIds: [
+          ...(signals.destinationEvidences || []),
+          signals.destinationEvidence,
+          signals.durationEvidence,
+          signals.durationUnknownEvidence,
+          signals.budgetEvidence,
+          signals.peopleEvidence,
+        ].filter((x): x is string => Boolean(x)),
+      });
+    }
   }
   if (rootId && canonicalIntent) {
     const rootNode = (graph.nodes || []).find((n: any) => n.id === rootId);
@@ -1676,14 +1744,14 @@ function postProcessPatch(
   const canonicalIntent = buildTravelIntentStatement(signals, signalText);
   const existingByStmt = new Map<string, string>();
   for (const n of graph.nodes || []) {
-    const key = normalizeForMatch(n.statement);
+    const key = statementDedupKey(n.statement, (n as any).type);
     if (key) existingByStmt.set(key, n.id);
   }
 
   const knownStmt = new Set<string>(existingByStmt.keys());
   for (const op of enriched.ops || []) {
     if (op?.op === "add_node" && typeof op?.node?.statement === "string") {
-      const key = normalizeForMatch(op.node.statement);
+      const key = statementDedupKey(op.node.statement, op.node.type);
       if (key) knownStmt.add(key);
     }
   }
@@ -1827,7 +1895,7 @@ function postProcessPatch(
 
   for (const op of sparsePrepped) {
     if (op?.op === "add_node" && typeof op?.node?.statement === "string") {
-      const key = normalizeForMatch(op.node.statement);
+      const key = statementDedupKey(op.node.statement, op.node.type);
       if (!key) continue;
       const existedId = existingByStmt.get(key);
       if (existedId) {
@@ -1935,6 +2003,8 @@ const GRAPH_SYSTEM_PROMPT = `
 - 若出现“喜欢/更喜欢/不感兴趣”这类景点偏好，优先生成 preference；若用户明确“硬性要求”，可升为 constraint（通常 severity=medium）。
 - statement 保持简洁，不要加“用户补充：/用户任务：”前缀。
 - 旅行类请求优先拆分成原子节点：人数、目的地、时长、预算、健康限制、住宿偏好，不要把所有信息塞进一个节点。
+- 目的地节点只能是地名（城市/地区名），禁止写成描述短语（如“其他时间我想逛…”）。
+- “必须留一天做某事/发表/见人”属于关键约束，不等于总行程时长，不能覆盖 total duration。
 - 避免把“第一天/第二天/详细行程建议”这类叙事文本直接建成节点。
 - 对同一槽位（预算/时长/人数/目的地/住宿偏好）优先 update 旧节点，不要重复 add。
 - 意图（goal）作为根节点，子节点尽量与根节点连通，避免孤立节点。
