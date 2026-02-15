@@ -51,8 +51,12 @@ function mergeTags(a?: string[], b?: string[]) {
   return set.size ? Array.from(set).slice(0, 8) : undefined;
 }
 
-function mergeEvidence(a?: string[], b?: string[]) {
-  const set = new Set<string>([...(a || []), ...(b || [])].map((x) => cleanStatement(x, 60)).filter(Boolean));
+function mergeEvidence(a?: Array<string | null | undefined>, b?: Array<string | null | undefined>) {
+  const set = new Set<string>(
+    [...(a || []), ...(b || [])]
+      .map((x) => cleanStatement(x, 60))
+      .filter((x): x is string => Boolean(x))
+  );
   return set.size ? Array.from(set).slice(0, 6) : undefined;
 }
 
@@ -470,7 +474,7 @@ function buildHeuristicIntentOps(
         signals.durationUnknownEvidence,
         signals.budgetEvidence,
         signals.peopleEvidence,
-      ].filter(Boolean),
+      ].filter((x): x is string => Boolean(x)),
     });
   }
   if (rootId && canonicalIntent) {
@@ -491,7 +495,7 @@ function buildHeuristicIntentOps(
               signals.durationUnknownEvidence,
               signals.budgetEvidence,
               signals.peopleEvidence,
-            ].filter(Boolean)
+            ].filter((x): x is string => Boolean(x))
           ),
           sourceMsgIds: mergeEvidence(rootNode.sourceMsgIds, ["latest_user"]),
         },
@@ -697,7 +701,9 @@ function fallbackPatch(graph: CDG, userText: string, reason: string): GraphPatch
             statement: canonicalIntent || short || "未提供任务",
             status: "proposed",
             confidence: canonicalIntent ? 0.85 : 0.55,
-            evidenceIds: [signals.destinationEvidence, signals.durationEvidence, signals.budgetEvidence, signals.peopleEvidence].filter(Boolean),
+            evidenceIds: [signals.destinationEvidence, signals.durationEvidence, signals.budgetEvidence, signals.peopleEvidence].filter(
+              (x): x is string => Boolean(x)
+            ),
             sourceMsgIds: ["latest_user"],
           },
         },
@@ -723,7 +729,9 @@ function fallbackPatch(graph: CDG, userText: string, reason: string): GraphPatch
           severity: risk?.severity,
           importance: risk?.importance,
           tags: risk?.tags,
-          evidenceIds: [signals.healthEvidence, signals.budgetEvidence, signals.durationEvidence, signals.destinationEvidence, signals.peopleEvidence].filter(Boolean),
+          evidenceIds: [signals.healthEvidence, signals.budgetEvidence, signals.durationEvidence, signals.destinationEvidence, signals.peopleEvidence].filter(
+            (x): x is string => Boolean(x)
+          ),
           sourceMsgIds: ["latest_user"],
         },
       },
