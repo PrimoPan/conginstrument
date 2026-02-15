@@ -4,7 +4,7 @@ import OpenAI from "openai";
 async function main() {
   const apiKey = process.env.OPENAI_API_KEY;
   const baseURL = process.env.OPENAI_BASE_URL;
-  const model = process.env.MODEL || "gpt-5-mini"; // Model you choose
+  const model = process.env.MODEL || "gpt-4o"; // Model you choose
 
   if (!apiKey) throw new Error("Miss OPENAI_API_KEY（check .env）"); //Primo Check ENV
   if (!baseURL) throw new Error("Miss OPENAI_BASE_URL（check .env）"); //Primo Check ENV

@@ -56,7 +56,7 @@ curl http://localhost:3001/healthz
 | `MONGO_DB` | 否 | `conginstrument` | 数据库名 |
 | `OPENAI_API_KEY` | 是 | 空 | LLM API Key |
 | `OPENAI_BASE_URL` | 是 | 空 | OpenAI/兼容网关地址 |
-| `MODEL` | 否 | `gpt-5-mini` | 对话模型 |
+| `MODEL` | 否 | `gpt-4o` | 对话模型 |
 | `SESSION_TTL_DAYS` | 否 | `7` | session 过期天数 |
 | `CI_STREAM_MODE` | 否 | `pseudo` | `pseudo`（伪流）/`upstream`（上游真流） |
 | `CI_GRAPH_MODEL` | 否 | 与 `MODEL` 相同 | 建图模型 |
