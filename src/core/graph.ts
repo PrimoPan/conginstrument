@@ -72,12 +72,6 @@ const ALLOWED_NODE_TYPES = new Set<ConceptType>([
 const ALLOWED_EDGE_TYPES = new Set<EdgeType>(["enable", "constraint", "determine", "conflicts_with"]);
 const HEALTH_RE =
   /心脏|心肺|冠心|心血管|高血压|糖尿病|哮喘|慢性病|手术|过敏|孕|老人|老年|儿童|行动不便|不能爬山|不能久走|危险|安全|急救|摔倒|health|medical|heart|cardiac|safety|risk/i;
-const PRIMARY_SLOT_KEYS = new Set<string>([
-  "slot:people",
-  "slot:destination",
-  "slot:duration",
-  "slot:budget",
-]);
 const BUDGET_HINT_RE = /预算|花费|费用|开销|贵|便宜|酒店|住宿|房费|星级/i;
 const DURATION_HINT_RE = /时长|几天|多少天|周|日程|行程|节奏/i;
 const DESTINATION_HINT_RE = /目的地|城市|路线|交通|高铁|飞机|景点|昆明|大理|丽江|香格里拉|云南|江苏|盐城/i;
@@ -94,6 +88,34 @@ type TopologyTuning = {
   maxAStarSteps: number;
   transitiveCutoff: number;
 };
+
+function normalizePlaceToken(raw: string): string {
+  return cleanText(raw)
+    .replace(/[省市县区州郡]/g, "")
+    .replace(/[\s·•\-_/]+/g, "")
+    .toLowerCase();
+}
+
+function slotFamily(slot: string | null | undefined): string {
+  if (!slot) return "none";
+  if (slot.startsWith("slot:destination:")) return "destination";
+  if (slot.startsWith("slot:duration_city:")) return "duration_city";
+  if (slot === "slot:duration_total") return "duration_total";
+  if (slot === "slot:duration_meeting") return "duration_meeting";
+  if (slot === "slot:meeting_critical") return "meeting_critical";
+  if (slot === "slot:people") return "people";
+  if (slot === "slot:budget") return "budget";
+  if (slot === "slot:lodging") return "lodging";
+  if (slot === "slot:scenic_preference") return "scenic_preference";
+  if (slot === "slot:health") return "health";
+  if (slot === "slot:goal") return "goal";
+  return slot;
+}
+
+function isPrimarySlot(slot: string | null | undefined): boolean {
+  const f = slotFamily(slot);
+  return f === "people" || f === "destination" || f === "duration_total" || f === "budget";
+}
 
 function clamp01(x: any, d = 0.6) {
   const n = Number(x);
@@ -124,9 +146,22 @@ function slotKeyOfNode(node: ConceptNode): string | null {
 
   if (node.type === "goal") return "slot:goal";
   if (node.type === "constraint" && /^预算(?:上限)?[:：]\s*[0-9]{2,}\s*元?$/.test(s)) return "slot:budget";
-  if (node.type === "constraint" && /^行程时长[:：]\s*[0-9]{1,3}\s*天$/.test(s)) return "slot:duration";
+  if (node.type === "constraint" && /^(?:总)?行程时长[:：]\s*[0-9]{1,3}\s*天$/.test(s)) return "slot:duration_total";
+  if (node.type === "constraint" && /^会议时长[:：]\s*[0-9]{1,3}\s*天$/.test(s)) return "slot:duration_meeting";
+  if (node.type === "constraint" && /^(?:会议关键日|关键会议日|论文汇报日)[:：]\s*.+$/.test(s)) return "slot:meeting_critical";
+  if ((node.type === "fact" || node.type === "constraint") && /^(?:城市时长|停留时长)[:：]\s*.+\s+[0-9]{1,3}\s*天$/.test(s)) {
+    const m = s.match(/^(?:城市时长|停留时长)[:：]\s*(.+?)\s+([0-9]{1,3})\s*天$/);
+    const city = normalizePlaceToken(m?.[1] || "");
+    if (city) return `slot:duration_city:${city}`;
+    return "slot:duration_city:unknown";
+  }
   if (node.type === "fact" && /^同行人数[:：]\s*[0-9]{1,3}\s*人$/.test(s)) return "slot:people";
-  if (node.type === "fact" && /^目的地[:：]\s*.+$/.test(s)) return "slot:destination";
+  if (node.type === "fact" && /^目的地[:：]\s*.+$/.test(s)) {
+    const m = s.match(/^目的地[:：]\s*(.+)$/);
+    const city = normalizePlaceToken(m?.[1] || "");
+    if (city) return `slot:destination:${city}`;
+    return "slot:destination:unknown";
+  }
   if ((node.type === "preference" || node.type === "constraint") && /^景点偏好[:：]\s*.+$/.test(s)) return "slot:scenic_preference";
   if (
     (node.type === "preference" || node.type === "constraint") &&
@@ -144,11 +179,44 @@ function statementNumericHint(node: ConceptNode): number {
   const s = cleanText(node.statement);
   const budget = s.match(/^预算(?:上限)?[:：]\s*([0-9]{2,})\s*元?$/);
   if (budget?.[1]) return Number(budget[1]);
-  const duration = s.match(/^行程时长[:：]\s*([0-9]{1,3})\s*天$/);
-  if (duration?.[1]) return Number(duration[1]);
+  const duration = s.match(/^(?:总)?行程时长[:：]\s*([0-9]{1,3})\s*天$/);
+  if (duration?.[1]) return Number(duration[1]) + 1000;
+  const cityDuration = s.match(/^(?:城市时长|停留时长)[:：]\s*.+\s+([0-9]{1,3})\s*天$/);
+  if (cityDuration?.[1]) return Number(cityDuration[1]);
+  const meetingDuration = s.match(/^会议时长[:：]\s*([0-9]{1,3})\s*天$/);
+  if (meetingDuration?.[1]) return Number(meetingDuration[1]) + 300;
   const people = s.match(/^同行人数[:：]\s*([0-9]{1,3})\s*人$/);
   if (people?.[1]) return Number(people[1]);
   return 0;
+}
+
+function durationDaysOfNode(node: ConceptNode): number {
+  const s = cleanText(node.statement);
+  const m = s.match(/^(?:总)?行程时长[:：]\s*([0-9]{1,3})\s*天$/);
+  if (!m?.[1]) return 0;
+  return Number(m[1]) || 0;
+}
+
+function chooseDurationTotalWinner(nodes: ConceptNode[], touched: Set<string>): ConceptNode {
+  return nodes
+    .slice()
+    .sort((a, b) => {
+      const daysDiff = durationDaysOfNode(b) - durationDaysOfNode(a);
+      if (daysDiff !== 0) return daysDiff;
+      const explicitTotalScore =
+        (/^总行程时长[:：]/.test(cleanText(b.statement)) ? 1 : 0) -
+        (/^总行程时长[:：]/.test(cleanText(a.statement)) ? 1 : 0);
+      if (explicitTotalScore !== 0) return explicitTotalScore;
+      const statusScore = (b.status === "confirmed" ? 1 : 0) - (a.status === "confirmed" ? 1 : 0);
+      if (statusScore !== 0) return statusScore;
+      const confScore = (Number(b.confidence) || 0) - (Number(a.confidence) || 0);
+      if (confScore !== 0) return confScore;
+      const impScore = (Number(b.importance) || 0) - (Number(a.importance) || 0);
+      if (impScore !== 0) return impScore;
+      const touchScore = (touched.has(b.id) ? 1 : 0) - (touched.has(a.id) ? 1 : 0);
+      if (touchScore !== 0) return touchScore;
+      return cleanText(b.id).localeCompare(cleanText(a.id));
+    })[0];
 }
 
 function chooseSlotWinner(nodes: ConceptNode[], touched: Set<string>): ConceptNode {
@@ -188,9 +256,9 @@ function compactSingletonSlots(
   }
 
   let changed = false;
-  for (const nodes of slotToNodes.values()) {
+  for (const [slot, nodes] of slotToNodes.entries()) {
     if (nodes.length <= 1) continue;
-    const winner = chooseSlotWinner(nodes, touched);
+    const winner = slotFamily(slot) === "duration_total" ? chooseDurationTotalWinner(nodes, touched) : chooseSlotWinner(nodes, touched);
     for (const n of nodes) {
       if (n.id === winner.id) continue;
       nodesById.delete(n.id);
@@ -217,26 +285,30 @@ function edgeSignature(from: string, to: string, type: EdgeType): string {
 }
 
 function slotPriorityScore(slot: string | null | undefined): number {
-  if (slot === "slot:people") return 1;
-  if (slot === "slot:destination") return 2;
-  if (slot === "slot:duration") return 3;
-  if (slot === "slot:budget") return 4;
-  if (slot === "slot:lodging") return 5;
-  if (slot === "slot:scenic_preference") return 6;
+  const f = slotFamily(slot);
+  if (f === "people") return 1;
+  if (f === "destination") return 2;
+  if (f === "duration_total") return 3;
+  if (f === "budget") return 4;
+  if (f === "duration_city" || f === "duration_meeting" || f === "meeting_critical") return 5;
+  if (f === "lodging") return 6;
+  if (f === "scenic_preference") return 7;
   return 99;
 }
 
 function rootEdgeTypeForNode(node: ConceptNode, slot: string | null): EdgeType {
-  if (slot === "slot:budget" || slot === "slot:duration" || slot === "slot:health") return "constraint";
-  if (slot === "slot:lodging") {
+  const f = slotFamily(slot);
+  if (f === "budget" || f === "duration_total" || f === "health" || f === "meeting_critical") return "constraint";
+  if (f === "lodging") {
     if (node.type === "constraint" || node.strength === "hard") return "constraint";
     return "enable";
   }
-  if (slot === "slot:scenic_preference") {
+  if (f === "scenic_preference") {
     if (node.type === "constraint" || node.strength === "hard") return "constraint";
     return "enable";
   }
-  if (slot === "slot:people" || slot === "slot:destination") return "enable";
+  if (f === "people" || f === "destination") return "enable";
+  if (f === "duration_city" || f === "duration_meeting") return "determine";
   if (node.type === "constraint") return "constraint";
   if (node.type === "question") return "determine";
   return "enable";
@@ -296,26 +368,35 @@ function inferPreferredSlot(node: ConceptNode, healthNode: ConceptNode | null): 
   const s = cleanText(node.statement);
   if (!s) return null;
 
-  if (healthNode && (HEALTH_RE.test(s) || GENERIC_RISK_HINT_RE.test(s))) return "slot:health";
-  if (BUDGET_HINT_RE.test(s) || GENERIC_RESOURCE_HINT_RE.test(s)) return "slot:budget";
-  if (/(酒店|住宿|民宿|星级|房型|房费)/i.test(s)) return "slot:lodging";
-  if (DURATION_HINT_RE.test(s) || GENERIC_TIMELINE_HINT_RE.test(s)) return "slot:duration";
-  if (DESTINATION_HINT_RE.test(s)) return "slot:destination";
-  if (PEOPLE_HINT_RE.test(s) || GENERIC_STAKEHOLDER_HINT_RE.test(s)) return "slot:people";
-  if (node.type === "preference" || PREFERENCE_HINT_RE.test(s)) return "slot:scenic_preference";
-  if (node.type === "constraint" && GENERIC_RISK_HINT_RE.test(s)) return "slot:health";
+  if (/^(?:会议关键日|关键会议日|论文汇报日)[:：]/.test(s)) return "meeting_critical";
+  if (/^(?:城市时长|停留时长)[:：]/.test(s)) return "duration_city";
+  if (/^会议时长[:：]/.test(s)) return "duration_meeting";
+  if (healthNode && (HEALTH_RE.test(s) || GENERIC_RISK_HINT_RE.test(s))) return "health";
+  if (BUDGET_HINT_RE.test(s) || GENERIC_RESOURCE_HINT_RE.test(s)) return "budget";
+  if (/(酒店|住宿|民宿|星级|房型|房费)/i.test(s)) return "lodging";
+  if (DURATION_HINT_RE.test(s) || GENERIC_TIMELINE_HINT_RE.test(s)) return "duration_total";
+  if (DESTINATION_HINT_RE.test(s)) return "destination";
+  if (PEOPLE_HINT_RE.test(s) || GENERIC_STAKEHOLDER_HINT_RE.test(s)) return "people";
+  if (node.type === "preference" || PREFERENCE_HINT_RE.test(s)) return "scenic_preference";
+  if (node.type === "constraint" && GENERIC_RISK_HINT_RE.test(s)) return "health";
 
   return null;
 }
 
 function slotDistancePenalty(a: string | null, b: string | null): number {
   if (!a || !b) return 0.22;
-  if (a === b) return 0;
-  if ((a === "slot:budget" && b === "slot:lodging") || (a === "slot:lodging" && b === "slot:budget")) return 0.12;
-  if ((a === "slot:destination" && b === "slot:scenic_preference") || (a === "slot:scenic_preference" && b === "slot:destination")) {
+  const af = slotFamily(a);
+  const bf = slotFamily(b);
+  if (af === bf) return 0;
+  if ((af === "budget" && bf === "lodging") || (af === "lodging" && bf === "budget")) return 0.12;
+  if ((af === "destination" && bf === "scenic_preference") || (af === "scenic_preference" && bf === "destination")) {
     return 0.12;
   }
-  if ((a === "slot:health" && b === "slot:duration") || (a === "slot:duration" && b === "slot:health")) return 0.18;
+  if ((af === "health" && bf === "duration_total") || (af === "duration_total" && bf === "health")) return 0.18;
+  if ((af === "duration_city" && bf === "destination") || (af === "destination" && bf === "duration_city")) return 0.08;
+  if ((af === "duration_meeting" && bf === "duration_total") || (af === "duration_total" && bf === "duration_meeting")) return 0.1;
+  if ((af === "meeting_critical" && bf === "duration_meeting") || (af === "duration_meeting" && bf === "meeting_critical")) return 0.06;
+  if ((af === "meeting_critical" && bf === "destination") || (af === "destination" && bf === "meeting_critical")) return 0.12;
   return 0.32;
 }
 
@@ -331,7 +412,7 @@ function semanticPenalty(
   const lexical = 1 - sim;
   const slot = slotDistancePenalty(preferredSlot, anchorSlot);
   const typePenalty = node.type === anchor.type ? -0.06 : 0.06;
-  const riskPenalty = HEALTH_RE.test(node.statement) && anchorSlot !== "slot:health" ? 0.2 : 0;
+  const riskPenalty = HEALTH_RE.test(node.statement) && slotFamily(anchorSlot) !== "health" ? 0.2 : 0;
   return lexical + slot + typePenalty + riskPenalty;
 }
 
@@ -354,6 +435,35 @@ function buildUndirectedAdjacency(edges: ConceptEdge[]): Map<string, Array<{ to:
   return adj;
 }
 
+function pickBestSlotNode(slotNodes: Map<string, ConceptNode>, family: string, statement = ""): ConceptNode | null {
+  const candidates: Array<{ slot: string; node: ConceptNode }> = [];
+  for (const [slot, node] of slotNodes.entries()) {
+    if (slotFamily(slot) !== family) continue;
+    candidates.push({ slot, node });
+  }
+  if (!candidates.length) return null;
+
+  if (family === "destination") {
+    const text = cleanText(statement).toLowerCase();
+    const direct = candidates.find(({ slot }) => {
+      const city = slot.replace(/^slot:destination:/, "");
+      return city && text.includes(city);
+    });
+    if (direct) return direct.node;
+  }
+
+  return candidates
+    .slice()
+    .sort((a, b) => {
+      const ib = Number(b.node.importance) || 0;
+      const ia = Number(a.node.importance) || 0;
+      if (ib !== ia) return ib - ia;
+      const cb = Number(b.node.confidence) || 0;
+      const ca = Number(a.node.confidence) || 0;
+      return cb - ca;
+    })[0].node;
+}
+
 function chooseAnchorNodeIdAStar(params: {
   node: ConceptNode;
   rootId: string;
@@ -368,9 +478,9 @@ function chooseAnchorNodeIdAStar(params: {
   if (!statement) return rootId;
 
   const preferredSlot = inferPreferredSlot(node, healthNode);
-  if (preferredSlot && slotNodes.has(preferredSlot)) {
-    const direct = slotNodes.get(preferredSlot)!;
-    if (direct.id !== node.id) return direct.id;
+  if (preferredSlot) {
+    const direct = pickBestSlotNode(slotNodes, preferredSlot, statement);
+    if (direct && direct.id !== node.id) return direct.id;
   }
 
   const anchorIds = new Set<string>([rootId]);
@@ -782,11 +892,11 @@ function rebalanceIntentTopology(
 
   const healthNode = slotNodes.get("slot:health") || null;
   const primaryNodes = Array.from(slotNodes.entries())
-    .filter(([slot]) => PRIMARY_SLOT_KEYS.has(slot))
+    .filter(([slot]) => isPrimarySlot(slot))
     .sort((a, b) => slotPriorityScore(a[0]) - slotPriorityScore(b[0]))
     .map(([, node]) => node);
   const secondarySlotEntries = Array.from(slotNodes.entries()).filter(
-    ([slot]) => slot !== "slot:goal" && slot !== "slot:health" && !PRIMARY_SLOT_KEYS.has(slot)
+    ([slot]) => slot !== "slot:goal" && slot !== "slot:health" && !isPrimarySlot(slot)
   );
 
   for (const node of primaryNodes) {
@@ -797,7 +907,32 @@ function rebalanceIntentTopology(
   for (const [slot, node] of secondarySlotEntries) {
     let anchorId = rootId;
     if (slot === "slot:lodging" && slotNodes.get("slot:budget")) anchorId = slotNodes.get("slot:budget")!.id;
-    if (slot === "slot:scenic_preference" && slotNodes.get("slot:destination")) anchorId = slotNodes.get("slot:destination")!.id;
+    if (slotFamily(slot) === "scenic_preference") {
+      const bestDestination = pickBestSlotNode(slotNodes, "destination", node.statement);
+      if (bestDestination) anchorId = bestDestination.id;
+    }
+    if (slotFamily(slot) === "duration_city") {
+      const city = slot.replace(/^slot:duration_city:/, "");
+      const matchDestination = Array.from(slotNodes.entries()).find(
+        ([k]) => slotFamily(k) === "destination" && k.includes(city)
+      );
+      if (matchDestination?.[1]?.id) anchorId = matchDestination[1].id;
+      else {
+        const bestDestination = pickBestSlotNode(slotNodes, "destination", node.statement);
+        if (bestDestination) anchorId = bestDestination.id;
+      }
+    }
+    if (slotFamily(slot) === "duration_meeting" && slotNodes.get("slot:duration_total")) {
+      anchorId = slotNodes.get("slot:duration_total")!.id;
+    }
+    if (slotFamily(slot) === "meeting_critical") {
+      const meetingDuration = slotNodes.get("slot:duration_meeting");
+      if (meetingDuration) anchorId = meetingDuration.id;
+      else {
+        const bestDestination = pickBestSlotNode(slotNodes, "destination", node.statement);
+        if (bestDestination) anchorId = bestDestination.id;
+      }
+    }
     const edgeType: EdgeType = anchorId === rootId ? rootEdgeTypeForNode(node, slot) : "determine";
     putEdge(node.id, anchorId, edgeType, Math.max(0.68, (Number(node.confidence) || 0.6) * 0.88));
   }
@@ -846,13 +981,13 @@ function rebalanceIntentTopology(
       const sa = slotByNodeId.get(a.from);
       const sb = slotByNodeId.get(b.from);
       const scoreA =
-        (sa && PRIMARY_SLOT_KEYS.has(sa) ? 50 - slotPriorityScore(sa) : 0) +
+        (isPrimarySlot(sa) ? 50 - slotPriorityScore(sa) : 0) +
         (Number(na?.importance) || 0) * 20 +
         (Number(na?.confidence) || 0) * 10 +
         severityRank(na?.severity) * 4 +
         (na?.type === "constraint" ? 3 : 0);
       const scoreB =
-        (sb && PRIMARY_SLOT_KEYS.has(sb) ? 50 - slotPriorityScore(sb) : 0) +
+        (isPrimarySlot(sb) ? 50 - slotPriorityScore(sb) : 0) +
         (Number(nb?.importance) || 0) * 20 +
         (Number(nb?.confidence) || 0) * 10 +
         severityRank(nb?.severity) * 4 +

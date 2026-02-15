@@ -4,6 +4,6 @@ export const config = {
   mongoDb: process.env.MONGO_DB || "conginstrument",
   openaiKey: process.env.OPENAI_API_KEY || "",
   openaiBaseUrl: process.env.OPENAI_BASE_URL || "",
-  model: process.env.MODEL || "gpt-4o-mini",
+  model: process.env.MODEL || "gpt-5-mini",
   sessionTtlDays: Number(process.env.SESSION_TTL_DAYS || 7),
 };
