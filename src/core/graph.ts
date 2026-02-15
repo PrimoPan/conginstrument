@@ -1,4 +1,7 @@
 import { randomUUID } from "node:crypto";
+import { inferNodeLayer, normalizeNodeLayer } from "./nodeLayer.js";
+import type { NodeLayer } from "./nodeLayer.js";
+export type { NodeLayer } from "./nodeLayer.js";
 
 export type ConceptType = "goal" | "constraint" | "preference" | "belief" | "fact" | "question";
 export type Strength = "hard" | "soft";
@@ -10,6 +13,7 @@ export type Severity = "low" | "medium" | "high" | "critical";
 export type ConceptNode = {
   id: string;
   type: ConceptType;
+  layer?: NodeLayer;
   strength?: Strength;
   statement: string;
   status: Status;
@@ -100,9 +104,9 @@ function slotFamily(slot: string | null | undefined): string {
   if (!slot) return "none";
   if (slot.startsWith("slot:destination:")) return "destination";
   if (slot.startsWith("slot:duration_city:")) return "duration_city";
+  if (slot.startsWith("slot:meeting_critical:")) return "meeting_critical";
   if (slot === "slot:duration_total") return "duration_total";
   if (slot === "slot:duration_meeting") return "duration_meeting";
-  if (slot === "slot:meeting_critical") return "meeting_critical";
   if (slot === "slot:people") return "people";
   if (slot === "slot:budget") return "budget";
   if (slot === "slot:lodging") return "lodging";
@@ -148,7 +152,11 @@ function slotKeyOfNode(node: ConceptNode): string | null {
   if (node.type === "constraint" && /^预算(?:上限)?[:：]\s*[0-9]{2,}\s*元?$/.test(s)) return "slot:budget";
   if (node.type === "constraint" && /^(?:总)?行程时长[:：]\s*[0-9]{1,3}\s*天$/.test(s)) return "slot:duration_total";
   if (node.type === "constraint" && /^会议时长[:：]\s*[0-9]{1,3}\s*天$/.test(s)) return "slot:duration_meeting";
-  if (node.type === "constraint" && /^(?:会议关键日|关键会议日|论文汇报日)[:：]\s*.+$/.test(s)) return "slot:meeting_critical";
+  if (node.type === "constraint" && /^(?:会议关键日|关键会议日|论文汇报日)[:：]\s*.+$/.test(s)) {
+    const m = s.match(/^(?:会议关键日|关键会议日|论文汇报日)[:：]\s*(.+)$/);
+    const detail = normalizePlaceToken((m?.[1] || "").slice(0, 24));
+    return `slot:meeting_critical:${detail || "default"}`;
+  }
   if ((node.type === "fact" || node.type === "constraint") && /^(?:城市时长|停留时长)[:：]\s*.+\s+[0-9]{1,3}\s*天$/.test(s)) {
     const m = s.match(/^(?:城市时长|停留时长)[:：]\s*(.+?)\s+([0-9]{1,3})\s*天$/);
     const city = normalizePlaceToken(m?.[1] || "");
@@ -1077,11 +1085,23 @@ function normalizeNodeForInsert(n: ConceptNode): ConceptNode | null {
   const severity = normalizeSeverity((n as any).severity);
   const importance = n.importance != null ? clamp01(n.importance, 0.5) : undefined;
   const tags = normalizeTags((n as any).tags);
+  const layer =
+    normalizeNodeLayer((n as any).layer) ||
+    inferNodeLayer({
+      type,
+      statement,
+      strength,
+      severity,
+      importance,
+      tags,
+      locked: !!n.locked,
+    });
 
   return {
     ...n,
     id,
     type: type as ConceptType,
+    layer,
     statement,
     status,
     confidence: clamp01(n.confidence, 0.6),
@@ -1144,6 +1164,11 @@ function normalizeNodePatch(patch: Partial<ConceptNode>): Partial<ConceptNode> {
   if ((patch as any).tags != null) {
     const tags = normalizeTags((patch as any).tags);
     if (tags) (out as any).tags = tags;
+  }
+
+  if ((patch as any).layer != null) {
+    const layer = normalizeNodeLayer((patch as any).layer);
+    if (layer) (out as any).layer = layer;
   }
 
   // 预留字段（如果你未来想让 LLM 更新结构化信息）
@@ -1219,7 +1244,20 @@ export function applyPatchWithGuards(graph: CDG, patch: GraphPatch) {
       const patchNorm = normalizeNodePatch(op.patch || {});
       if (Object.keys(patchNorm).length === 0) continue;
 
-      nodesById.set(op.id, { ...cur, ...patchNorm });
+      const merged = { ...cur, ...patchNorm } as ConceptNode;
+      merged.layer =
+        normalizeNodeLayer((merged as any).layer) ||
+        inferNodeLayer({
+          type: merged.type,
+          statement: merged.statement,
+          strength: merged.strength,
+          severity: merged.severity,
+          importance: merged.importance,
+          tags: merged.tags,
+          locked: merged.locked,
+        });
+
+      nodesById.set(op.id, merged);
       touchedNodeIds.add(op.id);
       appliedOps.push({ ...op, patch: patchNorm });
       continue;

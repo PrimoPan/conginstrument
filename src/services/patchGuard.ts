@@ -1,5 +1,6 @@
 // src/services/patchGuard.ts
 import type { GraphPatch } from "../core/graph.js";
+import { normalizeNodeLayer } from "../core/nodeLayer.js";
 
 const DEBUG = process.env.CI_DEBUG_LLM === "1";
 function dlog(...args: any[]) {
@@ -215,6 +216,7 @@ export function sanitizeGraphPatchStrict(raw: any): GraphPatch {
         makeTempId("n");
 
       const severity = normalizeSeverity(node?.severity);
+      const layer = normalizeNodeLayer(node?.layer);
       const importance = node?.importance != null ? clamp01(node?.importance, 0.7) : undefined;
       const tags = normalizeTags(node?.tags);
       const evidenceIds = normalizeStringArray(node?.evidenceIds, 6);
@@ -229,6 +231,7 @@ export function sanitizeGraphPatchStrict(raw: any): GraphPatch {
           strength: node?.strength === "hard" || node?.strength === "soft" ? node.strength : undefined,
           status: typeof node?.status === "string" ? node.status : "proposed",
           confidence: clamp01(node?.confidence, 0.6),
+          layer,
           severity,
           importance,
           tags,
@@ -259,6 +262,9 @@ export function sanitizeGraphPatchStrict(raw: any): GraphPatch {
 
       const severity = normalizeSeverity((patchSrc as any).severity);
       if (severity) outPatch.severity = severity;
+
+      const layer = normalizeNodeLayer((patchSrc as any).layer);
+      if (layer) outPatch.layer = layer;
 
       if ((patchSrc as any).importance != null) {
         outPatch.importance = clamp01((patchSrc as any).importance, 0.7);

@@ -301,6 +301,7 @@ data: {"assistantText":"...","graphPatch":{"ops":[]},"graph":{"id":"65f1...","ve
 核心类型在：`src/core/graph.ts`
 
 - `ConceptNode.type`：`goal | constraint | preference | belief | fact | question`
+- `ConceptNode.layer`：`intent | requirement | preference | risk`
 - `ConceptNode.severity`：`low | medium | high | critical`
 - `ConceptEdge.type`：`enable | constraint | determine | conflicts_with`
 - `GraphPatch.ops`：`add_node | update_node | remove_node | add_edge | remove_edge`
@@ -310,6 +311,8 @@ data: {"assistantText":"...","graphPatch":{"ops":[]},"graph":{"id":"65f1...","ve
 1. `applyPatchWithGuards` 会做字段归一化、白名单校验、ID 重写。
 2. 默认禁删（除非 `CI_ALLOW_DELETE=1`）。
 3. 单值槽位会做自动压缩（例如预算/人数/目的地/时长，保留更优节点）。
+4. `layer` 可由 LLM 显式提供；若缺失，后端会根据节点语义自动推断：
+   `goal -> intent`，硬约束/结构化事实 -> `requirement`，偏好语义 -> `preference`，高风险/健康/安全语义 -> `risk`。
 
 ---
 
@@ -357,7 +360,8 @@ conginstrument/
    ├─ server/
    │  └─ config.ts
    ├─ core/
-   │  └─ graph.ts
+   │  ├─ graph.ts
+   │  └─ nodeLayer.ts
    ├─ db/
    │  └─ mongo.ts
    ├─ middleware/
@@ -395,6 +399,7 @@ conginstrument/
 | `src/routes/auth.ts` | 登录接口：用户 upsert + session 发放 |
 | `src/routes/conversations.ts` | 会话 CRUD、turn、SSE 流式接口 |
 | `src/core/graph.ts` | CDG 类型定义 + patch 应用守卫 + 槽位压缩 |
+| `src/core/nodeLayer.ts` | 节点四层分类（Intent/Requirement/Preference/Risk）的推断与归一化 |
 | `src/services/llmClient.ts` | OpenAI SDK 客户端实例 |
 | `src/services/chatResponder.ts` | 助手文本生成（非流式/伪流/真流） |
 | `src/services/graphUpdater.ts` | 图 patch 生成、启发式补全、后处理去重 |
@@ -499,6 +504,7 @@ Main types are in `src/core/graph.ts`:
 
 - `CDG`, `ConceptNode`, `ConceptEdge`, `GraphPatch`
 - Node types: `goal | constraint | preference | belief | fact | question`
+- Node layers: `intent | requirement | preference | risk`
 - Severity: `low | medium | high | critical`
 
 Patch application pipeline:
@@ -521,6 +527,7 @@ src/middleware/auth.ts       # auth middleware
 src/routes/auth.ts           # login route
 src/routes/conversations.ts  # conversation + turn + SSE routes
 src/core/graph.ts            # graph types and guarded patch apply
+src/core/nodeLayer.ts        # 4-layer node taxonomy inference and normalization
 src/services/llmClient.ts    # OpenAI client
 src/services/chatResponder.ts# assistant text generation
 src/services/graphUpdater.ts # graph patch generation + heuristics

@@ -2,6 +2,7 @@
 import { openai } from "./llmClient.js";
 import { config } from "../server/config.js";
 import type { CDG, GraphPatch, Severity, Strength } from "../core/graph.js";
+import { inferNodeLayer, normalizeNodeLayer } from "../core/nodeLayer.js";
 import { sanitizeGraphPatchStrict } from "./patchGuard.js";
 
 const DEBUG = process.env.CI_DEBUG_LLM === "1";
@@ -20,6 +21,9 @@ const RISK_HEALTH_RE =
 const HARD_CONSTRAINT_RE = /不能|不宜|避免|禁忌|必须|只能|不要|不可|不得|无法|不方便|不能够/i;
 const HARD_REQUIRE_RE = /硬性要求|一定要|必须|务必|绝对/i;
 const CRITICAL_PRESENTATION_RE = /汇报|报告|演讲|讲论文|宣讲|presentation|talk|keynote|答辩|讲座/i;
+const HARD_DAY_FORCE_RE = /强制|必须|务必|一定|不得缺席|需要留|要留|预留|留出|专门留|硬性/i;
+const HARD_DAY_ACTION_RE =
+  /用于|留给|安排|处理|办理|会见|见|拜访|探亲|参加|参会|汇报|报告|演讲|发表|讲论文|presentation|面签|考试|答辩|就医|看病|拍摄|采访|婚礼|葬礼|仪式|陪同/i;
 const CULTURE_PREF_RE = /人文|历史|文化|博物馆|古城|古镇|遗址|美术馆|展览|文博/i;
 const NATURE_TOPIC_RE = /自然景观|自然风光|爬山|徒步|森林|湿地|海边|户外/i;
 const PREFERENCE_MARKER_RE = /喜欢|更喜欢|偏好|倾向|感兴趣|想看|想去|不感兴趣|不喜欢|厌恶/i;
@@ -33,6 +37,11 @@ function cleanStatement(s: any, maxLen = 180) {
     .replace(/^(用户任务|任务|用户补充)[:：]\s*/i, "")
     .trim()
     .slice(0, maxLen);
+}
+
+function withNodeLayer<T extends Record<string, any>>(node: T): T {
+  const layer = normalizeNodeLayer(node?.layer) || inferNodeLayer(node);
+  return { ...node, layer } as T;
 }
 
 function inferRiskMeta(statement: string): { severity: Severity; importance: number; tags: string[] } | null {
@@ -96,6 +105,15 @@ function sentenceParts(text: string) {
     .split(/[。！？!?；;\n]/)
     .map((x) => cleanStatement(x, 120))
     .filter(Boolean);
+}
+
+function hasHardDayReservationSignal(text: string): boolean {
+  const s = cleanStatement(text, 160);
+  if (!s) return false;
+  const hasDay = /(一天|1天|一日|1日|[0-9一二三四五六七八九十两]{1,2}\s*天)/.test(s);
+  const hasForce = HARD_REQUIRE_RE.test(s) || HARD_CONSTRAINT_RE.test(s) || HARD_DAY_FORCE_RE.test(s);
+  const hasAction = HARD_DAY_ACTION_RE.test(s) || CRITICAL_PRESENTATION_RE.test(s);
+  return hasDay && hasForce && hasAction;
 }
 
 function normalizePreferenceStatement(raw: string) {
@@ -352,6 +370,47 @@ function parseDateMentions(text: string): DateMention[] {
       evidence: cleanStatement(m[0] || "", 24),
     });
   }
+
+  const rangeRe = /([0-9]{1,2})月([0-9]{1,2})日?\s*[-~到至]\s*([0-9]{1,2})日?/g;
+  for (const m of text.matchAll(rangeRe)) {
+    const month = Number(m[1]);
+    const day1 = Number(m[2]);
+    const day2 = Number(m[3]);
+    if (!Number.isFinite(month) || !Number.isFinite(day1) || !Number.isFinite(day2)) continue;
+    if (month < 1 || month > 12 || day1 < 1 || day1 > 31 || day2 < 1 || day2 > 31) continue;
+    const index = Number(m.index) || 0;
+    out.push({
+      month,
+      day: day1,
+      ordinal: month * 31 + day1,
+      index,
+      evidence: cleanStatement(`${month}月${day1}日`, 24),
+    });
+    out.push({
+      month,
+      day: day2,
+      ordinal: month * 31 + day2,
+      index: index + String(m[0] || "").length - 1,
+      evidence: cleanStatement(`${month}月${day2}日`, 24),
+    });
+  }
+
+  const shortRe = /(^|[^\d])([0-9]{1,2})[-/]([0-9]{1,2})(?=[^\d]|$)/g;
+  for (const m of text.matchAll(shortRe)) {
+    const month = Number(m[2]);
+    const day = Number(m[3]);
+    if (!Number.isFinite(month) || !Number.isFinite(day)) continue;
+    if (month < 1 || month > 12 || day < 1 || day > 31) continue;
+    const index = (Number(m.index) || 0) + String(m[1] || "").length;
+    out.push({
+      month,
+      day,
+      ordinal: month * 31 + day,
+      index,
+      evidence: cleanStatement(`${month}-${day}`, 24),
+    });
+  }
+
   return out;
 }
 
@@ -373,8 +432,7 @@ function extractDurationCandidates(text: string): DurationCandidate[] {
 
     const isTotal = /(总共|一共|总计|全程|整个(?:行程|旅行)?|整体|行程时长|trip length|overall|total|in total)/i.test(ctx);
     const isMeeting = /(学术会议|会议|开会|chi|conference|workshop|forum|summit)/i.test(ctx);
-    const isCriticalEvent =
-      CRITICAL_PRESENTATION_RE.test(ctx) && (HARD_REQUIRE_RE.test(ctx) || HARD_CONSTRAINT_RE.test(ctx) || /需要|要|必须|强制/.test(ctx));
+    const isCriticalEvent = hasHardDayReservationSignal(ctx);
     const isSegment = /(米兰|巴塞罗那|停留|逛|游|玩|旅行|旅游|度假|行程|city|stay)/i.test(ctx);
 
     let kind: DurationCandidate["kind"] = "unknown";
@@ -506,41 +564,61 @@ function inferDurationFromText(text: string): { days: number; evidence: string; 
   return best;
 }
 
-function extractCriticalPresentationRequirement(text: string): { days: number; evidence: string; city?: string } | null {
+function extractCriticalPresentationRequirement(text: string): { days: number; reason: string; evidence: string; city?: string } | null {
   const s = String(text || "");
   if (!s) return null;
-  if (!CRITICAL_PRESENTATION_RE.test(s)) return null;
+  const candidates = sentenceParts(s).filter((x) => hasHardDayReservationSignal(x));
+  if (!candidates.length) return null;
 
-  const sentence = sentenceParts(s).find((x) => CRITICAL_PRESENTATION_RE.test(x) && /(一天|1天|一日|1日|[0-9一二三四五六七八九十两]{1,2}\s*天)/.test(x)) || "";
-  const target = sentence || s;
+  const target =
+    candidates
+      .slice()
+      .sort((a, b) => {
+        const score = (y: string) => {
+          let v = 0;
+          if (CRITICAL_PRESENTATION_RE.test(y)) v += 3;
+          if (HARD_DAY_FORCE_RE.test(y) || HARD_REQUIRE_RE.test(y) || HARD_CONSTRAINT_RE.test(y)) v += 2;
+          if (/用于|留给|安排|见|拜访|会见|参加|汇报|报告|发表|办理/.test(y)) v += 1;
+          return v;
+        };
+        return score(b) - score(a);
+      })[0] || "";
 
   const dm = target.match(/([0-9一二三四五六七八九十两]{1,2})\s*天/);
-  const days = dm?.[1] ? parseCnInt(dm[1]) || 1 : /(一天|一日|1天|1日)/.test(target) ? 1 : 1;
+  const days = dm?.[1] ? parseCnInt(dm[1]) || 1 : /(一天|一日|1天|1日)/.test(target) ? 1 : 0;
   if (!days || days <= 0 || days > 7) return null;
 
-  const forced = HARD_REQUIRE_RE.test(target) || HARD_CONSTRAINT_RE.test(target) || /强制|必须|务必|一定|不得缺席|需要/.test(target);
-  if (!forced && days <= 1) {
-    // 一天级别事件若无强约束措辞，避免噪声误触发
-    return null;
+  let reason = "";
+  const p1 = target.match(/(?:用于|留给|安排给|用来)([^，。；;]{2,28})/);
+  if (p1?.[1]) reason = cleanStatement(p1[1], 24);
+  if (!reason) {
+    const p2 = target.match(/(见[^，。；;]{1,20}|拜访[^，。；;]{1,20}|会见[^，。；;]{1,20}|参加[^，。；;]{1,20}|办理[^，。；;]{1,20}|处理[^，。；;]{1,20}|汇报[^，。；;]{1,20}|发表[^，。；;]{1,20})/);
+    if (p2?.[1]) reason = cleanStatement(p2[1], 24);
   }
+  if (!reason && CRITICAL_PRESENTATION_RE.test(target)) reason = "论文/报告汇报";
+  if (!reason && HARD_DAY_ACTION_RE.test(target)) reason = "关键事项处理";
+  if (!reason) return null;
 
   let city: string | undefined;
-  const cm = target.match(/(?:在|于)\s*([^\s，。,；;！!？?\d]{2,16})/);
+  const cm = target.match(/(?:在|于|到|去)\s*([A-Za-z\u4e00-\u9fff]{2,20})/);
   const cityNorm = normalizeDestination(cm?.[1] || "");
   if (cityNorm && isLikelyDestinationCandidate(cityNorm)) city = cityNorm;
 
   return {
     days,
-    evidence: cleanStatement(sentence || target, 60),
+    reason,
+    evidence: cleanStatement(`${reason} ${days}天（硬约束）`, 60),
     city,
   };
 }
 
 function normalizeDestination(raw: string): string {
   let s = cleanStatement(raw, 24);
+  s = s.replace(/^(在|于|到|去|从|飞到|前往|抵达)\s*/i, "");
+  s = s.replace(/(参加|参会|开会|会议|chi|conference|workshop|summit|论坛|峰会)$/i, "");
   s = s.replace(/省/g, "").replace(/市/g, "");
   s = s.replace(/^(江苏|浙江|广东|山东|四川|云南|福建|安徽|江西|河北|河南|湖北|湖南|广西|海南|黑龙江|吉林|辽宁|山西|陕西|甘肃|青海|贵州|内蒙古|宁夏|新疆|西藏|北京|上海|天津|重庆)/, "$1");
-  s = s.replace(/(旅游|旅行|游玩|出行|度假)$/i, "");
+  s = s.replace(/(旅游|旅行|游玩|出行|度假|参会|开会|会议|行程|计划)$/i, "");
   s = s.trim();
   return s;
 }
@@ -548,8 +626,13 @@ function normalizeDestination(raw: string): string {
 function isLikelyDestinationCandidate(x: string): boolean {
   const s = normalizeDestination(x);
   if (!s) return false;
-  if (s.length < 2 || s.length > 10) return false;
-  if (/心脏|母亲|父亲|家人|预算|人数|行程|计划|注意|高强度|旅行时|旅游时|需要|限制|不能|安排/i.test(s)) {
+  if (s.length < 2 || s.length > 18) return false;
+  if (!/^[A-Za-z\u4e00-\u9fff]+$/.test(s)) return false;
+  if (
+    /心脏|母亲|父亲|家人|预算|人数|行程|计划|注意|高强度|旅行时|旅游时|需要|限制|不能|安排|在此之前|此前|之前|之后|然后|再从|我会|我要|参会|参加|开会|会议|飞到|出发|机场|航班/i.test(
+      s
+    )
+  ) {
     return false;
   }
   return true;
@@ -567,8 +650,21 @@ function extractDestinationList(text: string): Array<{ city: string; evidence: s
     });
   };
 
-  const singleRe = /(?:去|到|在)\s*([^\s，。,；;！!？?\d]{2,16}?)(?:玩|旅游|旅行|度假|出行|住|待|逛|，|。|,|$)/g;
-  for (const m of text.matchAll(singleRe)) {
+  const routeRe =
+    /从\s*([A-Za-z\u4e00-\u9fff]{2,20})[^\n。；;，,]{0,10}?(?:飞|出发|前往|去|到)?[^\n。；;，,]{0,3}?到\s*([A-Za-z\u4e00-\u9fff]{2,20})/gi;
+  for (const m of text.matchAll(routeRe)) {
+    if (!m?.[2]) continue;
+    push(m[2], m[0] || m[2], Number(m.index) || 0);
+  }
+
+  const goRe = /(?:去|到|前往|飞到|抵达)\s*([A-Za-z\u4e00-\u9fff]{2,20}?)(?=参加|参会|开会|会议|玩|旅游|旅行|度假|[，。,；;！!？?\s]|$)/gi;
+  for (const m of text.matchAll(goRe)) {
+    if (!m?.[1]) continue;
+    push(m[1], m[1], Number(m.index) || 0);
+  }
+
+  const atMeetingRe = /(?:在|于)\s*([A-Za-z\u4e00-\u9fff]{2,20})\s*(?:参加|参会|开会|办会|召开)/gi;
+  for (const m of text.matchAll(atMeetingRe)) {
     if (!m?.[1]) continue;
     push(m[1], m[1], Number(m.index) || 0);
   }
@@ -607,6 +703,7 @@ function extractCityDurationSegments(text: string): Array<{ city: string; days: 
     const idx = Number(m.index) || 0;
     const right = Math.min(text.length, idx + String(m[0] || "").length + 26);
     const ctx = cleanStatement(text.slice(idx, right), 80);
+    if (hasHardDayReservationSignal(ctx) && days <= 2) continue;
     const kind: "travel" | "meeting" =
       /(会议|开会|chi|conference|workshop|论坛)/i.test(ctx) ? "meeting" : "travel";
 
@@ -616,6 +713,29 @@ function extractCityDurationSegments(text: string): Array<{ city: string; days: 
       evidence: cleanStatement(m[0] || `${city}${days}天`, 50),
       kind,
       index: idx,
+    });
+  }
+
+  const rangeRe =
+    /([0-9]{1,2})月([0-9]{1,2})日?\s*[-~到至]\s*([0-9]{1,2})日?[^\n。；;]{0,28}?(?:去|到|在|飞到)\s*([A-Za-z\u4e00-\u9fff]{2,20})[^\n。；;]{0,20}?(参加|参会|开会|会议|chi|conference|workshop|玩|旅游|旅行|度假)?/gi;
+  for (const m of text.matchAll(rangeRe)) {
+    const startDay = Number(m[2]);
+    const endDay = Number(m[3]);
+    const city = normalizeDestination(m[4] || "");
+    if (!Number.isFinite(startDay) || !Number.isFinite(endDay)) continue;
+    if (!city || !isLikelyDestinationCandidate(city)) continue;
+    let days = endDay - startDay;
+    if (days <= 0) days += 31;
+    if (days <= 0 || days > 31) continue;
+    const action = String(m[5] || "");
+    const kind: "travel" | "meeting" =
+      /(参加|参会|开会|会议|chi|conference|workshop)/i.test(action) ? "meeting" : "travel";
+    out.push({
+      city,
+      days,
+      evidence: cleanStatement(m[0] || `${city}${days}天`, 52),
+      kind,
+      index: Number(m.index) || 0,
     });
   }
 
@@ -704,6 +824,7 @@ type IntentSignals = {
   }>;
   criticalPresentation?: {
     days: number;
+    reason: string;
     evidence: string;
     city?: string;
   };
@@ -822,7 +943,12 @@ function extractIntentSignals(userText: string): IntentSignals {
     const shouldPromoteAsTotal = hasTravelSegment || citySegments.length >= 2 || sumDays >= 3;
     if (sumDays > 0 && shouldPromoteAsTotal) {
       const segmentStrength = citySegments.some((x) => x.kind === "meeting") ? 0.9 : 0.8;
-      if (!out.durationDays || sumDays > out.durationDays || segmentStrength > (out.durationStrength || 0)) {
+      const shouldTakeSegments =
+        !out.durationDays ||
+        sumDays > out.durationDays ||
+        segmentStrength >= (out.durationStrength || 0) + 0.08 ||
+        ((out.durationStrength || 0) <= 0.78 && Math.abs(sumDays - (out.durationDays || 0)) <= 2);
+      if (shouldTakeSegments) {
         out.durationDays = sumDays;
         out.durationEvidence = citySegments.map((x) => `${x.city}${x.days}天`).join(" + ");
         out.durationStrength = Math.max(out.durationStrength || 0, segmentStrength);
@@ -941,10 +1067,17 @@ function mergeSignalsWithLatest(history: IntentSignals, latest: IntentSignals): 
 
   if (out.cityDurations?.length) {
     const segSum = out.cityDurations.reduce((acc, x) => acc + (Number(x.days) || 0), 0);
-    if (segSum > 0 && (!out.durationDays || segSum > out.durationDays)) {
+    const segStrength = out.cityDurations.some((x) => x.kind === "meeting") ? 0.9 : 0.82;
+    const shouldTakeSeg =
+      segSum > 0 &&
+      (!out.durationDays ||
+        segSum > out.durationDays ||
+        segStrength >= (Number(out.durationStrength) || 0) + 0.08 ||
+        ((Number(out.durationStrength) || 0) <= 0.78 && Math.abs(segSum - (out.durationDays || 0)) <= 2));
+    if (shouldTakeSeg) {
       out.durationDays = segSum;
       out.durationEvidence = out.cityDurations.map((x) => `${x.city}${x.days}天`).join(" + ");
-      out.durationStrength = Math.max(Number(out.durationStrength) || 0.55, 0.88);
+      out.durationStrength = Math.max(Number(out.durationStrength) || 0.55, segStrength);
       out.durationUnknown = false;
       out.durationUnknownEvidence = undefined;
     }
@@ -1013,14 +1146,15 @@ function buildHeuristicIntentOps(
     if (!key || knownStmt.has(key)) return null;
     knownStmt.add(key);
     const id = makeTempId("n");
+    const nodeWithLayer = withNodeLayer({ ...node, statement });
     const evidenceIds = mergeEvidence(
-      node.evidenceIds,
+      nodeWithLayer.evidenceIds,
       inferEvidenceFromStatement(latestUserText, statement) || inferEvidenceFromStatement(signalText, statement)
     );
-    const sourceMsgIds = mergeEvidence(node.sourceMsgIds, ["latest_user"]);
+    const sourceMsgIds = mergeEvidence(nodeWithLayer.sourceMsgIds, ["latest_user"]);
     ops.push({
       op: "add_node",
-      node: { ...node, id, statement, evidenceIds, sourceMsgIds },
+      node: { ...nodeWithLayer, id, statement, evidenceIds, sourceMsgIds },
     });
     return id;
   };
@@ -1067,6 +1201,7 @@ function buildHeuristicIntentOps(
         id: rootId,
         patch: {
           statement: canonicalIntent,
+          layer: "intent",
           confidence: Math.max(Number(rootNode.confidence) || 0.6, 0.85),
           importance: Math.max(Number(rootNode.importance) || 0, 0.8),
           evidenceIds: mergeEvidence(
@@ -1169,7 +1304,11 @@ function buildHeuristicIntentOps(
   if (signals.criticalPresentation) {
     const p = signals.criticalPresentation;
     const city = p.city ? normalizeDestination(p.city) : "";
-    const label = city ? `${city}论文汇报（${p.days}天）` : `论文汇报（${p.days}天）`;
+    const reason = cleanStatement(p.reason || "关键事项", 20);
+    const label = city ? `${city}${reason}（${p.days}天）` : `${reason}（${p.days}天）`;
+    const reasonTags = /会议|汇报|论文|演讲|报告|presentation|talk/i.test(reason)
+      ? ["meeting", "presentation", "deadline"]
+      : ["hard_day", "must_do"];
     const id = pushNode({
       type: "constraint",
       statement: `会议关键日：${label}`,
@@ -1178,8 +1317,8 @@ function buildHeuristicIntentOps(
       confidence: 0.94,
       severity: "critical",
       importance: 0.98,
-      tags: ["meeting", "presentation", "deadline"],
-      evidenceIds: [p.evidence || `${p.days}天论文汇报`],
+      tags: reasonTags,
+      evidenceIds: [p.evidence || `${reason}${p.days}天`],
     });
     if (id) {
       layer2Set.add(id);
@@ -1248,6 +1387,7 @@ function buildHeuristicIntentOps(
         id: healthId,
         patch: {
           statement: healthStatement,
+          layer: "risk",
           strength: "hard",
           status: "proposed",
           confidence: 0.95,
@@ -1339,7 +1479,7 @@ function fallbackPatch(graph: CDG, userText: string, reason: string): GraphPatch
       ops: [
         {
           op: "add_node",
-          node: {
+          node: withNodeLayer({
             id: makeTempId("n"),
             type: "goal",
             statement: canonicalIntent || short || "未提供任务",
@@ -1349,7 +1489,7 @@ function fallbackPatch(graph: CDG, userText: string, reason: string): GraphPatch
               (x): x is string => Boolean(x)
             ),
             sourceMsgIds: ["latest_user"],
-          },
+          }),
         },
       ],
       notes: [`fallback_patch:${reason}`],
@@ -1363,7 +1503,7 @@ function fallbackPatch(graph: CDG, userText: string, reason: string): GraphPatch
     ops: [
       {
         op: "add_node",
-        node: {
+        node: withNodeLayer({
           id: nid,
           type: nodeType,
           statement: short || "未提供补充信息",
@@ -1377,7 +1517,7 @@ function fallbackPatch(graph: CDG, userText: string, reason: string): GraphPatch
             (x): x is string => Boolean(x)
           ),
           sourceMsgIds: ["latest_user"],
-        },
+        }),
       },
       {
         op: "add_edge",
@@ -1434,7 +1574,7 @@ function normalizeIncomingNode(node: any, signalText: string, latestUserText: st
     pickHealthClause(latestUserText) ||
     pickHealthClause(signalText);
   if (healthClause && RISK_HEALTH_RE.test(out.statement)) {
-    return {
+    return withNodeLayer({
       ...out,
       type: "constraint",
       statement: `健康约束：${healthClause}`,
@@ -1444,13 +1584,13 @@ function normalizeIncomingNode(node: any, signalText: string, latestUserText: st
       confidence: Math.max(Number(out.confidence) || 0.6, 0.9),
       locked: true,
       tags: mergeTags(out.tags, ["health", "safety"]),
-    };
+    });
   }
 
   const pref = normalizePreferenceStatement(out.statement);
   if (pref) {
     const hardPref = !!pref.hard;
-    return {
+    return withNodeLayer({
       ...out,
       type: hardPref ? "constraint" : "preference",
       statement: pref.statement,
@@ -1459,16 +1599,15 @@ function normalizeIncomingNode(node: any, signalText: string, latestUserText: st
       importance: Math.max(Number(out.importance) || 0, hardPref ? 0.78 : 0.66),
       confidence: Math.max(Number(out.confidence) || 0.6, hardPref ? 0.82 : 0.76),
       tags: mergeTags(out.tags, ["preference", "culture"]),
-    };
+    });
   }
 
   const criticalPresentation = extractCriticalPresentationRequirement(out.statement);
   if (criticalPresentation) {
     const city = criticalPresentation.city ? normalizeDestination(criticalPresentation.city) : "";
-    const label = city
-      ? `${city}论文汇报（${criticalPresentation.days}天）`
-      : `论文汇报（${criticalPresentation.days}天）`;
-    return {
+    const reason = cleanStatement(criticalPresentation.reason || "关键事项", 20);
+    const label = city ? `${city}${reason}（${criticalPresentation.days}天）` : `${reason}（${criticalPresentation.days}天）`;
+    return withNodeLayer({
       ...out,
       type: "constraint",
       statement: `会议关键日：${label}`,
@@ -1477,45 +1616,45 @@ function normalizeIncomingNode(node: any, signalText: string, latestUserText: st
       importance: Math.max(Number(out.importance) || 0, 0.96),
       confidence: Math.max(Number(out.confidence) || 0.6, 0.9),
       tags: mergeTags(out.tags, ["meeting", "presentation", "deadline"]),
-    };
+    });
   }
 
   const durationNorm = normalizeDurationFromFreeText(out.statement);
   if (durationNorm) {
     if (durationNorm.kind === "total") {
-      return {
+      return withNodeLayer({
         ...out,
         type: "constraint",
         statement: `总行程时长：${durationNorm.days}天`,
         strength: out.strength || "hard",
         confidence: Math.max(Number(out.confidence) || 0.6, 0.82),
         importance: Math.max(Number(out.importance) || 0, 0.76),
-      };
+      });
     }
     if (durationNorm.kind === "meeting") {
-      return {
+      return withNodeLayer({
         ...out,
         type: "constraint",
         statement: `会议时长：${durationNorm.days}天`,
         strength: out.strength || "hard",
         confidence: Math.max(Number(out.confidence) || 0.6, 0.82),
         importance: Math.max(Number(out.importance) || 0, 0.8),
-      };
+      });
     }
-    return {
+    return withNodeLayer({
       ...out,
       type: "fact",
       statement: `城市时长：${durationNorm.city} ${durationNorm.days}天`,
       confidence: Math.max(Number(out.confidence) || 0.6, 0.78),
       importance: Math.max(Number(out.importance) || 0, 0.7),
-    };
+    });
   }
 
   if (out.type !== "goal" && !isStructuredStatement(out.statement) && out.statement.length >= 32) {
     return null;
   }
 
-  return out;
+  return withNodeLayer(out);
 }
 
 /** 后处理：去重 + 自动补边 + 限制 op 数量 */
@@ -1563,6 +1702,7 @@ function postProcessPatch(
         node: {
           ...op.node,
           statement: canonicalIntent,
+          layer: "intent",
           confidence: Math.max(Number(op.node.confidence) || 0.6, 0.85),
           importance: op.node.importance != null ? Math.max(Number(op.node.importance) || 0, 0.8) : 0.8,
         },
@@ -1595,6 +1735,7 @@ function postProcessPatch(
   const newNodes: Array<{
     id: string;
     type: string;
+    layer?: string;
     statement: string;
     severity?: string;
     importance?: number;
@@ -1636,6 +1777,7 @@ function postProcessPatch(
             delete patchObj.statement;
           } else {
             patchObj.statement = s;
+            if (normalizedPatch.layer) patchObj.layer = normalizedPatch.layer;
             if (normalizedPatch.strength) patchObj.strength = normalizedPatch.strength;
             if (normalizedPatch.severity) patchObj.severity = normalizedPatch.severity;
             if (normalizedPatch.importance != null) patchObj.importance = normalizedPatch.importance;
@@ -1703,6 +1845,7 @@ function postProcessPatch(
       newNodes.push({
         id: op.node.id,
         type: op.node.type,
+        layer: op.node.layer,
         statement: cleanStatement(op.node.statement || "", 180),
         severity: op.node.severity,
         importance: op.node.importance,
@@ -1784,6 +1927,8 @@ const GRAPH_SYSTEM_PROMPT = `
 - 默认只使用 add_node / update_node / add_edge 三种操作。
 - 禁止 remove_node/remove_edge（除非用户明确要求删除且你非常确定）。
 - 节点类型：goal / constraint / preference / belief / fact / question
+- 节点分层：layer 可选，取值 intent / requirement / preference / risk（未提供时后端会自动推断）
+- 建议映射：goal -> intent；硬约束/结构化事实 -> requirement；偏好表达 -> preference；高风险/健康/安全 -> risk
 - constraint 可带 strength: hard|soft
 - 若信息包含健康/安全/法律等高风险因素，务必设置 severity（high 或 critical），并可补 tags（如 ["health"]）。
 - 若信息表达“不能/必须/禁忌”等限制，优先用 constraint，且 strength 优先 hard。
