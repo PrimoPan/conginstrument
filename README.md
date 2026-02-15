@@ -1,150 +1,106 @@
-# CogInstrument Backend
+# CogInstrument Backend (`conginstrument`)
 
-Node.js + TypeScript + Express + MongoDB 后端服务，提供：
+Language / 语言：
+[中文](#中文) | [English](#english)
 
-1. 用户名登录（会话 token）
-2. 多会话管理
-3. 对话轮次处理（非流式与 SSE 流式）
-4. CDG（Concept Dependency Graph）自动更新与持久化
+---
 
-> 安全提示：当前是“用户名即身份”的实验登录，不是生产级鉴权方案。
+## 中文
 
-## 1. 启动与依赖
+### 1. 工程目的
 
-### 技术栈
+`conginstrument` 是 CogInstrument 的后端服务，负责：
 
-- Node.js + TypeScript
+1. 用户登录与会话鉴权（实验性：用户名 + session token）。
+2. 会话与对话轮次持久化（MongoDB）。
+3. 调用 LLM 生成助手回复。
+4. 基于用户最新输入持续更新 CDG（Concept Dependency Graph，意图依赖图）。
+5. 通过普通 JSON 接口和 SSE 流式接口向前端提供数据。
+
+这个服务的核心目标是“对话推进 + 意图建图同步”，不是纯聊天后端。
+
+---
+
+### 2. 技术栈
+
+- Node.js + TypeScript（ESM）
 - Express + CORS + Helmet
-- MongoDB
-- OpenAI SDK（可接 GreatRouter/兼容网关）
+- MongoDB（官方驱动）
+- OpenAI SDK（可接兼容网关）
 
-### 启动命令
+---
+
+### 3. 快速启动
 
 ```bash
 npm install
 npm run dev:api
 ```
 
-默认监听端口由 `PORT` 决定（未设置时为 `3001`）。
+默认端口：`3001`（可通过 `PORT` 覆盖）。
 
-## 2. 环境变量
+健康检查：
 
-在服务器或本地提供 `.env`（不要提交仓库）：
+```bash
+curl http://localhost:3001/healthz
+```
 
-| 变量 | 是否必填 | 默认值 | 说明 |
+---
+
+### 4. 环境变量
+
+| 变量 | 必填 | 默认值 | 说明 |
 | --- | --- | --- | --- |
-| `PORT` | 否 | `3001` | 服务监听端口 |
+| `PORT` | 否 | `3001` | 后端监听端口 |
 | `MONGO_URI` | 否 | `mongodb://127.0.0.1:27017` | Mongo 连接串 |
 | `MONGO_DB` | 否 | `conginstrument` | 数据库名 |
-| `OPENAI_API_KEY` | 是 | 空 | LLM 网关/API Key |
-| `OPENAI_BASE_URL` | 是 | 空 | OpenAI 兼容接口地址 |
-| `MODEL` | 否 | `gpt-4o-mini` | 对话默认模型 |
-| `SESSION_TTL_DAYS` | 否 | `7` | 会话有效天数 |
-| `CI_STREAM_MODE` | 否 | `pseudo` | `pseudo` 或 `upstream`，控制流式模式 |
-| `CI_GRAPH_MODEL` | 否 | 与 `MODEL` 相同 | 图更新模型 |
-| `CI_ALLOW_DELETE` | 否 | `0` | 设为 `1` 才允许 remove_node/remove_edge |
-| `CI_DEBUG_LLM` | 否 | `0` | 设为 `1` 输出调试日志 |
+| `OPENAI_API_KEY` | 是 | 空 | LLM API Key |
+| `OPENAI_BASE_URL` | 是 | 空 | OpenAI/兼容网关地址 |
+| `MODEL` | 否 | `gpt-4o-mini` | 对话模型 |
+| `SESSION_TTL_DAYS` | 否 | `7` | session 过期天数 |
+| `CI_STREAM_MODE` | 否 | `pseudo` | `pseudo`（伪流）/`upstream`（上游真流） |
+| `CI_GRAPH_MODEL` | 否 | 与 `MODEL` 相同 | 建图模型 |
+| `CI_ALLOW_DELETE` | 否 | `0` | 是否允许 remove_node/remove_edge |
+| `CI_DEBUG_LLM` | 否 | `0` | LLM 与 patch 调试日志 |
 
-## 3. 鉴权规则
+---
 
-- 登录接口返回 `sessionToken`
-- 需要鉴权的接口使用 Header：
+### 5. 鉴权约定
+
+登录后得到 `sessionToken`，后续接口带：
 
 ```http
 Authorization: Bearer <sessionToken>
 ```
 
-- 缺失 token：`401 Missing Authorization Bearer token`
-- token 无效：`401 Invalid session`
-- 对应用户不存在：`401 User not found`
+常见鉴权错误：
 
-## 4. 数据与类型模型
+- `401 Missing Authorization Bearer token`
+- `401 Invalid session`
+- `401 User not found`
 
-### 4.1 CDG 图结构
+---
 
-```ts
-type ConceptType = "goal" | "constraint" | "preference" | "belief" | "fact" | "question";
-type Strength = "hard" | "soft";
-type Status = "proposed" | "confirmed" | "rejected" | "disputed";
-type Severity = "low" | "medium" | "high" | "critical";
+### 6. API 总览
 
-type ConceptNode = {
-  id: string;
-  type: ConceptType;
-  statement: string;
-  status: Status;
-  confidence: number; // 0~1
-  strength?: Strength;
-  locked?: boolean;
-  severity?: Severity;
-  importance?: number; // 0~1
-  tags?: string[];
-  key?: string;
-  value?: unknown;
-  evidenceIds?: string[];
-  sourceMsgIds?: string[];
-};
-
-type EdgeType = "enable" | "constraint" | "determine" | "conflicts_with";
-type ConceptEdge = {
-  id: string;
-  from: string;
-  to: string;
-  type: EdgeType;
-  confidence: number; // 0~1
-  phi?: string;
-};
-
-type CDG = {
-  id: string; // conversationId
-  version: number;
-  nodes: ConceptNode[];
-  edges: ConceptEdge[];
-};
-```
-
-### 4.2 GraphPatch 结构
-
-```ts
-type PatchOp =
-  | { op: "add_node"; node: ConceptNode }
-  | { op: "update_node"; id: string; patch: Partial<ConceptNode> }
-  | { op: "remove_node"; id: string }
-  | { op: "add_edge"; edge: ConceptEdge }
-  | { op: "remove_edge"; id: string };
-
-type GraphPatch = {
-  ops: PatchOp[];
-  notes?: string[];
-};
-```
-
-说明：
-
-1. 后端会对白名单字段做清洗和归一化（状态、置信度、枚举值等）。
-2. 默认不允许删除节点/边，除非 `CI_ALLOW_DELETE=1`。
-3. 只有 patch 真正生效（应用了至少一个 op）时，`graph.version` 才会递增。
-
-## 5. API 总览
-
-Base URL 例如：`http://<host>:3001`
+Base URL 示例：`http://localhost:3001`
 
 | 方法 | 路径 | 鉴权 | 说明 |
 | --- | --- | --- | --- |
 | `GET` | `/healthz` | 否 | 健康检查 |
-| `POST` | `/api/auth/login` | 否 | 用户名登录，创建会话 |
-| `GET` | `/api/conversations` | 是 | 获取会话列表 |
-| `POST` | `/api/conversations` | 是 | 创建会话 |
-| `GET` | `/api/conversations/:id` | 是 | 获取会话详情和图 |
-| `GET` | `/api/conversations/:id/turns` | 是 | 获取历史轮次 |
-| `POST` | `/api/conversations/:id/turn` | 是 | 非流式一轮对话 |
-| `POST` | `/api/conversations/:id/turn/stream` | 是 | SSE 流式一轮对话 |
+| `POST` | `/api/auth/login` | 否 | 登录并创建 session |
+| `GET` | `/api/conversations` | 是 | 会话列表 |
+| `POST` | `/api/conversations` | 是 | 新建会话 |
+| `GET` | `/api/conversations/:id` | 是 | 会话详情（含图） |
+| `GET` | `/api/conversations/:id/turns?limit=30` | 是 | 历史轮次 |
+| `POST` | `/api/conversations/:id/turn` | 是 | 非流式单轮 |
+| `POST` | `/api/conversations/:id/turn/stream` | 是 | SSE 流式单轮 |
 
-## 6. 接口详情
+---
 
-### 6.1 健康检查
+### 7. 接口详情（后端协作重点）
 
-#### `GET /healthz`
+#### 7.1 `GET /healthz`
 
 响应：
 
@@ -152,40 +108,34 @@ Base URL 例如：`http://<host>:3001`
 { "ok": true }
 ```
 
-### 6.2 登录
+#### 7.2 `POST /api/auth/login`
 
-#### `POST /api/auth/login`
-
-请求体：
+请求：
 
 ```json
-{ "username": "u001" }
+{ "username": "test" }
 ```
 
-约束：
+规则：
 
-1. `username` 不能为空
-2. 后端会截断到最多 32 字符
+- `username` 必填，空字符串返回 400。
+- 服务端会截断到 32 字符。
 
 成功响应：
 
 ```json
 {
   "userId": "65f0...",
-  "username": "u001",
-  "sessionToken": "1b83b9d2-..."
+  "username": "test",
+  "sessionToken": "uuid-token"
 }
 ```
 
-失败响应示例：
+错误：
 
-```json
-{ "error": "username required" }
-```
+- `400 {"error":"username required"}`
 
-### 6.3 会话列表
-
-#### `GET /api/conversations`
+#### 7.3 `GET /api/conversations`
 
 响应：
 
@@ -199,21 +149,20 @@ Base URL 例如：`http://<host>:3001`
 ]
 ```
 
-### 6.4 创建会话
+#### 7.4 `POST /api/conversations`
 
-#### `POST /api/conversations`
-
-请求体：
+请求：
 
 ```json
 { "title": "新对话" }
 ```
 
-说明：
+规则：
 
-1. `title` 默认 `"New Conversation"`
-2. 标题最多 80 字符
-3. 会初始化空图：`{ id: conversationId, version: 0, nodes: [], edges: [] }`
+- 默认标题：`New Conversation`
+- 标题最大 80 字符
+- 自动初始化空图：
+  `{ id: conversationId, version: 0, nodes: [], edges: [] }`
 
 响应：
 
@@ -231,11 +180,9 @@ Base URL 例如：`http://<host>:3001`
 }
 ```
 
-### 6.5 会话详情
+#### 7.5 `GET /api/conversations/:id`
 
-#### `GET /api/conversations/:id`
-
-成功响应：
+响应：
 
 ```json
 {
@@ -251,18 +198,16 @@ Base URL 例如：`http://<host>:3001`
 }
 ```
 
-常见失败：
+错误：
 
-- `400 { "error": "invalid conversation id" }`
-- `404 { "error": "conversation not found" }`
+- `400 {"error":"invalid conversation id"}`
+- `404 {"error":"conversation not found"}`
 
-### 6.6 历史轮次
-
-#### `GET /api/conversations/:id/turns?limit=30`
+#### 7.6 `GET /api/conversations/:id/turns?limit=30`
 
 参数：
 
-- `limit`：默认 `30`，最小 `1`，最大 `200`
+- `limit` 默认 `30`，范围 `1~200`
 
 响应：
 
@@ -271,28 +216,26 @@ Base URL 例如：`http://<host>:3001`
   {
     "id": "65f2...",
     "createdAt": "2026-02-15T12:10:00.000Z",
-    "userText": "我想做一个三天行程",
-    "assistantText": "先给你一个可执行版本...",
+    "userText": "我想去云南玩7天，预算10000",
+    "assistantText": "可以，我们先把目标拆分...",
     "graphVersion": 4
   }
 ]
 ```
 
-### 6.7 非流式 turn
+#### 7.7 `POST /api/conversations/:id/turn`（非流式）
 
-#### `POST /api/conversations/:id/turn`
-
-请求体：
+请求：
 
 ```json
-{ "userText": "我预算 2000，偏好轻松一点" }
+{ "userText": "预算上限改成15000" }
 ```
 
 响应：
 
 ```json
 {
-  "assistantText": "好的，我先给你一个轻松路线...",
+  "assistantText": "好的，我把预算上限更新到15000元。",
   "graphPatch": {
     "ops": [],
     "notes": []
@@ -306,99 +249,291 @@ Base URL 例如：`http://<host>:3001`
 }
 ```
 
-常见失败：
+错误：
 
-- `400 { "error": "invalid conversation id" }`
-- `400 { "error": "userText required" }`
-- `404 { "error": "conversation not found" }`
+- `400 {"error":"invalid conversation id"}`
+- `400 {"error":"userText required"}`
+- `404 {"error":"conversation not found"}`
 
-### 6.8 流式 turn（SSE）
+#### 7.8 `POST /api/conversations/:id/turn/stream`（SSE）
 
-#### `POST /api/conversations/:id/turn/stream`
-
-请求体：
+请求：
 
 ```json
-{ "userText": "继续细化每天路线" }
+{ "userText": "继续细化并考虑我母亲心脏病" }
 ```
 
-响应为 `text/event-stream`，事件序列如下：
+响应头：
 
-1. `start`：开场信息
-2. `token`：增量文本（可能多次）
-3. `ping`：心跳（约每 15 秒一次）
-4. `done`：最终完整结果（含 graph 与 patch）
-5. `error`：失败信息
+- `Content-Type: text/event-stream; charset=utf-8`
+- `Cache-Control: no-cache, no-transform`
 
-事件示例：
+SSE 事件序列：
+
+1. `start`
+2. `token`（多次）
+3. `ping`（心跳）
+4. `done`（最终结果）
+5. `error`（失败）
+
+示例：
 
 ```text
 event: start
 data: {"conversationId":"65f1...","graphVersion":5}
 
 event: token
-data: {"token":"先看第一天..."}
+data: {"token":"先从约束开始..."}
 
 event: done
 data: {"assistantText":"...","graphPatch":{"ops":[]},"graph":{"id":"65f1...","version":6,"nodes":[],"edges":[]}}
 ```
 
-说明：
+后端行为补充：
 
-1. 当流式阶段异常且尚未输出 token 时，后端会尝试自动降级为非流式，仍返回 `done`。
-2. 客户端断开连接会触发后端中止生成。
+- 如果流式阶段异常且还没吐 token，会自动降级非流式，尽量仍返回 `done`。
+- 客户端断开会触发后端 `AbortController` 终止生成。
 
-## 7. Mongo 集合与索引
+---
+
+### 8. CDG 数据模型
+
+核心类型在：`src/core/graph.ts`
+
+- `ConceptNode.type`：`goal | constraint | preference | belief | fact | question`
+- `ConceptNode.severity`：`low | medium | high | critical`
+- `ConceptEdge.type`：`enable | constraint | determine | conflicts_with`
+- `GraphPatch.ops`：`add_node | update_node | remove_node | add_edge | remove_edge`
+
+关键点：
+
+1. `applyPatchWithGuards` 会做字段归一化、白名单校验、ID 重写。
+2. 默认禁删（除非 `CI_ALLOW_DELETE=1`）。
+3. 单值槽位会做自动压缩（例如预算/人数/目的地/时长，保留更优节点）。
+
+---
+
+### 9. 建图更新流水线（graph path）
+
+1. `generateTurn` / `generateTurnStreaming` 先生成助手文本。
+2. `generateGraphPatch` 生成图增量 patch。
+3. `sanitizeGraphPatchStrict` 做严格清洗（防漂移字段、非法 op）。
+4. `postProcessPatch` + 启发式规则补齐原子节点与连边。
+5. `applyPatchWithGuards` 应用 patch 并输出新图。
+6. 持久化 `turns` 与 `conversations.graph`。
+
+---
+
+### 10. Mongo 集合与索引
 
 集合：
 
-1. `users`
-2. `sessions`
-3. `conversations`
-4. `turns`
+- `users`
+- `sessions`
+- `conversations`
+- `turns`
 
 关键索引：
 
-1. `users.username` 唯一
-2. `sessions.token` 唯一
-3. `sessions.expiresAt` TTL 自动过期
-4. `conversations (userId, updatedAt)`
-5. `turns (conversationId, createdAt)`
+- `users.username` 唯一
+- `sessions.token` 唯一
+- `sessions.expiresAt` TTL 过期自动删
+- `conversations(userId, updatedAt)`
+- `turns(conversationId, createdAt)`
 
-## 8. cURL 示例
+---
 
-### 登录
+### 11. 文件结构与逐文件说明
 
-```bash
-curl -X POST http://localhost:3001/api/auth/login \
-  -H "Content-Type: application/json" \
-  -d '{"username":"u001"}'
+#### 11.1 目录树
+
+```text
+conginstrument/
+├─ package.json
+├─ package-lock.json
+├─ README.md
+└─ src/
+   ├─ index.ts
+   ├─ server/
+   │  └─ config.ts
+   ├─ core/
+   │  └─ graph.ts
+   ├─ db/
+   │  └─ mongo.ts
+   ├─ middleware/
+   │  └─ auth.ts
+   ├─ routes/
+   │  ├─ auth.ts
+   │  └─ conversations.ts
+   └─ services/
+      ├─ server.ts
+      ├─ llmClient.ts
+      ├─ llm.ts
+      ├─ chatResponder.ts
+      ├─ graphUpdater.ts
+      ├─ patchGuard.ts
+      └─ textSanitizer.ts
 ```
 
-### 创建会话
+#### 11.2 根目录文件
+
+| 文件 | 作用 |
+| --- | --- |
+| `README.md` | 后端说明文档（本文件） |
+| `package.json` | 依赖与脚本（`dev:api`） |
+| `package-lock.json` | npm 锁定依赖版本 |
+
+#### 11.3 `src` 文件
+
+| 文件 | 作用 |
+| --- | --- |
+| `src/index.ts` | 简单的 OpenAI CLI 测试入口（与 API 服务解耦） |
+| `src/server/config.ts` | 环境变量读取与默认值配置 |
+| `src/services/server.ts` | Express 启动入口，挂载中间件与路由 |
+| `src/db/mongo.ts` | Mongo 连接、集合实例、索引初始化 |
+| `src/middleware/auth.ts` | Bearer token 鉴权中间件 |
+| `src/routes/auth.ts` | 登录接口：用户 upsert + session 发放 |
+| `src/routes/conversations.ts` | 会话 CRUD、turn、SSE 流式接口 |
+| `src/core/graph.ts` | CDG 类型定义 + patch 应用守卫 + 槽位压缩 |
+| `src/services/llmClient.ts` | OpenAI SDK 客户端实例 |
+| `src/services/chatResponder.ts` | 助手文本生成（非流式/伪流/真流） |
+| `src/services/graphUpdater.ts` | 图 patch 生成、启发式补全、后处理去重 |
+| `src/services/patchGuard.ts` | LLM patch 清洗与规范化（强约束） |
+| `src/services/textSanitizer.ts` | 把 Markdown/LaTeX 风格文本降级为纯文本 |
+| `src/services/llm.ts` | turn 编排：助手回复 + patch 生成 + 统一返回 |
+
+---
+
+### 12. 协作建议
+
+1. 前后端 type 变更时，先改 `src/core/graph.ts`，再同步前端 `src/core/type.ts`。
+2. 新增/修改接口时，优先更新本 README 的“接口详情”。
+3. 任何影响流式协议的修改，必须同步前端 `client.tsx` 的 SSE 解析逻辑。
+4. 图更新策略改动，建议附至少一个“多轮对话输入 -> 期望图”的回归样例。
+
+---
+
+## English
+
+### 1. Purpose
+
+`conginstrument` is the backend service for CogInstrument. It handles:
+
+1. Experimental auth (`username` + `sessionToken`).
+2. Conversation/turn persistence in MongoDB.
+3. Assistant text generation via LLM.
+4. Incremental CDG (Concept Dependency Graph) updates.
+5. JSON and SSE APIs for the frontend.
+
+Core objective: **task-oriented dialogue + synchronized intent graphing**.
+
+---
+
+### 2. Stack
+
+- Node.js + TypeScript (ESM)
+- Express + CORS + Helmet
+- MongoDB (native driver)
+- OpenAI SDK (or compatible gateway)
+
+---
+
+### 3. Run
 
 ```bash
-curl -X POST http://localhost:3001/api/conversations \
-  -H "Authorization: Bearer <TOKEN>" \
-  -H "Content-Type: application/json" \
-  -d '{"title":"新对话"}'
+npm install
+npm run dev:api
 ```
 
-### 非流式 turn
+Default port: `3001`.
+
+Health check:
 
 ```bash
-curl -X POST http://localhost:3001/api/conversations/<CID>/turn \
-  -H "Authorization: Bearer <TOKEN>" \
-  -H "Content-Type: application/json" \
-  -d '{"userText":"给我一个 3 天计划"}'
+curl http://localhost:3001/healthz
 ```
 
-### 流式 turn
+---
 
-```bash
-curl -N -X POST http://localhost:3001/api/conversations/<CID>/turn/stream \
-  -H "Authorization: Bearer <TOKEN>" \
-  -H "Content-Type: application/json" \
-  -H "Accept: text/event-stream" \
-  -d '{"userText":"继续"}'
+### 4. Env vars
+
+See the Chinese section above for the full table. Key vars include:
+
+- `PORT`, `MONGO_URI`, `MONGO_DB`
+- `OPENAI_API_KEY`, `OPENAI_BASE_URL`, `MODEL`
+- `SESSION_TTL_DAYS`
+- `CI_STREAM_MODE`, `CI_GRAPH_MODEL`, `CI_ALLOW_DELETE`, `CI_DEBUG_LLM`
+
+---
+
+### 5. API summary
+
+- `GET /healthz`
+- `POST /api/auth/login`
+- `GET /api/conversations`
+- `POST /api/conversations`
+- `GET /api/conversations/:id`
+- `GET /api/conversations/:id/turns?limit=30`
+- `POST /api/conversations/:id/turn`
+- `POST /api/conversations/:id/turn/stream` (SSE)
+
+Auth header:
+
+```http
+Authorization: Bearer <sessionToken>
 ```
+
+SSE events:
+
+- `start`
+- `token`
+- `ping`
+- `done`
+- `error`
+
+---
+
+### 6. Data model
+
+Main types are in `src/core/graph.ts`:
+
+- `CDG`, `ConceptNode`, `ConceptEdge`, `GraphPatch`
+- Node types: `goal | constraint | preference | belief | fact | question`
+- Severity: `low | medium | high | critical`
+
+Patch application pipeline:
+
+1. sanitize patch
+2. apply guards
+3. compact singleton slots (budget/duration/people/destination/health/preference)
+4. bump graph version when structural changes happen
+
+---
+
+### 7. File map
+
+```text
+src/index.ts                 # standalone OpenAI CLI check
+src/server/config.ts         # env config
+src/services/server.ts       # Express app entry
+src/db/mongo.ts              # Mongo collections + indexes
+src/middleware/auth.ts       # auth middleware
+src/routes/auth.ts           # login route
+src/routes/conversations.ts  # conversation + turn + SSE routes
+src/core/graph.ts            # graph types and guarded patch apply
+src/services/llmClient.ts    # OpenAI client
+src/services/chatResponder.ts# assistant text generation
+src/services/graphUpdater.ts # graph patch generation + heuristics
+src/services/patchGuard.ts   # strict patch sanitizer
+src/services/textSanitizer.ts# markdown-to-plain sanitizer
+src/services/llm.ts          # turn orchestration
+```
+
+---
+
+### 8. Collaboration notes
+
+- Treat `src/core/graph.ts` as the backend contract source of truth.
+- Keep frontend `src/core/type.ts` aligned after every graph schema change.
+- Update README API docs whenever route payloads/events change.
+
