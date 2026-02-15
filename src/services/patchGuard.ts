@@ -8,6 +8,7 @@ function dlog(...args: any[]) {
 
 const ALLOWED_NODE_TYPES = new Set(["goal", "constraint", "preference", "belief", "fact", "question"]);
 const ALLOWED_EDGE_TYPES = new Set(["enable", "constraint", "determine", "conflicts_with"]);
+const ALLOWED_SEVERITY = new Set(["low", "medium", "high", "critical"]);
 
 // 默认只允许增/改/加边；删除要显式开开关
 const ALLOW_DELETE = process.env.CI_ALLOW_DELETE === "1";
@@ -22,6 +23,22 @@ function clamp01(x: any, d = 0.6) {
   const n = Number(x);
   if (!Number.isFinite(n)) return d;
   return Math.max(0, Math.min(1, n));
+}
+
+function normalizeSeverity(x: any): "low" | "medium" | "high" | "critical" | undefined {
+  const s = String(x ?? "").trim().toLowerCase();
+  if (!s) return undefined;
+  if (ALLOWED_SEVERITY.has(s)) return s as "low" | "medium" | "high" | "critical";
+  return undefined;
+}
+
+function normalizeTags(tags: any): string[] | undefined {
+  if (!Array.isArray(tags)) return undefined;
+  const out = tags
+    .map((x) => String(x ?? "").trim())
+    .filter(Boolean)
+    .slice(0, 8);
+  return out.length ? out : undefined;
 }
 
 function makeTempId(prefix: "n" | "e") {
@@ -188,6 +205,10 @@ export function sanitizeGraphPatchStrict(raw: any): GraphPatch {
         (srcId && srcId.startsWith("t_") ? srcId : "") ||
         makeTempId("n");
 
+      const severity = normalizeSeverity(node?.severity);
+      const importance = node?.importance != null ? clamp01(node?.importance, 0.7) : undefined;
+      const tags = normalizeTags(node?.tags);
+
       opsOut.push({
         op: "add_node",
         node: {
@@ -197,6 +218,9 @@ export function sanitizeGraphPatchStrict(raw: any): GraphPatch {
           strength: node?.strength === "hard" || node?.strength === "soft" ? node.strength : undefined,
           status: typeof node?.status === "string" ? node.status : "proposed",
           confidence: clamp01(node?.confidence, 0.6),
+          severity,
+          importance,
+          tags,
         },
       });
       continue;
@@ -219,6 +243,16 @@ export function sanitizeGraphPatchStrict(raw: any): GraphPatch {
       if ((patchSrc as any).strength === "hard" || (patchSrc as any).strength === "soft") outPatch.strength = (patchSrc as any).strength;
       if (typeof (patchSrc as any).status === "string") outPatch.status = (patchSrc as any).status;
       if ((patchSrc as any).confidence != null) outPatch.confidence = clamp01((patchSrc as any).confidence);
+
+      const severity = normalizeSeverity((patchSrc as any).severity);
+      if (severity) outPatch.severity = severity;
+
+      if ((patchSrc as any).importance != null) {
+        outPatch.importance = clamp01((patchSrc as any).importance, 0.7);
+      }
+
+      const tags = normalizeTags((patchSrc as any).tags);
+      if (tags) outPatch.tags = tags;
 
       if (Object.keys(outPatch).length === 0) {
         notes.push("drop:update_node_empty_patch");
