@@ -83,6 +83,17 @@ const DURATION_HINT_RE = /时长|几天|多少天|周|日程|行程|节奏/i;
 const DESTINATION_HINT_RE = /目的地|城市|路线|交通|高铁|飞机|景点|昆明|大理|丽江|香格里拉|云南|江苏|盐城/i;
 const PEOPLE_HINT_RE = /同行|一家|家人|父亲|母亲|老人|儿童|三口|两人|人数/i;
 const PREFERENCE_HINT_RE = /偏好|喜欢|不喜欢|感兴趣|人文|自然|文化|历史/i;
+const GENERIC_RESOURCE_HINT_RE = /预算|经费|成本|资源|工时|算力|内存|gpu|人天|cost|budget|resource|cpu|memory/i;
+const GENERIC_TIMELINE_HINT_RE = /截止|deadline|里程碑|周期|排期|冲刺|迭代|时长|天|周|月|季度|timeline|schedule/i;
+const GENERIC_STAKEHOLDER_HINT_RE = /用户|客户|老板|团队|同事|角色|stakeholder|owner|reviewer|审批/i;
+const GENERIC_RISK_HINT_RE = /风险|故障|安全|合规|隐私|法律|阻塞|依赖|上线事故|risk|security|privacy|compliance/i;
+
+type TopologyTuning = {
+  lambdaSparsity: number;
+  maxRootIncoming: number;
+  maxAStarSteps: number;
+  transitiveCutoff: number;
+};
 
 function clamp01(x: any, d = 0.6) {
   const n = Number(x);
@@ -249,27 +260,446 @@ function chooseRootGoal(nodesById: Map<string, ConceptNode>, touched: Set<string
     })[0];
 }
 
-function chooseAnchorNodeId(
-  node: ConceptNode,
-  rootId: string,
-  slotNodes: Map<string, ConceptNode>,
-  healthNode: ConceptNode | null
-): string {
-  const s = cleanText(node.statement);
-  if (!s) return rootId;
+function tokenizeForSimilarity(text: string): Set<string> {
+  const s = cleanText(text).toLowerCase();
+  if (!s) return new Set<string>();
 
-  if (healthNode && HEALTH_RE.test(s)) return healthNode.id;
-  if (slotNodes.has("slot:budget") && BUDGET_HINT_RE.test(s)) return slotNodes.get("slot:budget")!.id;
-  if (slotNodes.has("slot:lodging") && /(酒店|住宿|民宿|星级|房型|房费)/i.test(s)) return slotNodes.get("slot:lodging")!.id;
-  if (slotNodes.has("slot:duration") && DURATION_HINT_RE.test(s)) return slotNodes.get("slot:duration")!.id;
-  if (slotNodes.has("slot:destination") && DESTINATION_HINT_RE.test(s)) return slotNodes.get("slot:destination")!.id;
-  if (slotNodes.has("slot:people") && PEOPLE_HINT_RE.test(s)) return slotNodes.get("slot:people")!.id;
-  if (node.type === "preference" || PREFERENCE_HINT_RE.test(s)) {
-    if (slotNodes.has("slot:scenic_preference")) return slotNodes.get("slot:scenic_preference")!.id;
-    if (slotNodes.has("slot:destination")) return slotNodes.get("slot:destination")!.id;
+  const tokens = new Set<string>();
+  const chunks = s.match(/[a-z0-9]+|[\u4e00-\u9fff]+/g) || [];
+  for (const chunk of chunks) {
+    if (!chunk) continue;
+    tokens.add(chunk);
+
+    if (/^[\u4e00-\u9fff]+$/.test(chunk)) {
+      for (let i = 0; i < chunk.length - 1; i += 1) tokens.add(chunk.slice(i, i + 2));
+      continue;
+    }
+
+    if (/^[a-z0-9]+$/.test(chunk) && chunk.length >= 4) {
+      for (let i = 0; i < chunk.length - 2; i += 1) tokens.add(chunk.slice(i, i + 3));
+    }
   }
 
-  return rootId;
+  return tokens;
+}
+
+function jaccardSimilarity(a: Set<string>, b: Set<string>): number {
+  if (!a.size || !b.size) return 0;
+  let inter = 0;
+  for (const t of a) if (b.has(t)) inter += 1;
+  const union = a.size + b.size - inter;
+  if (!union) return 0;
+  return inter / union;
+}
+
+function inferPreferredSlot(node: ConceptNode, healthNode: ConceptNode | null): string | null {
+  const s = cleanText(node.statement);
+  if (!s) return null;
+
+  if (healthNode && (HEALTH_RE.test(s) || GENERIC_RISK_HINT_RE.test(s))) return "slot:health";
+  if (BUDGET_HINT_RE.test(s) || GENERIC_RESOURCE_HINT_RE.test(s)) return "slot:budget";
+  if (/(酒店|住宿|民宿|星级|房型|房费)/i.test(s)) return "slot:lodging";
+  if (DURATION_HINT_RE.test(s) || GENERIC_TIMELINE_HINT_RE.test(s)) return "slot:duration";
+  if (DESTINATION_HINT_RE.test(s)) return "slot:destination";
+  if (PEOPLE_HINT_RE.test(s) || GENERIC_STAKEHOLDER_HINT_RE.test(s)) return "slot:people";
+  if (node.type === "preference" || PREFERENCE_HINT_RE.test(s)) return "slot:scenic_preference";
+  if (node.type === "constraint" && GENERIC_RISK_HINT_RE.test(s)) return "slot:health";
+
+  return null;
+}
+
+function slotDistancePenalty(a: string | null, b: string | null): number {
+  if (!a || !b) return 0.22;
+  if (a === b) return 0;
+  if ((a === "slot:budget" && b === "slot:lodging") || (a === "slot:lodging" && b === "slot:budget")) return 0.12;
+  if ((a === "slot:destination" && b === "slot:scenic_preference") || (a === "slot:scenic_preference" && b === "slot:destination")) {
+    return 0.12;
+  }
+  if ((a === "slot:health" && b === "slot:duration") || (a === "slot:duration" && b === "slot:health")) return 0.18;
+  return 0.32;
+}
+
+function semanticPenalty(
+  node: ConceptNode,
+  anchor: ConceptNode,
+  nodeTokens: Set<string>,
+  anchorTokens: Set<string>,
+  preferredSlot: string | null,
+  anchorSlot: string | null
+): number {
+  const sim = jaccardSimilarity(nodeTokens, anchorTokens);
+  const lexical = 1 - sim;
+  const slot = slotDistancePenalty(preferredSlot, anchorSlot);
+  const typePenalty = node.type === anchor.type ? -0.06 : 0.06;
+  const riskPenalty = HEALTH_RE.test(node.statement) && anchorSlot !== "slot:health" ? 0.2 : 0;
+  return lexical + slot + typePenalty + riskPenalty;
+}
+
+function edgeTravelCost(edge: ConceptEdge): number {
+  const typeBias = edge.type === "determine" ? 1.08 : edge.type === "enable" ? 0.95 : 0.88;
+  const confidence = clamp01(edge.confidence, 0.6);
+  return typeBias + (1 - confidence) * 0.35;
+}
+
+function buildUndirectedAdjacency(edges: ConceptEdge[]): Map<string, Array<{ to: string; cost: number }>> {
+  const adj = new Map<string, Array<{ to: string; cost: number }>>();
+  for (const e of edges) {
+    if (e.type === "conflicts_with") continue;
+    const cost = edgeTravelCost(e);
+    if (!adj.has(e.from)) adj.set(e.from, []);
+    if (!adj.has(e.to)) adj.set(e.to, []);
+    adj.get(e.from)!.push({ to: e.to, cost });
+    adj.get(e.to)!.push({ to: e.from, cost });
+  }
+  return adj;
+}
+
+function chooseAnchorNodeIdAStar(params: {
+  node: ConceptNode;
+  rootId: string;
+  nodesById: Map<string, ConceptNode>;
+  slotNodes: Map<string, ConceptNode>;
+  healthNode: ConceptNode | null;
+  existingEdges: ConceptEdge[];
+  tuning: TopologyTuning;
+}): string {
+  const { node, rootId, nodesById, slotNodes, healthNode, existingEdges, tuning } = params;
+  const statement = cleanText(node.statement);
+  if (!statement) return rootId;
+
+  const preferredSlot = inferPreferredSlot(node, healthNode);
+  if (preferredSlot && slotNodes.has(preferredSlot)) {
+    const direct = slotNodes.get(preferredSlot)!;
+    if (direct.id !== node.id) return direct.id;
+  }
+
+  const anchorIds = new Set<string>([rootId]);
+  for (const n of slotNodes.values()) {
+    if (n.id !== node.id) anchorIds.add(n.id);
+  }
+  for (const n of nodesById.values()) {
+    if (n.id === node.id) continue;
+    if ((Number(n.importance) || 0) >= 0.78 || (Number(n.confidence) || 0) >= 0.86 || n.type === "constraint") {
+      anchorIds.add(n.id);
+    }
+  }
+
+  const nodeTokens = tokenizeForSimilarity(statement);
+  const slotCache = new Map<string, string | null>();
+  const tokensCache = new Map<string, Set<string>>();
+  const penalty = (anchorId: string) => {
+    const anchor = nodesById.get(anchorId);
+    if (!anchor) return 1.2;
+    if (!tokensCache.has(anchorId)) tokensCache.set(anchorId, tokenizeForSimilarity(anchor.statement));
+    if (!slotCache.has(anchorId)) slotCache.set(anchorId, slotKeyOfNode(anchor));
+    return semanticPenalty(node, anchor, nodeTokens, tokensCache.get(anchorId)!, preferredSlot, slotCache.get(anchorId) || null);
+  };
+
+  let bestAnchorId = rootId;
+  let bestScore = penalty(rootId) + 0.08;
+  for (const anchorId of anchorIds) {
+    const p = penalty(anchorId) + (anchorId === rootId ? 0.08 : 0);
+    if (p < bestScore) {
+      bestScore = p;
+      bestAnchorId = anchorId;
+    }
+  }
+
+  if (!existingEdges.length || !anchorIds.size) return bestAnchorId;
+
+  const adj = buildUndirectedAdjacency(existingEdges);
+  if (!adj.size) return bestAnchorId;
+
+  const open: Array<{ id: string; g: number; f: number }> = [{ id: rootId, g: 0, f: penalty(rootId) }];
+  const gScore = new Map<string, number>([[rootId, 0]]);
+  const closed = new Set<string>();
+  let steps = 0;
+
+  while (open.length && steps < tuning.maxAStarSteps) {
+    steps += 1;
+    open.sort((a, b) => a.f - b.f);
+    const cur = open.shift()!;
+    if (closed.has(cur.id)) continue;
+    closed.add(cur.id);
+
+    if (anchorIds.has(cur.id) && cur.id !== node.id) {
+      const h = penalty(cur.id);
+      const score = cur.g + h;
+      if (score < bestScore) {
+        bestScore = score;
+        bestAnchorId = cur.id;
+      }
+      if (cur.id !== rootId && h <= 0.2) return cur.id;
+    }
+
+    const nbs = adj.get(cur.id) || [];
+    for (const nb of nbs) {
+      if (nb.to === node.id) continue;
+      const tentative = cur.g + nb.cost;
+      if (tentative >= (gScore.get(nb.to) ?? Number.POSITIVE_INFINITY)) continue;
+      gScore.set(nb.to, tentative);
+      open.push({
+        id: nb.to,
+        g: tentative,
+        f: tentative + penalty(nb.to),
+      });
+    }
+  }
+
+  return bestAnchorId;
+}
+
+function tarjanSCC(nodeIds: string[], edges: ConceptEdge[]): string[][] {
+  const indexById = new Map<string, number>();
+  const lowById = new Map<string, number>();
+  const onStack = new Set<string>();
+  const stack: string[] = [];
+  const adj = new Map<string, string[]>();
+  let idx = 0;
+  const out: string[][] = [];
+
+  for (const id of nodeIds) adj.set(id, []);
+  for (const e of edges) {
+    if (e.type === "conflicts_with") continue;
+    if (!adj.has(e.from) || !adj.has(e.to)) continue;
+    adj.get(e.from)!.push(e.to);
+  }
+
+  const strongConnect = (v: string) => {
+    indexById.set(v, idx);
+    lowById.set(v, idx);
+    idx += 1;
+    stack.push(v);
+    onStack.add(v);
+
+    for (const w of adj.get(v) || []) {
+      if (!indexById.has(w)) {
+        strongConnect(w);
+        lowById.set(v, Math.min(lowById.get(v)!, lowById.get(w)!));
+      } else if (onStack.has(w)) {
+        lowById.set(v, Math.min(lowById.get(v)!, indexById.get(w)!));
+      }
+    }
+
+    if (lowById.get(v) === indexById.get(v)) {
+      const component: string[] = [];
+      while (stack.length) {
+        const w = stack.pop()!;
+        onStack.delete(w);
+        component.push(w);
+        if (w === v) break;
+      }
+      if (component.length) out.push(component);
+    }
+  };
+
+  for (const id of nodeIds) {
+    if (!indexById.has(id)) strongConnect(id);
+  }
+
+  return out;
+}
+
+function cycleRatio(nodeIds: string[], edges: ConceptEdge[]): number {
+  if (nodeIds.length <= 1 || edges.length <= 1) return 0;
+  const scc = tarjanSCC(nodeIds, edges);
+  let cycNodes = 0;
+  for (const comp of scc) {
+    if (comp.length > 1) {
+      cycNodes += comp.length;
+      continue;
+    }
+    const nid = comp[0];
+    if (edges.some((e) => e.from === nid && e.to === nid && e.type !== "conflicts_with")) cycNodes += 1;
+  }
+  return cycNodes / Math.max(1, nodeIds.length);
+}
+
+function computeTopologyTuning(nodeCount: number, edgeCount: number, cycRatio: number): TopologyTuning {
+  const n = Math.max(1, nodeCount);
+  const density = edgeCount / Math.max(1, n * Math.log2(n + 1));
+  const lambda = clamp01(0.38 + 0.24 * Math.tanh(density - 1) + 0.36 * cycRatio, 0.42);
+
+  return {
+    lambdaSparsity: lambda,
+    maxRootIncoming: Math.max(4, Math.min(10, Math.round(9 - 4 * lambda))),
+    maxAStarSteps: Math.max(20, Math.min(96, Math.round(30 + n * (0.28 + (1 - lambda) * 0.35)))),
+    transitiveCutoff: Math.max(0.48, Math.min(0.9, 0.72 - lambda * 0.18)),
+  };
+}
+
+function edgeKeepScore(
+  edge: ConceptEdge,
+  nodesById: Map<string, ConceptNode>,
+  rootId: string,
+  touched: Set<string>
+): number {
+  const from = nodesById.get(edge.from);
+  const to = nodesById.get(edge.to);
+  const typeScore = edge.type === "determine" ? 0.12 : edge.type === "enable" ? 0.44 : 0.92;
+  const confidenceScore = clamp01(edge.confidence, 0.6) * 0.9;
+  const importanceScore = (((Number(from?.importance) || 0) + (Number(to?.importance) || 0)) / 2) * 0.65;
+  const touchedScore = touched.has(edge.from) || touched.has(edge.to) ? 0.32 : 0;
+  const rootScore = edge.to === rootId ? 0.26 : 0;
+  const riskScore = HEALTH_RE.test(from?.statement || "") || HEALTH_RE.test(to?.statement || "") ? 0.32 : 0;
+  return typeScore + confidenceScore + importanceScore + touchedScore + rootScore + riskScore;
+}
+
+function breakCyclesByTarjan(params: {
+  edges: ConceptEdge[];
+  nodesById: Map<string, ConceptNode>;
+  rootId: string;
+  touched: Set<string>;
+}): { edges: ConceptEdge[]; removedCount: number } {
+  const { nodesById, rootId, touched } = params;
+  const nodeIds = Array.from(nodesById.keys());
+  const edges = params.edges.slice();
+  let removedCount = 0;
+  let rounds = 0;
+
+  while (rounds < 64) {
+    rounds += 1;
+    const components = tarjanSCC(nodeIds, edges);
+    const cycComponents = components.filter((comp) => {
+      if (comp.length > 1) return true;
+      const nid = comp[0];
+      return edges.some((e) => e.from === nid && e.to === nid && e.type !== "conflicts_with");
+    });
+    if (!cycComponents.length) break;
+
+    let removedThisRound = 0;
+    for (const comp of cycComponents) {
+      const inComp = new Set(comp);
+      const candidates = edges.filter(
+        (e) => e.type !== "conflicts_with" && inComp.has(e.from) && inComp.has(e.to) && e.from !== e.to
+      );
+      if (!candidates.length) continue;
+
+      candidates.sort((a, b) => edgeKeepScore(a, nodesById, rootId, touched) - edgeKeepScore(b, nodesById, rootId, touched));
+      const drop = candidates[0];
+      const dropIndex = edges.findIndex((e) => e.id === drop.id);
+      if (dropIndex < 0) continue;
+      edges.splice(dropIndex, 1);
+      removedCount += 1;
+      removedThisRound += 1;
+    }
+
+    if (!removedThisRound) break;
+  }
+
+  return { edges, removedCount };
+}
+
+function hasDirectedPath(
+  from: string,
+  to: string,
+  edges: ConceptEdge[],
+  excludedEdgeId?: string,
+  maxDepth = 12
+): boolean {
+  if (from === to) return true;
+
+  const adj = new Map<string, string[]>();
+  for (const e of edges) {
+    if (e.type === "conflicts_with") continue;
+    if (excludedEdgeId && e.id === excludedEdgeId) continue;
+    if (!adj.has(e.from)) adj.set(e.from, []);
+    adj.get(e.from)!.push(e.to);
+  }
+
+  const q: Array<{ id: string; depth: number }> = [{ id: from, depth: 0 }];
+  const seen = new Set<string>([from]);
+  while (q.length) {
+    const cur = q.shift()!;
+    if (cur.depth >= maxDepth) continue;
+    for (const nb of adj.get(cur.id) || []) {
+      if (nb === to) return true;
+      if (seen.has(nb)) continue;
+      seen.add(nb);
+      q.push({ id: nb, depth: cur.depth + 1 });
+    }
+  }
+
+  return false;
+}
+
+function reduceTransitiveEdges(params: {
+  edges: ConceptEdge[];
+  nodesById: Map<string, ConceptNode>;
+  rootId: string;
+  touched: Set<string>;
+  tuning: TopologyTuning;
+}): { edges: ConceptEdge[]; removedCount: number } {
+  const { nodesById, rootId, touched, tuning } = params;
+  const edges = params.edges.slice();
+  let removedCount = 0;
+
+  const ordered = edges
+    .filter((e) => e.type !== "conflicts_with")
+    .slice()
+    .sort((a, b) => {
+      const typeRank = (x: EdgeType) => (x === "determine" ? 0 : x === "enable" ? 1 : 2);
+      const t = typeRank(a.type) - typeRank(b.type);
+      if (t !== 0) return t;
+      return (a.confidence || 0) - (b.confidence || 0);
+    });
+
+  for (const edge of ordered) {
+    const idx = edges.findIndex((e) => e.id === edge.id);
+    if (idx < 0) continue;
+
+    const fromNode = nodesById.get(edge.from);
+    const toNode = nodesById.get(edge.to);
+    if (!fromNode || !toNode) continue;
+    if (edge.to === rootId && edge.type !== "determine") continue;
+    if (touched.has(edge.from) || touched.has(edge.to)) continue;
+
+    const keepScore = edgeKeepScore(edge, nodesById, rootId, touched);
+    const keepThreshold = 0.92 + (1 - tuning.lambdaSparsity) * 0.5;
+    if (keepScore >= keepThreshold) continue;
+    if ((edge.confidence || 0) >= tuning.transitiveCutoff && edge.type !== "determine") continue;
+
+    const outAfter = edges.filter((e) => e.type !== "conflicts_with" && e.from === edge.from && e.id !== edge.id).length;
+    if (outAfter <= 0) continue;
+    if (!hasDirectedPath(edge.from, edge.to, edges, edge.id, 10)) continue;
+
+    const afterRemoval = edges.filter((e) => e.id !== edge.id);
+    if (!hasDirectedPath(edge.from, rootId, afterRemoval, undefined, 14)) continue;
+
+    edges.splice(idx, 1);
+    removedCount += 1;
+  }
+
+  return { edges, removedCount };
+}
+
+function repairDisconnectedNodes(params: {
+  edges: ConceptEdge[];
+  nodesById: Map<string, ConceptNode>;
+  rootId: string;
+  slotByNodeId: Map<string, string | null>;
+}): { edges: ConceptEdge[]; addedCount: number } {
+  const { nodesById, rootId, slotByNodeId } = params;
+  const edges = params.edges.slice();
+  let addedCount = 0;
+
+  for (const node of nodesById.values()) {
+    if (node.id === rootId) continue;
+    if (hasDirectedPath(node.id, rootId, edges, undefined, 14)) continue;
+
+    const slot = slotByNodeId.get(node.id) || null;
+    const type = rootEdgeTypeForNode(node, slot);
+    edges.push({
+      id: `e_${randomUUID()}`,
+      from: node.id,
+      to: rootId,
+      type,
+      confidence: Math.max(0.58, (Number(node.confidence) || 0.6) * 0.86),
+    });
+    addedCount += 1;
+  }
+
+  return { edges, addedCount };
 }
 
 function rebalanceIntentTopology(
@@ -380,18 +810,30 @@ function rebalanceIntentTopology(
     }
   }
 
+  const initStructural = Array.from(nextBySig.values()).filter((e) => e.type !== "conflicts_with");
+  const initCycleRatio = cycleRatio(Array.from(nodesById.keys()), initStructural);
+  const tuning = computeTopologyTuning(nodesById.size, initStructural.length, initCycleRatio);
+
   for (const node of nodesById.values()) {
     const slot = slotByNodeId.get(node.id) || null;
     if (!node.id || node.id === rootId || slot) continue;
 
-    const anchorId = chooseAnchorNodeId(node, rootId, slotNodes, healthNode);
+    const anchorId = chooseAnchorNodeIdAStar({
+      node,
+      rootId,
+      nodesById,
+      slotNodes,
+      healthNode,
+      existingEdges: Array.from(nextBySig.values()),
+      tuning,
+    });
     let edgeType: EdgeType = "determine";
     if (anchorId === rootId) edgeType = rootEdgeTypeForNode(node, slot);
     if (healthNode && anchorId === healthNode.id && node.type === "constraint") edgeType = "constraint";
     putEdge(node.id, anchorId, edgeType, Math.max(0.62, (Number(node.confidence) || 0.6) * 0.88));
   }
 
-  const maxRootIncoming = 6;
+  const maxRootIncoming = tuning.maxRootIncoming;
   const primaryIds = new Set(primaryNodes.map((n) => n.id));
   const rootIncoming = Array.from(nextBySig.values()).filter(
     (e) => e.to === rootId && (!healthNode || e.from !== healthNode.id)
@@ -429,8 +871,36 @@ function rebalanceIntentTopology(
     }
   }
 
+  let nextEdges = Array.from(nextBySig.values());
+  const cycleBreak = breakCyclesByTarjan({
+    edges: nextEdges,
+    nodesById,
+    rootId,
+    touched,
+  });
+  if (cycleBreak.removedCount > 0) changed = true;
+  nextEdges = cycleBreak.edges;
+
+  const reduced = reduceTransitiveEdges({
+    edges: nextEdges,
+    nodesById,
+    rootId,
+    touched,
+    tuning,
+  });
+  if (reduced.removedCount > 0) changed = true;
+  nextEdges = reduced.edges;
+
+  const repaired = repairDisconnectedNodes({
+    edges: nextEdges,
+    nodesById,
+    rootId,
+    slotByNodeId,
+  });
+  if (repaired.addedCount > 0) changed = true;
+  nextEdges = repaired.edges;
+
   const beforeSigSet = new Set(validExistingEdges.map((e) => edgeSignature(e.from, e.to, e.type)));
-  const nextEdges = Array.from(nextBySig.values());
   const afterSigSet = new Set(nextEdges.map((e) => edgeSignature(e.from, e.to, e.type)));
   if (beforeSigSet.size !== afterSigSet.size) changed = true;
   if (!changed) {
