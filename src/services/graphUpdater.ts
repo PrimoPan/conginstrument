@@ -130,6 +130,7 @@ function parseCnInt(raw: string): number | null {
 
 function normalizeDestination(raw: string): string {
   let s = cleanStatement(raw, 24);
+  s = s.replace(/省/g, "").replace(/市/g, "");
   s = s.replace(/^(江苏|浙江|广东|山东|四川|云南|福建|安徽|江西|河北|河南|湖北|湖南|广西|海南|黑龙江|吉林|辽宁|山西|陕西|甘肃|青海|贵州|内蒙古|宁夏|新疆|西藏|北京|上海|天津|重庆)/, "$1");
   s = s.replace(/(旅游|旅行|游玩|出行|度假)$/i, "");
   s = s.trim();
@@ -140,9 +141,37 @@ type IntentSignals = {
   peopleCount?: number;
   destination?: string;
   durationDays?: number;
+  durationUnknown?: boolean;
   budgetCny?: number;
   healthConstraint?: string;
 };
+
+function isTravelIntentText(text: string, signals: IntentSignals) {
+  if (signals.destination || signals.durationDays || signals.budgetCny || signals.peopleCount) return true;
+  return /旅游|旅行|出行|行程|景点|酒店|攻略|目的地|去|玩/i.test(String(text || ""));
+}
+
+function buildTravelIntentStatement(signals: IntentSignals, userText: string): string | null {
+  if (!isTravelIntentText(userText, signals)) return null;
+
+  if (signals.destination && signals.durationDays) {
+    return `意图：去${signals.destination}旅游${signals.durationDays}天`;
+  }
+  if (signals.destination) {
+    return `意图：去${signals.destination}旅游`;
+  }
+  if (signals.durationDays) {
+    return `意图：制定${signals.durationDays}天旅行计划`;
+  }
+  return "意图：制定旅行计划";
+}
+
+function shouldNormalizeGoalStatement(statement: string, signals: IntentSignals, userText: string) {
+  const s = cleanStatement(statement, 240);
+  const tooLong = s.length >= 26;
+  const mixed = /预算|一家|同行|元|天|计划|制定|一起|人|心脏|健康|限制/i.test(s);
+  return isTravelIntentText(userText, signals) && (tooLong || mixed);
+}
 
 function pickHealthClause(userText: string): string | undefined {
   const parts = String(userText)
@@ -178,6 +207,9 @@ function extractIntentSignals(userText: string): IntentSignals {
     const d = parseCnInt(daysM[1]);
     if (d && d > 0 && d <= 60) out.durationDays = d;
   }
+  if (!out.durationDays && /几天|多少天|天数待定|时长待定/i.test(text)) {
+    out.durationUnknown = true;
+  }
 
   const budgetM = text.match(/预算[为是]?\s*([0-9]{3,8})\s*(?:元|块|人民币)?/);
   if (budgetM?.[1]) {
@@ -194,6 +226,7 @@ function extractIntentSignals(userText: string): IntentSignals {
 function buildHeuristicIntentOps(graph: CDG, userText: string, knownStmt: Set<string>): GraphPatch["ops"] {
   const ops: GraphPatch["ops"] = [];
   const signals = extractIntentSignals(userText);
+  const canonicalIntent = buildTravelIntentStatement(signals, userText);
 
   const edgePairs = new Set<string>();
   for (const e of graph.edges || []) {
@@ -201,6 +234,14 @@ function buildHeuristicIntentOps(graph: CDG, userText: string, knownStmt: Set<st
   }
 
   let rootId: string | null = pickRootGoalId(graph);
+  const layer2Set = new Set<string>();
+  if (rootId) {
+    for (const e of graph.edges || []) {
+      if (e?.to === rootId && (e.type === "enable" || e.type === "constraint" || e.type === "determine")) {
+        layer2Set.add(e.from);
+      }
+    }
+  }
 
   const pushNode = (node: any): string | null => {
     const statement = cleanStatement(node.statement);
@@ -216,7 +257,7 @@ function buildHeuristicIntentOps(graph: CDG, userText: string, knownStmt: Set<st
     return id;
   };
 
-  const pushEdge = (from: string, to: string, type: "enable" | "constraint") => {
+  const pushEdge = (from: string, to: string, type: "enable" | "constraint" | "determine") => {
     const k = `${from}|${to}|${type}`;
     if (edgePairs.has(k)) return;
     edgePairs.add(k);
@@ -233,21 +274,12 @@ function buildHeuristicIntentOps(graph: CDG, userText: string, knownStmt: Set<st
   };
 
   // 无 root 且出现可识别目标信号时，先补一个目标节点。
-  if (!rootId && (signals.destination || signals.durationDays || signals.budgetCny || signals.peopleCount)) {
-    const goalStatement = [
-      "旅行目标：",
-      signals.destination || "本次出行",
-      signals.durationDays ? `${signals.durationDays}天` : "",
-      "家庭方案",
-    ]
-      .filter(Boolean)
-      .join("");
-
+  if (!rootId && canonicalIntent) {
     rootId = pushNode({
       type: "goal",
-      statement: goalStatement,
+      statement: canonicalIntent,
       status: "proposed",
-      confidence: 0.82,
+      confidence: 0.9,
       importance: 0.85,
     });
   }
@@ -260,6 +292,7 @@ function buildHeuristicIntentOps(graph: CDG, userText: string, knownStmt: Set<st
       confidence: 0.9,
       importance: 0.72,
     });
+    if (id) layer2Set.add(id);
     if (id && rootId) pushEdge(id, rootId, "enable");
   }
 
@@ -271,6 +304,7 @@ function buildHeuristicIntentOps(graph: CDG, userText: string, knownStmt: Set<st
       confidence: 0.9,
       importance: 0.8,
     });
+    if (id) layer2Set.add(id);
     if (id && rootId) pushEdge(id, rootId, "enable");
   }
 
@@ -283,7 +317,19 @@ function buildHeuristicIntentOps(graph: CDG, userText: string, knownStmt: Set<st
       confidence: 0.88,
       importance: 0.78,
     });
+    if (id) layer2Set.add(id);
     if (id && rootId) pushEdge(id, rootId, "constraint");
+  }
+  if (!signals.durationDays && signals.durationUnknown) {
+    const id = pushNode({
+      type: "question",
+      statement: "行程时长：待确认",
+      status: "proposed",
+      confidence: 0.78,
+      importance: 0.62,
+    });
+    if (id) layer2Set.add(id);
+    if (id && rootId) pushEdge(id, rootId, "determine");
   }
 
   if (signals.budgetCny) {
@@ -295,8 +341,15 @@ function buildHeuristicIntentOps(graph: CDG, userText: string, knownStmt: Set<st
       confidence: 0.92,
       importance: 0.86,
     });
+    if (id) layer2Set.add(id);
     if (id && rootId) pushEdge(id, rootId, "constraint");
   }
+
+  let healthId: string | null = null;
+  const existingHealth = (graph.nodes || []).find(
+    (n: any) => n?.type === "constraint" && typeof n?.statement === "string" && RISK_HEALTH_RE.test(n.statement)
+  );
+  if (existingHealth?.id) healthId = existingHealth.id;
 
   if (signals.healthConstraint) {
     const id = pushNode({
@@ -308,8 +361,19 @@ function buildHeuristicIntentOps(graph: CDG, userText: string, knownStmt: Set<st
       severity: "critical",
       importance: 0.98,
       tags: ["health", "safety"],
+      locked: true,
     });
-    if (id && rootId) pushEdge(id, rootId, "constraint");
+    if (id) healthId = id;
+  }
+
+  if (healthId && rootId) {
+    pushEdge(healthId, rootId, "constraint");
+  }
+  if (healthId) {
+    for (const sid of layer2Set) {
+      if (!sid || sid === healthId) continue;
+      pushEdge(sid, healthId, "determine");
+    }
   }
 
   return ops;
@@ -357,6 +421,8 @@ function makeTempId(prefix: string) {
 function fallbackPatch(graph: CDG, userText: string, reason: string): GraphPatch {
   const root = pickRootGoalId(graph);
   const short = cleanStatement(userText, 140);
+  const signals = extractIntentSignals(userText);
+  const canonicalIntent = buildTravelIntentStatement(signals, userText);
 
   if (!root) {
     return {
@@ -366,9 +432,9 @@ function fallbackPatch(graph: CDG, userText: string, reason: string): GraphPatch
           node: {
             id: makeTempId("n"),
             type: "goal",
-            statement: short || "未提供任务",
+            statement: canonicalIntent || short || "未提供任务",
             status: "proposed",
-            confidence: 0.55,
+            confidence: canonicalIntent ? 0.85 : 0.55,
           },
         },
       ],
@@ -413,6 +479,8 @@ function fallbackPatch(graph: CDG, userText: string, reason: string): GraphPatch
 /** 后处理：去重 + 自动补边 + 限制 op 数量 */
 function postProcessPatch(graph: CDG, patch: GraphPatch, latestUserText: string): GraphPatch {
   const enriched = enrichPatchRiskAndText(patch);
+  const signals = extractIntentSignals(latestUserText);
+  const canonicalIntent = buildTravelIntentStatement(signals, latestUserText);
   const existingByStmt = new Map<string, string>();
   for (const n of graph.nodes || []) {
     const key = normalizeForMatch(n.statement);
@@ -428,7 +496,26 @@ function postProcessPatch(graph: CDG, patch: GraphPatch, latestUserText: string)
   }
 
   const heuristicOps = buildHeuristicIntentOps(graph, latestUserText, knownStmt);
-  const mergedOps = [...(enriched.ops || []), ...heuristicOps];
+  const mergedOps = [...(enriched.ops || []), ...heuristicOps].map((op: any) => {
+    if (
+      canonicalIntent &&
+      op?.op === "add_node" &&
+      op?.node?.type === "goal" &&
+      typeof op?.node?.statement === "string" &&
+      shouldNormalizeGoalStatement(op.node.statement, signals, latestUserText)
+    ) {
+      return {
+        ...op,
+        node: {
+          ...op.node,
+          statement: canonicalIntent,
+          confidence: Math.max(Number(op.node.confidence) || 0.6, 0.85),
+          importance: op.node.importance != null ? Math.max(Number(op.node.importance) || 0, 0.8) : 0.8,
+        },
+      };
+    }
+    return op;
+  });
 
   const root = pickRootGoalId(graph);
   const newStmt = new Set<string>();
@@ -470,7 +557,7 @@ function postProcessPatch(graph: CDG, patch: GraphPatch, latestUserText: string)
     }
   }
 
-  return { ops: kept.slice(0, 16), notes: (enriched.notes || []).slice(0, 12) };
+  return { ops: kept.slice(0, 24), notes: (enriched.notes || []).slice(0, 16) };
 }
 
 const GRAPH_SYSTEM_PROMPT = `
@@ -533,28 +620,32 @@ export async function generateGraphPatch(params: {
   const raw = String(resp.choices?.[0]?.message?.content ?? "");
   dlog("raw_len=", raw.length, "finish=", resp.choices?.[0]?.finish_reason);
 
+  let basePatch: GraphPatch;
   const jsonText = extractBetween(raw, PATCH_START, PATCH_END);
   if (!jsonText) {
     dlog("missing markers -> fallback");
-    return fallbackPatch(params.graph, params.userText, "missing_markers");
+    basePatch = fallbackPatch(params.graph, params.userText, "missing_markers");
+  } else {
+    const parsed = safeJsonParse(jsonText);
+    if (!parsed) {
+      dlog("invalid json -> fallback");
+      basePatch = fallbackPatch(params.graph, params.userText, "invalid_json");
+    } else {
+      // ✅ 核心：严格白名单清洗（默认禁止 remove）
+      const strict = sanitizeGraphPatchStrict(parsed);
+      if (!strict.ops.length) {
+        dlog("empty strict ops -> fallback");
+        basePatch = fallbackPatch(params.graph, params.userText, "empty_ops");
+      } else {
+        basePatch = strict;
+      }
+    }
   }
 
-  const parsed = safeJsonParse(jsonText);
-  if (!parsed) {
-    dlog("invalid json -> fallback");
-    return fallbackPatch(params.graph, params.userText, "invalid_json");
+  const post = postProcessPatch(params.graph, basePatch, params.userText);
+  if (!post.ops.length) {
+    return fallbackPatch(params.graph, params.userText, "post_empty_ops");
   }
-
-  // ✅ 核心：严格白名单清洗（默认禁止 remove）
-  const strict = sanitizeGraphPatchStrict(parsed);
-
-  // 空 patch 也不允许把图“断更”：给 fallback
-  if (!strict.ops.length) {
-    dlog("empty strict ops -> fallback");
-    return fallbackPatch(params.graph, params.userText, "empty_ops");
-  }
-
-  const post = postProcessPatch(params.graph, strict, params.userText);
 
   // 打印 op 概览，定位“为什么图被清空”
   if (DEBUG) {
