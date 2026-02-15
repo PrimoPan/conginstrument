@@ -11,7 +11,7 @@ convRouter.use(authMiddleware);
 
 function defaultSystemPrompt() {
   // 不限定云南/旅游，保持通用任务助手
-  return `你是CogInstrument的助手，目标是帮助用户完成当前任务，并通过提问澄清用户的目标/约束/偏好。`;
+  return `你是CogInstrument的助手，目标是帮助用户完成当前任务，并通过提问澄清用户的目标/约束/偏好。每个conversation都是独立的新会话，不要引用其他会话信息。`;
 }
 
 function emptyGraph(conversationId: string): CDG {

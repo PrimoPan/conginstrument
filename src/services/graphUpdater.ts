@@ -96,6 +96,225 @@ function enrichPatchRiskAndText(patch: GraphPatch): GraphPatch {
   return { ...patch, ops };
 }
 
+function parseCnInt(raw: string): number | null {
+  const s = String(raw ?? "").trim();
+  if (!s) return null;
+  if (/^\d+$/.test(s)) return Number(s);
+
+  const map: Record<string, number> = {
+    零: 0,
+    一: 1,
+    二: 2,
+    两: 2,
+    三: 3,
+    四: 4,
+    五: 5,
+    六: 6,
+    七: 7,
+    八: 8,
+    九: 9,
+  };
+
+  if (s === "十") return 10;
+  if (s.includes("十")) {
+    const [a, b] = s.split("十");
+    const tens = a ? map[a] : 1;
+    const ones = b ? map[b] : 0;
+    if (tens == null || ones == null) return null;
+    return tens * 10 + ones;
+  }
+
+  if (map[s] != null) return map[s];
+  return null;
+}
+
+function normalizeDestination(raw: string): string {
+  let s = cleanStatement(raw, 24);
+  s = s.replace(/^(江苏|浙江|广东|山东|四川|云南|福建|安徽|江西|河北|河南|湖北|湖南|广西|海南|黑龙江|吉林|辽宁|山西|陕西|甘肃|青海|贵州|内蒙古|宁夏|新疆|西藏|北京|上海|天津|重庆)/, "$1");
+  s = s.replace(/(旅游|旅行|游玩|出行|度假)$/i, "");
+  s = s.trim();
+  return s;
+}
+
+type IntentSignals = {
+  peopleCount?: number;
+  destination?: string;
+  durationDays?: number;
+  budgetCny?: number;
+  healthConstraint?: string;
+};
+
+function pickHealthClause(userText: string): string | undefined {
+  const parts = String(userText)
+    .split(/[。！？!?；;\n]/)
+    .map((x) => cleanStatement(x, 60))
+    .filter(Boolean);
+  const hit = parts.find((x) => RISK_HEALTH_RE.test(x));
+  return hit || undefined;
+}
+
+function extractIntentSignals(userText: string): IntentSignals {
+  const text = String(userText || "");
+  const out: IntentSignals = {};
+
+  const peopleM =
+    text.match(/(?:一家|全家|我们|同行)[^\d一二三四五六七八九十两]{0,4}([0-9一二三四五六七八九十两]{1,3})\s*(?:口|人)/) ||
+    text.match(/([0-9一二三四五六七八九十两]{1,3})\s*(?:口|人)(?:同行|一起|出游|旅游|出行)?/);
+  if (peopleM?.[1]) {
+    const n = parseCnInt(peopleM[1]);
+    if (n && n > 0 && n < 30) out.peopleCount = n;
+  }
+
+  const destM =
+    text.match(/(?:去|到|在)\s*([^\s，。,；;！!？?\d]{2,16}?)(?:玩|旅游|旅行|度假|出行|住|待|逛|，|。|,|$)/) ||
+    text.match(/目的地(?:是|为)?\s*([^\s，。,；;！!？?\d]{2,16})/);
+  if (destM?.[1]) {
+    const d = normalizeDestination(destM[1]);
+    if (d) out.destination = d;
+  }
+
+  const daysM = text.match(/([0-9一二三四五六七八九十两]{1,3})\s*天/);
+  if (daysM?.[1]) {
+    const d = parseCnInt(daysM[1]);
+    if (d && d > 0 && d <= 60) out.durationDays = d;
+  }
+
+  const budgetM = text.match(/预算[为是]?\s*([0-9]{3,8})\s*(?:元|块|人民币)?/);
+  if (budgetM?.[1]) {
+    const b = Number(budgetM[1]);
+    if (Number.isFinite(b) && b > 0) out.budgetCny = b;
+  }
+
+  const healthClause = pickHealthClause(text);
+  if (healthClause) out.healthConstraint = healthClause;
+
+  return out;
+}
+
+function buildHeuristicIntentOps(graph: CDG, userText: string, knownStmt: Set<string>): GraphPatch["ops"] {
+  const ops: GraphPatch["ops"] = [];
+  const signals = extractIntentSignals(userText);
+
+  const edgePairs = new Set<string>();
+  for (const e of graph.edges || []) {
+    edgePairs.add(`${e.from}|${e.to}|${e.type}`);
+  }
+
+  let rootId: string | null = pickRootGoalId(graph);
+
+  const pushNode = (node: any): string | null => {
+    const statement = cleanStatement(node.statement);
+    if (!statement) return null;
+    const key = normalizeForMatch(statement);
+    if (!key || knownStmt.has(key)) return null;
+    knownStmt.add(key);
+    const id = makeTempId("n");
+    ops.push({
+      op: "add_node",
+      node: { ...node, id, statement },
+    });
+    return id;
+  };
+
+  const pushEdge = (from: string, to: string, type: "enable" | "constraint") => {
+    const k = `${from}|${to}|${type}`;
+    if (edgePairs.has(k)) return;
+    edgePairs.add(k);
+    ops.push({
+      op: "add_edge",
+      edge: {
+        id: makeTempId("e"),
+        from,
+        to,
+        type,
+        confidence: 0.75,
+      },
+    });
+  };
+
+  // 无 root 且出现可识别目标信号时，先补一个目标节点。
+  if (!rootId && (signals.destination || signals.durationDays || signals.budgetCny || signals.peopleCount)) {
+    const goalStatement = [
+      "旅行目标：",
+      signals.destination || "本次出行",
+      signals.durationDays ? `${signals.durationDays}天` : "",
+      "家庭方案",
+    ]
+      .filter(Boolean)
+      .join("");
+
+    rootId = pushNode({
+      type: "goal",
+      statement: goalStatement,
+      status: "proposed",
+      confidence: 0.82,
+      importance: 0.85,
+    });
+  }
+
+  if (signals.peopleCount) {
+    const id = pushNode({
+      type: "fact",
+      statement: `同行人数：${signals.peopleCount}人`,
+      status: "proposed",
+      confidence: 0.9,
+      importance: 0.72,
+    });
+    if (id && rootId) pushEdge(id, rootId, "enable");
+  }
+
+  if (signals.destination) {
+    const id = pushNode({
+      type: "fact",
+      statement: `目的地：${signals.destination}`,
+      status: "proposed",
+      confidence: 0.9,
+      importance: 0.8,
+    });
+    if (id && rootId) pushEdge(id, rootId, "enable");
+  }
+
+  if (signals.durationDays) {
+    const id = pushNode({
+      type: "constraint",
+      statement: `行程时长：${signals.durationDays}天`,
+      strength: "hard",
+      status: "proposed",
+      confidence: 0.88,
+      importance: 0.78,
+    });
+    if (id && rootId) pushEdge(id, rootId, "constraint");
+  }
+
+  if (signals.budgetCny) {
+    const id = pushNode({
+      type: "constraint",
+      statement: `预算上限：${signals.budgetCny}元`,
+      strength: "hard",
+      status: "proposed",
+      confidence: 0.92,
+      importance: 0.86,
+    });
+    if (id && rootId) pushEdge(id, rootId, "constraint");
+  }
+
+  if (signals.healthConstraint) {
+    const id = pushNode({
+      type: "constraint",
+      statement: `健康约束：${signals.healthConstraint}`,
+      strength: "hard",
+      status: "proposed",
+      confidence: 0.95,
+      severity: "critical",
+      importance: 0.98,
+      tags: ["health", "safety"],
+    });
+    if (id && rootId) pushEdge(id, rootId, "constraint");
+  }
+
+  return ops;
+}
+
 function normalizeForMatch(s: string) {
   return String(s || "")
     .trim()
@@ -192,7 +411,7 @@ function fallbackPatch(graph: CDG, userText: string, reason: string): GraphPatch
 }
 
 /** 后处理：去重 + 自动补边 + 限制 op 数量 */
-function postProcessPatch(graph: CDG, patch: GraphPatch): GraphPatch {
+function postProcessPatch(graph: CDG, patch: GraphPatch, latestUserText: string): GraphPatch {
   const enriched = enrichPatchRiskAndText(patch);
   const existingByStmt = new Map<string, string>();
   for (const n of graph.nodes || []) {
@@ -200,12 +419,23 @@ function postProcessPatch(graph: CDG, patch: GraphPatch): GraphPatch {
     if (key) existingByStmt.set(key, n.id);
   }
 
+  const knownStmt = new Set<string>(existingByStmt.keys());
+  for (const op of enriched.ops || []) {
+    if (op?.op === "add_node" && typeof op?.node?.statement === "string") {
+      const key = normalizeForMatch(op.node.statement);
+      if (key) knownStmt.add(key);
+    }
+  }
+
+  const heuristicOps = buildHeuristicIntentOps(graph, latestUserText, knownStmt);
+  const mergedOps = [...(enriched.ops || []), ...heuristicOps];
+
   const root = pickRootGoalId(graph);
   const newStmt = new Set<string>();
   const newNodes: Array<{ id: string; type: string }> = [];
   const kept: any[] = [];
 
-  for (const op of enriched.ops || []) {
+  for (const op of mergedOps || []) {
     if (op?.op === "add_node" && typeof op?.node?.statement === "string") {
       const key = normalizeForMatch(op.node.statement);
       if (!key) continue;
@@ -240,7 +470,7 @@ function postProcessPatch(graph: CDG, patch: GraphPatch): GraphPatch {
     }
   }
 
-  return { ops: kept.slice(0, 12), notes: (enriched.notes || []).slice(0, 10) };
+  return { ops: kept.slice(0, 16), notes: (enriched.notes || []).slice(0, 12) };
 }
 
 const GRAPH_SYSTEM_PROMPT = `
@@ -260,6 +490,7 @@ const GRAPH_SYSTEM_PROMPT = `
 - 若信息包含健康/安全/法律等高风险因素，务必设置 severity（high 或 critical），并可补 tags（如 ["health"]）。
 - 若信息表达“不能/必须/禁忌”等限制，优先用 constraint，且 strength 优先 hard。
 - statement 保持简洁，不要加“用户补充：/用户任务：”前缀。
+- 旅行类请求优先拆分成原子节点：人数、目的地、时长、预算、健康限制，不要把所有信息塞进一个节点。
 - 边类型：enable / constraint / determine / conflicts_with
 - 去重：已有等价节点优先 update_node
 - 连边克制：有 root_goal_id 时，constraint/preference/fact/belief 可以连到 root_goal_id
@@ -323,7 +554,7 @@ export async function generateGraphPatch(params: {
     return fallbackPatch(params.graph, params.userText, "empty_ops");
   }
 
-  const post = postProcessPatch(params.graph, strict);
+  const post = postProcessPatch(params.graph, strict, params.userText);
 
   // 打印 op 概览，定位“为什么图被清空”
   if (DEBUG) {
