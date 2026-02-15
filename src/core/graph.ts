@@ -70,6 +70,8 @@ const ALLOWED_NODE_TYPES = new Set<ConceptType>([
   "question",
 ]);
 const ALLOWED_EDGE_TYPES = new Set<EdgeType>(["enable", "constraint", "determine", "conflicts_with"]);
+const HEALTH_RE =
+  /心脏|心肺|冠心|心血管|高血压|糖尿病|哮喘|慢性病|手术|过敏|孕|老人|老年|儿童|行动不便|不能爬山|不能久走|危险|安全|急救|摔倒|health|medical|heart|cardiac|safety|risk/i;
 
 function clamp01(x: any, d = 0.6) {
   const n = Number(x);
@@ -92,6 +94,83 @@ function normalizeSeverity(x: any): Severity | undefined {
   if (!s) return undefined;
   if (ALLOWED_SEVERITY.has(s as Severity)) return s as Severity;
   return undefined;
+}
+
+function slotKeyOfNode(node: ConceptNode): string | null {
+  const s = cleanText(node.statement);
+  if (!s) return null;
+
+  if (node.type === "constraint" && /^预算(?:上限)?[:：]\s*[0-9]{2,}\s*元?$/.test(s)) return "slot:budget";
+  if (node.type === "constraint" && /^行程时长[:：]\s*[0-9]{1,3}\s*天$/.test(s)) return "slot:duration";
+  if (node.type === "fact" && /^同行人数[:：]\s*[0-9]{1,3}\s*人$/.test(s)) return "slot:people";
+  if (node.type === "fact" && /^目的地[:：]\s*.+$/.test(s)) return "slot:destination";
+  if ((node.type === "preference" || node.type === "constraint") && /^景点偏好[:：]\s*.+$/.test(s)) return "slot:scenic_preference";
+  if (node.type === "constraint" && HEALTH_RE.test(s)) return "slot:health";
+  return null;
+}
+
+function statementNumericHint(node: ConceptNode): number {
+  const s = cleanText(node.statement);
+  const budget = s.match(/^预算(?:上限)?[:：]\s*([0-9]{2,})\s*元?$/);
+  if (budget?.[1]) return Number(budget[1]);
+  const duration = s.match(/^行程时长[:：]\s*([0-9]{1,3})\s*天$/);
+  if (duration?.[1]) return Number(duration[1]);
+  const people = s.match(/^同行人数[:：]\s*([0-9]{1,3})\s*人$/);
+  if (people?.[1]) return Number(people[1]);
+  return 0;
+}
+
+function chooseSlotWinner(nodes: ConceptNode[], touched: Set<string>): ConceptNode {
+  return nodes
+    .slice()
+    .sort((a, b) => {
+      const touchScore = (touched.has(b.id) ? 1 : 0) - (touched.has(a.id) ? 1 : 0);
+      if (touchScore !== 0) return touchScore;
+
+      const statusScore = (b.status === "confirmed" ? 1 : 0) - (a.status === "confirmed" ? 1 : 0);
+      if (statusScore !== 0) return statusScore;
+
+      const confScore = (Number(b.confidence) || 0) - (Number(a.confidence) || 0);
+      if (confScore !== 0) return confScore;
+
+      const impScore = (Number(b.importance) || 0) - (Number(a.importance) || 0);
+      if (impScore !== 0) return impScore;
+
+      const numericScore = statementNumericHint(b) - statementNumericHint(a);
+      if (numericScore !== 0) return numericScore;
+
+      return cleanText(b.id).localeCompare(cleanText(a.id));
+    })[0];
+}
+
+function compactSingletonSlots(
+  nodesById: Map<string, ConceptNode>,
+  edgesById: Map<string, ConceptEdge>,
+  touched: Set<string>
+): boolean {
+  const slotToNodes = new Map<string, ConceptNode[]>();
+  for (const n of nodesById.values()) {
+    const slot = slotKeyOfNode(n);
+    if (!slot) continue;
+    if (!slotToNodes.has(slot)) slotToNodes.set(slot, []);
+    slotToNodes.get(slot)!.push(n);
+  }
+
+  let changed = false;
+  for (const nodes of slotToNodes.values()) {
+    if (nodes.length <= 1) continue;
+    const winner = chooseSlotWinner(nodes, touched);
+    for (const n of nodes) {
+      if (n.id === winner.id) continue;
+      nodesById.delete(n.id);
+      changed = true;
+      for (const [eid, e] of edgesById.entries()) {
+        if (e.from === n.id || e.to === n.id) edgesById.delete(eid);
+      }
+    }
+  }
+
+  return changed;
 }
 
 function normalizeNodeForInsert(n: ConceptNode): ConceptNode | null {
@@ -207,6 +286,7 @@ export function applyPatchWithGuards(graph: CDG, patch: GraphPatch) {
   const nodesById = new Map(graph.nodes.map((n) => [n.id, n]));
   const edgesById = new Map(graph.edges.map((e) => [e.id, e]));
   const locked = new Set(graph.nodes.filter((n) => n.locked).map((n) => n.id));
+  const touchedNodeIds = new Set<string>();
 
   // 2) rewrite 临时 id（包括 edge.from/to）
   const rewrittenOps = patch.ops.map((op) => {
@@ -238,6 +318,7 @@ export function applyPatchWithGuards(graph: CDG, patch: GraphPatch) {
 
       if (!nodesById.has(node.id)) {
         nodesById.set(node.id, node);
+        touchedNodeIds.add(node.id);
         appliedOps.push({ ...op, node });
       }
       continue;
@@ -253,6 +334,7 @@ export function applyPatchWithGuards(graph: CDG, patch: GraphPatch) {
       if (Object.keys(patchNorm).length === 0) continue;
 
       nodesById.set(op.id, { ...cur, ...patchNorm });
+      touchedNodeIds.add(op.id);
       appliedOps.push({ ...op, patch: patchNorm });
       continue;
     }
@@ -294,8 +376,10 @@ export function applyPatchWithGuards(graph: CDG, patch: GraphPatch) {
     }
   }
 
+  const compactChanged = compactSingletonSlots(nodesById, edgesById, touchedNodeIds);
+
   // ✅ 只有真正应用了 op 才 bump 版本（更符合“版本=结构变化”）
-  const versionInc = appliedOps.length > 0 ? 1 : 0;
+  const versionInc = appliedOps.length > 0 || compactChanged ? 1 : 0;
 
   const newGraph: CDG = {
     ...graph,

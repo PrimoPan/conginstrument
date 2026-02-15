@@ -156,42 +156,60 @@ function mergeTextSegments(parts: string[]) {
   return out.join("\n");
 }
 
+type BudgetMatch = { value: number; evidence: string; index: number };
+
+function pickLatestBudgetMatch(
+  text: string,
+  pattern: RegExp,
+  parseValue: (raw: string) => number
+): BudgetMatch | null {
+  const flags = pattern.flags.includes("g") ? pattern.flags : `${pattern.flags}g`;
+  const re = new RegExp(pattern.source, flags);
+  let best: BudgetMatch | null = null;
+
+  for (const m of text.matchAll(re)) {
+    if (!m?.[1]) continue;
+    const value = parseValue(m[1]);
+    if (!Number.isFinite(value) || value <= 0) continue;
+    const index = Number(m.index) || 0;
+    const candidate: BudgetMatch = {
+      value,
+      index,
+      evidence: cleanStatement(m[0] || m[1], 40),
+    };
+    if (!best || candidate.index >= best.index) best = candidate;
+  }
+
+  return best;
+}
+
 function pickBudgetFromText(text: string): { value: number; evidence: string } | null {
   const t = String(text || "").replace(/,/g, "");
   if (!t) return null;
 
   const wanPatterns = [
-    /(?:总预算|预算|经费|花费|费用)(?:大概|大约|约|在|为|是|控制在|控制|不超过|不要超过|上限为|上限是|以内|左右|约为|大致|大致在|大概在)?\s*([0-9]+(?:\.[0-9]+)?)\s*万/i,
+    /(?:总预算|预算(?:上限)?|经费|花费|费用)\s*(?:调整为|改成|改到|上调到|提高到|提升到|放宽到|调到|更新为|大概|大约|约|在|为|是|控制在|控制|不超过|不要超过|上限为|上限是|以内|左右|约为|大致|大致在|大概在)?\s*([0-9]+(?:\.[0-9]+)?)\s*万/i,
     /([0-9]+(?:\.[0-9]+)?)\s*万(?:元|人民币)?\s*(?:预算|经费|花费|费用)?/i,
   ];
+  let best: BudgetMatch | null = null;
   for (const re of wanPatterns) {
-    const m = t.match(re);
-    if (!m?.[1]) continue;
-    const n = Number(m[1]);
-    const value = Math.round(n * 10000);
-    if (!Number.isFinite(value) || value <= 0) continue;
-    return {
-      value,
-      evidence: cleanStatement(m[0] || `${m[1]}万`, 40),
-    };
+    const match = pickLatestBudgetMatch(t, re, (raw) => Math.round(Number(raw) * 10000));
+    if (!match) continue;
+    if (!best || match.index >= best.index) best = match;
   }
 
   const yuanPatterns = [
-    /(?:总预算|预算|经费|花费|费用)(?:大概|大约|约|在|为|是|控制在|控制|不超过|不要超过|上限为|上限是|以内|左右|约为|大致|大致在|大概在)?\s*([0-9]{3,9})(?:\s*[-~到至]\s*[0-9]{3,9})?\s*(?:元|块|人民币)?/i,
+    /(?:总预算|预算(?:上限)?|经费|花费|费用)\s*(?:调整为|改成|改到|上调到|提高到|提升到|放宽到|调到|更新为|大概|大约|约|在|为|是|控制在|控制|不超过|不要超过|上限为|上限是|以内|左右|约为|大致|大致在|大概在)?\s*([0-9]{3,9})(?:\s*[-~到至]\s*[0-9]{3,9})?\s*(?:元|块|人民币)?/i,
     /([0-9]{3,9})\s*(?:元|块|人民币)\s*(?:预算|总预算|经费|花费|费用)?/i,
   ];
   for (const re of yuanPatterns) {
-    const m = t.match(re);
-    if (!m?.[1]) continue;
-    const value = Number(m[1]);
-    if (!Number.isFinite(value) || value <= 0) continue;
-    return {
-      value,
-      evidence: cleanStatement(m[0] || `${m[1]}元`, 40),
-    };
+    const match = pickLatestBudgetMatch(t, re, (raw) => Number(raw));
+    if (!match) continue;
+    if (!best || match.index >= best.index) best = match;
   }
 
-  return null;
+  if (!best) return null;
+  return { value: best.value, evidence: best.evidence };
 }
 
 function enrichNodeRisk(node: any) {
@@ -467,6 +485,49 @@ function extractIntentSignals(userText: string): IntentSignals {
   return out;
 }
 
+function mergeSignalsWithLatest(history: IntentSignals, latest: IntentSignals): IntentSignals {
+  const out: IntentSignals = { ...history };
+
+  if (latest.peopleCount != null) {
+    out.peopleCount = latest.peopleCount;
+    out.peopleEvidence = latest.peopleEvidence || out.peopleEvidence;
+  }
+  if (latest.destination) {
+    out.destination = latest.destination;
+    out.destinationEvidence = latest.destinationEvidence || out.destinationEvidence;
+  }
+  if (latest.durationDays != null) {
+    out.durationDays = latest.durationDays;
+    out.durationEvidence = latest.durationEvidence || out.durationEvidence;
+    out.durationUnknown = false;
+    out.durationUnknownEvidence = undefined;
+  } else if (latest.durationUnknown) {
+    out.durationUnknown = true;
+    out.durationUnknownEvidence = latest.durationUnknownEvidence || out.durationUnknownEvidence;
+  }
+  if (latest.budgetCny != null) {
+    out.budgetCny = latest.budgetCny;
+    out.budgetEvidence = latest.budgetEvidence || out.budgetEvidence;
+  }
+  if (latest.healthConstraint) {
+    out.healthConstraint = latest.healthConstraint;
+    out.healthEvidence = latest.healthEvidence || out.healthEvidence;
+  }
+  if (latest.scenicPreference) {
+    out.scenicPreference = latest.scenicPreference;
+    out.scenicPreferenceEvidence = latest.scenicPreferenceEvidence || out.scenicPreferenceEvidence;
+    out.scenicPreferenceHard = latest.scenicPreferenceHard;
+  }
+
+  return out;
+}
+
+function extractIntentSignalsWithRecency(historyText: string, latestUserText: string): IntentSignals {
+  const fromHistory = extractIntentSignals(historyText);
+  const fromLatest = extractIntentSignals(latestUserText);
+  return mergeSignalsWithLatest(fromHistory, fromLatest);
+}
+
 function buildHeuristicIntentOps(
   graph: CDG,
   signalText: string,
@@ -475,7 +536,7 @@ function buildHeuristicIntentOps(
   seedOps: GraphPatch["ops"]
 ): GraphPatch["ops"] {
   const ops: GraphPatch["ops"] = [];
-  const signals = extractIntentSignals(signalText);
+  const signals = extractIntentSignalsWithRecency(signalText, latestUserText);
   const canonicalIntent = buildTravelIntentStatement(signals, signalText);
 
   const edgePairs = new Set<string>();
@@ -892,7 +953,7 @@ function postProcessPatch(
     latestUserText,
   ]);
   const enriched = enrichPatchRiskAndText(patch, latestUserText);
-  const signals = extractIntentSignals(signalText);
+  const signals = extractIntentSignalsWithRecency(signalText, latestUserText);
   const canonicalIntent = buildTravelIntentStatement(signals, signalText);
   const existingByStmt = new Map<string, string>();
   for (const n of graph.nodes || []) {
