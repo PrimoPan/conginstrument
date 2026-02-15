@@ -144,6 +144,22 @@ function isStrategicNode(node: any) {
   return false;
 }
 
+function shouldAutoAttachToRoot(node: {
+  type?: string;
+  statement?: string;
+  severity?: string;
+  importance?: number;
+}) {
+  const s = cleanStatement(node?.statement || "", 180);
+  if (!s) return false;
+  if (isStructuredStatement(s)) return true;
+  if (/^健康约束[:：]/.test(s)) return true;
+  if (String(node?.severity || "") === "high" || String(node?.severity || "") === "critical") return true;
+  if ((Number(node?.importance) || 0) >= 0.82) return true;
+  if (String(node?.type || "") === "preference" && /偏好|喜欢|不喜欢|人文|自然/.test(s)) return true;
+  return false;
+}
+
 function mergeTextSegments(parts: string[]) {
   const out: string[] = [];
   const seen = new Set<string>();
@@ -1012,7 +1028,13 @@ function postProcessPatch(
   const root = pickRootGoalId(graph);
   const newStmt = new Set<string>();
   const newStmtId = new Map<string, string>();
-  const newNodes: Array<{ id: string; type: string }> = [];
+  const newNodes: Array<{
+    id: string;
+    type: string;
+    statement: string;
+    severity?: string;
+    importance?: number;
+  }> = [];
   const keptAddIds = new Set<string>();
   const edgePairs = new Set<string>((graph.edges || []).map((e) => `${e.from}|${e.to}|${e.type}`));
   const prepped = (mergedOps || []).reduce<any[]>((acc, op: any) => {
@@ -1108,7 +1130,13 @@ function postProcessPatch(
       newStmt.add(key);
       newStmtId.set(key, op.node.id);
       keptAddIds.add(op.node.id);
-      newNodes.push({ id: op.node.id, type: op.node.type });
+      newNodes.push({
+        id: op.node.id,
+        type: op.node.type,
+        statement: cleanStatement(op.node.statement || "", 180),
+        severity: op.node.severity,
+        importance: op.node.importance,
+      });
       continue;
     }
   }
@@ -1150,8 +1178,11 @@ function postProcessPatch(
       kept.some((x) => x?.op === "add_edge" && x?.edge?.from === from && x?.edge?.to === to);
 
     let k = 1;
+    let autoAttachCount = 0;
     for (const n of newNodes) {
+      if (autoAttachCount >= 4) break;
       if (!["constraint", "preference", "fact", "belief"].includes(n.type)) continue;
+      if (!shouldAutoAttachToRoot(n)) continue;
       if (hasEdge(n.id, rootForEdge)) continue;
       kept.push({
         op: "add_edge",
@@ -1163,6 +1194,7 @@ function postProcessPatch(
           confidence: 0.65,
         },
       });
+      autoAttachCount += 1;
     }
   }
 
@@ -1187,10 +1219,12 @@ const GRAPH_SYSTEM_PROMPT = `
 - 若信息表达“不能/必须/禁忌”等限制，优先用 constraint，且 strength 优先 hard。
 - 若出现“喜欢/更喜欢/不感兴趣”这类景点偏好，优先生成 preference；若用户明确“硬性要求”，可升为 constraint（通常 severity=medium）。
 - statement 保持简洁，不要加“用户补充：/用户任务：”前缀。
-- 旅行类请求优先拆分成原子节点：人数、目的地、时长、预算、健康限制，不要把所有信息塞进一个节点。
+- 旅行类请求优先拆分成原子节点：人数、目的地、时长、预算、健康限制、住宿偏好，不要把所有信息塞进一个节点。
 - 避免把“第一天/第二天/详细行程建议”这类叙事文本直接建成节点。
+- 对同一槽位（预算/时长/人数/目的地/住宿偏好）优先 update 旧节点，不要重复 add。
 - 意图（goal）作为根节点，子节点尽量与根节点连通，避免孤立节点。
 - 若有健康/安全硬约束，可作为第三层约束节点，第二层关键节点可用 determine 指向它。
+- 非核心细节节点优先挂到相关二级节点（determine），不要全部直接连到根节点。
 - 节点尽量附 evidenceIds（来自用户原句的短片段），用于前端高亮证据文本。
 - 边类型：enable / constraint / determine / conflicts_with
 - 去重：已有等价节点优先 update_node
