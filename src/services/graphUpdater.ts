@@ -79,6 +79,56 @@ function inferEvidenceFromStatement(userText: string, statement: string): string
   return undefined;
 }
 
+function mergeTextSegments(parts: string[]) {
+  const out: string[] = [];
+  const seen = new Set<string>();
+  for (const raw of parts) {
+    const s = String(raw || "").trim();
+    if (!s || seen.has(s)) continue;
+    seen.add(s);
+    out.push(s);
+  }
+  return out.join("\n");
+}
+
+function pickBudgetFromText(text: string): { value: number; evidence: string } | null {
+  const t = String(text || "").replace(/,/g, "");
+  if (!t) return null;
+
+  const wanPatterns = [
+    /(?:总预算|预算|经费|花费|费用)(?:大概|大约|约|在|为|是|控制在|控制|不超过|不要超过|上限为|上限是|以内|左右|约为|大致|大致在|大概在)?\s*([0-9]+(?:\.[0-9]+)?)\s*万/i,
+    /([0-9]+(?:\.[0-9]+)?)\s*万(?:元|人民币)?\s*(?:预算|经费|花费|费用)?/i,
+  ];
+  for (const re of wanPatterns) {
+    const m = t.match(re);
+    if (!m?.[1]) continue;
+    const n = Number(m[1]);
+    const value = Math.round(n * 10000);
+    if (!Number.isFinite(value) || value <= 0) continue;
+    return {
+      value,
+      evidence: cleanStatement(m[0] || `${m[1]}万`, 40),
+    };
+  }
+
+  const yuanPatterns = [
+    /(?:总预算|预算|经费|花费|费用)(?:大概|大约|约|在|为|是|控制在|控制|不超过|不要超过|上限为|上限是|以内|左右|约为|大致|大致在|大概在)?\s*([0-9]{3,9})(?:\s*[-~到至]\s*[0-9]{3,9})?\s*(?:元|块|人民币)?/i,
+    /([0-9]{3,9})\s*(?:元|块|人民币)\s*(?:预算|总预算|经费|花费|费用)?/i,
+  ];
+  for (const re of yuanPatterns) {
+    const m = t.match(re);
+    if (!m?.[1]) continue;
+    const value = Number(m[1]);
+    if (!Number.isFinite(value) || value <= 0) continue;
+    return {
+      value,
+      evidence: cleanStatement(m[0] || `${m[1]}元`, 40),
+    };
+  }
+
+  return null;
+}
+
 function enrichNodeRisk(node: any) {
   if (!node || typeof node !== "object") return node;
 
@@ -187,6 +237,48 @@ function isLikelyDestinationCandidate(x: string): boolean {
   return true;
 }
 
+function isHealthConstraintNode(node: any): boolean {
+  if (!node || typeof node !== "object") return false;
+  if (String(node.type || "") !== "constraint") return false;
+  return RISK_HEALTH_RE.test(String(node.statement || ""));
+}
+
+function scoreHealthNode(node: any): number {
+  if (!isHealthConstraintNode(node)) return -1;
+  const s = cleanStatement(node?.statement || "", 120);
+  let score = Number(node?.confidence) || 0;
+  if (/^健康约束[:：]/.test(s)) score += 4;
+  if (String(node?.severity || "") === "critical") score += 2;
+  if (node?.locked) score += 1;
+  if (String(node?.strength || "") === "hard") score += 1;
+  return score;
+}
+
+function isValidDestinationStatement(statement: string): boolean {
+  const m = cleanStatement(statement).match(/^目的地[:：]\s*(.+)$/);
+  if (!m?.[1]) return true;
+  return isLikelyDestinationCandidate(m[1]);
+}
+
+function isValidPeopleStatement(statement: string): boolean {
+  const m = cleanStatement(statement).match(/^同行人数[:：]\s*([0-9]+)\s*人?$/);
+  return !statement.startsWith("同行人数") || !!m;
+}
+
+function isValidBudgetStatement(statement: string): boolean {
+  const m = cleanStatement(statement).match(/^预算(?:上限)?[:：]\s*([0-9]{2,})\s*元?$/);
+  return !/预算/.test(statement) || !!m;
+}
+
+function isValidAtomicNode(node: any): boolean {
+  const s = cleanStatement(node?.statement || "");
+  if (!s) return false;
+  if (!isValidDestinationStatement(s)) return false;
+  if (!isValidPeopleStatement(s)) return false;
+  if (!isValidBudgetStatement(s)) return false;
+  return true;
+}
+
 type IntentSignals = {
   peopleCount?: number;
   peopleEvidence?: string;
@@ -272,19 +364,26 @@ function extractIntentSignals(userText: string): IntentSignals {
       out.durationEvidence = cleanStatement(daysM[0] || daysM[1], 24);
     }
   }
+  if (!out.durationDays) {
+    const weekM = text.match(/([0-9一二三四五六七八九十两]{1,3})\s*(?:周|星期)/);
+    if (weekM?.[1]) {
+      const w = parseCnInt(weekM[1]);
+      if (w && w > 0 && w <= 8) {
+        out.durationDays = w * 7;
+        out.durationEvidence = cleanStatement(weekM[0] || weekM[1], 24);
+      }
+    }
+  }
   if (!out.durationDays && /几天|多少天|天数待定|时长待定/i.test(text)) {
     out.durationUnknown = true;
     const du = text.match(/几天|多少天|天数待定|时长待定/i);
     out.durationUnknownEvidence = du?.[0] || "时长待确认";
   }
 
-  const budgetM = text.match(/预算[为是]?\s*([0-9]{3,8})\s*(?:元|块|人民币)?/);
-  if (budgetM?.[1]) {
-    const b = Number(budgetM[1]);
-    if (Number.isFinite(b) && b > 0) {
-      out.budgetCny = b;
-      out.budgetEvidence = cleanStatement(budgetM[0] || budgetM[1], 32);
-    }
+  const budget = pickBudgetFromText(text);
+  if (budget) {
+    out.budgetCny = budget.value;
+    out.budgetEvidence = budget.evidence;
   }
 
   const healthClause = pickHealthClause(text);
@@ -296,10 +395,16 @@ function extractIntentSignals(userText: string): IntentSignals {
   return out;
 }
 
-function buildHeuristicIntentOps(graph: CDG, userText: string, knownStmt: Set<string>): GraphPatch["ops"] {
+function buildHeuristicIntentOps(
+  graph: CDG,
+  signalText: string,
+  latestUserText: string,
+  knownStmt: Set<string>,
+  seedOps: GraphPatch["ops"]
+): GraphPatch["ops"] {
   const ops: GraphPatch["ops"] = [];
-  const signals = extractIntentSignals(userText);
-  const canonicalIntent = buildTravelIntentStatement(signals, userText);
+  const signals = extractIntentSignals(signalText);
+  const canonicalIntent = buildTravelIntentStatement(signals, signalText);
 
   const edgePairs = new Set<string>();
   for (const e of graph.edges || []) {
@@ -323,7 +428,10 @@ function buildHeuristicIntentOps(graph: CDG, userText: string, knownStmt: Set<st
     if (!key || knownStmt.has(key)) return null;
     knownStmt.add(key);
     const id = makeTempId("n");
-    const evidenceIds = mergeEvidence(node.evidenceIds, inferEvidenceFromStatement(userText, statement));
+    const evidenceIds = mergeEvidence(
+      node.evidenceIds,
+      inferEvidenceFromStatement(latestUserText, statement) || inferEvidenceFromStatement(signalText, statement)
+    );
     const sourceMsgIds = mergeEvidence(node.sourceMsgIds, ["latest_user"]);
     ops.push({
       op: "add_node",
@@ -367,7 +475,7 @@ function buildHeuristicIntentOps(graph: CDG, userText: string, knownStmt: Set<st
   }
   if (rootId && canonicalIntent) {
     const rootNode = (graph.nodes || []).find((n: any) => n.id === rootId);
-    if (rootNode?.statement && shouldNormalizeGoalStatement(rootNode.statement, signals, userText)) {
+    if (rootNode?.statement && shouldNormalizeGoalStatement(rootNode.statement, signals, signalText)) {
       ops.push({
         op: "update_node",
         id: rootId,
@@ -458,32 +566,63 @@ function buildHeuristicIntentOps(graph: CDG, userText: string, knownStmt: Set<st
   }
 
   let healthId: string | null = null;
-  const existingHealth = (graph.nodes || []).find(
-    (n: any) => n?.type === "constraint" && typeof n?.statement === "string" && RISK_HEALTH_RE.test(n.statement)
-  );
-  if (existingHealth?.id) healthId = existingHealth.id;
+  const existingHealth = (graph.nodes || []).find(isHealthConstraintNode);
+  const existingHealthInSeed = (seedOps || []).find(
+    (op: any) => op?.op === "add_node" && isHealthConstraintNode(op?.node)
+  ) as any;
+  if (existingHealthInSeed?.node?.id) {
+    healthId = existingHealthInSeed.node.id;
+  } else if (existingHealth?.id) {
+    healthId = existingHealth.id;
+  }
 
   if (signals.healthConstraint) {
-    const id = pushNode({
-      type: "constraint",
-      statement: `健康约束：${signals.healthConstraint}`,
-      strength: "hard",
-      status: "proposed",
-      confidence: 0.95,
-      severity: "critical",
-      importance: 0.98,
-      tags: ["health", "safety"],
-      locked: true,
-      evidenceIds: [signals.healthEvidence || signals.healthConstraint],
-    });
-    if (id) healthId = id;
+    const healthStatement = `健康约束：${signals.healthConstraint}`;
+    const healthEvidence = mergeEvidence(
+      [signals.healthEvidence || signals.healthConstraint],
+      inferEvidenceFromStatement(latestUserText, signals.healthConstraint) ||
+        inferEvidenceFromStatement(signalText, signals.healthConstraint)
+    );
+
+    if (healthId) {
+      ops.push({
+        op: "update_node",
+        id: healthId,
+        patch: {
+          statement: healthStatement,
+          strength: "hard",
+          status: "proposed",
+          confidence: 0.95,
+          severity: "critical",
+          importance: 0.98,
+          tags: ["health", "safety"],
+          locked: true,
+          evidenceIds: healthEvidence,
+          sourceMsgIds: ["latest_user"],
+        },
+      } as any);
+    } else {
+      const id = pushNode({
+        type: "constraint",
+        statement: healthStatement,
+        strength: "hard",
+        status: "proposed",
+        confidence: 0.95,
+        severity: "critical",
+        importance: 0.98,
+        tags: ["health", "safety"],
+        locked: true,
+        evidenceIds: healthEvidence,
+      });
+      if (id) healthId = id;
+    }
   }
 
   if (healthId && rootId) {
     pushEdge(healthId, rootId, "constraint");
   }
   if (healthId) {
-    for (const sid of layer2Set) {
+    for (const sid of Array.from(layer2Set)) {
       if (!sid || sid === healthId) continue;
       pushEdge(sid, healthId, "determine");
     }
@@ -604,10 +743,22 @@ function fallbackPatch(graph: CDG, userText: string, reason: string): GraphPatch
 }
 
 /** 后处理：去重 + 自动补边 + 限制 op 数量 */
-function postProcessPatch(graph: CDG, patch: GraphPatch, latestUserText: string): GraphPatch {
+function postProcessPatch(
+  graph: CDG,
+  patch: GraphPatch,
+  latestUserText: string,
+  recentTurns?: Array<{ role: "user" | "assistant"; content: string }>
+): GraphPatch {
+  const signalText = mergeTextSegments([
+    ...((recentTurns || [])
+      .filter((t) => t.role === "user")
+      .map((t) => String(t.content || ""))
+      .slice(-6)),
+    latestUserText,
+  ]);
   const enriched = enrichPatchRiskAndText(patch, latestUserText);
-  const signals = extractIntentSignals(latestUserText);
-  const canonicalIntent = buildTravelIntentStatement(signals, latestUserText);
+  const signals = extractIntentSignals(signalText);
+  const canonicalIntent = buildTravelIntentStatement(signals, signalText);
   const existingByStmt = new Map<string, string>();
   for (const n of graph.nodes || []) {
     const key = normalizeForMatch(n.statement);
@@ -622,14 +773,14 @@ function postProcessPatch(graph: CDG, patch: GraphPatch, latestUserText: string)
     }
   }
 
-  const heuristicOps = buildHeuristicIntentOps(graph, latestUserText, knownStmt);
+  const heuristicOps = buildHeuristicIntentOps(graph, signalText, latestUserText, knownStmt, enriched.ops || []);
   const mergedOps = [...(enriched.ops || []), ...heuristicOps].map((op: any) => {
     if (
       canonicalIntent &&
       op?.op === "add_node" &&
       op?.node?.type === "goal" &&
       typeof op?.node?.statement === "string" &&
-      shouldNormalizeGoalStatement(op.node.statement, signals, latestUserText)
+      shouldNormalizeGoalStatement(op.node.statement, signals, signalText)
     ) {
       return {
         ...op,
@@ -644,20 +795,116 @@ function postProcessPatch(graph: CDG, patch: GraphPatch, latestUserText: string)
     return op;
   });
 
+  const existingHealthId = (graph.nodes || []).find(isHealthConstraintNode)?.id || null;
+  const healthAdds = (mergedOps || []).filter(
+    (op: any) => op?.op === "add_node" && isHealthConstraintNode(op?.node)
+  ) as any[];
+  const keepHealthAddId =
+    !existingHealthId && healthAdds.length
+      ? [...healthAdds].sort((a, b) => scoreHealthNode(b.node) - scoreHealthNode(a.node))[0]?.node?.id || null
+      : null;
+  const healthMainId = existingHealthId || keepHealthAddId;
+  const idRemap = new Map<string, string>();
+  if (healthMainId) {
+    for (const op of healthAdds) {
+      const sid = String(op?.node?.id || "");
+      if (!sid || sid === healthMainId) continue;
+      idRemap.set(sid, healthMainId);
+    }
+  }
+
   const root = pickRootGoalId(graph);
   const newStmt = new Set<string>();
+  const newStmtId = new Map<string, string>();
   const newNodes: Array<{ id: string; type: string }> = [];
-  const kept: any[] = [];
+  const keptAddIds = new Set<string>();
+  const edgePairs = new Set<string>((graph.edges || []).map((e) => `${e.from}|${e.to}|${e.type}`));
+  const prepped = (mergedOps || []).reduce<any[]>((acc, op: any) => {
+    if (op?.op === "add_node" && op?.node) {
+      if (!isValidAtomicNode(op.node)) return acc;
+      const sid = String(op.node.id || "");
+      if (sid && idRemap.has(sid)) return acc;
+      acc.push(op);
+      return acc;
+    }
+    if (op?.op === "update_node" && op?.patch && typeof op.patch === "object") {
+      const patchObj: any = { ...op.patch };
+      if (typeof patchObj.statement === "string") {
+        const s = cleanStatement(patchObj.statement);
+        if (!isValidDestinationStatement(s) || !isValidPeopleStatement(s) || !isValidBudgetStatement(s)) {
+          delete patchObj.statement;
+        } else {
+          patchObj.statement = s;
+        }
+      }
+      if (!Object.keys(patchObj).length) return acc;
+      acc.push({
+        ...op,
+        id: idRemap.get(String(op.id || "")) || op.id,
+        patch: patchObj,
+      });
+      return acc;
+    }
+    if (op?.op === "add_edge" && op?.edge) {
+      const from = idRemap.get(String(op.edge.from || "")) || op.edge.from;
+      const to = idRemap.get(String(op.edge.to || "")) || op.edge.to;
+      if (!from || !to || from === to) return acc;
+      const key = `${from}|${to}|${op.edge.type}`;
+      if (edgePairs.has(key)) return acc;
+      edgePairs.add(key);
+      acc.push({
+        ...op,
+        edge: { ...op.edge, from, to },
+      });
+      return acc;
+    }
+    acc.push(op);
+    return acc;
+  }, []);
 
-  for (const op of mergedOps || []) {
+  for (const op of prepped) {
     if (op?.op === "add_node" && typeof op?.node?.statement === "string") {
       const key = normalizeForMatch(op.node.statement);
       if (!key) continue;
-      if (existingByStmt.has(key)) continue;
-      if (newStmt.has(key)) continue;
+      const existedId = existingByStmt.get(key);
+      if (existedId) {
+        idRemap.set(op.node.id, existedId);
+        continue;
+      }
+      if (newStmt.has(key)) {
+        const mapped = newStmtId.get(key);
+        if (mapped) idRemap.set(op.node.id, mapped);
+        continue;
+      }
       newStmt.add(key);
+      newStmtId.set(key, op.node.id);
+      keptAddIds.add(op.node.id);
       newNodes.push({ id: op.node.id, type: op.node.type });
-      kept.push(op);
+      continue;
+    }
+  }
+
+  const kept: any[] = [];
+  const addedEdgeKeys = new Set<string>((graph.edges || []).map((e) => `${e.from}|${e.to}|${e.type}`));
+  for (const op of prepped) {
+    if (op?.op === "add_node") {
+      if (keptAddIds.has(op.node.id)) kept.push(op);
+      continue;
+    }
+    if (op?.op === "update_node") {
+      const mappedId = idRemap.get(String(op.id || "")) || op.id;
+      if (!mappedId) continue;
+      kept.push({ ...op, id: mappedId });
+      continue;
+    }
+    if (op?.op === "add_edge") {
+      const from = idRemap.get(String(op.edge.from || "")) || op.edge.from;
+      const to = idRemap.get(String(op.edge.to || "")) || op.edge.to;
+      if (!from || !to || from === to) continue;
+      const key = `${from}|${to}|${op.edge.type}`;
+      if (addedEdgeKeys.has(key)) continue;
+      addedEdgeKeys.add(key);
+      kept.push({ ...op, edge: { ...op.edge, from, to } });
       continue;
     }
     kept.push(op);
@@ -778,7 +1025,7 @@ export async function generateGraphPatch(params: {
     }
   }
 
-  const post = postProcessPatch(params.graph, basePatch, params.userText);
+  const post = postProcessPatch(params.graph, basePatch, params.userText, params.recentTurns);
   if (!post.ops.length) {
     return fallbackPatch(params.graph, params.userText, "post_empty_ops");
   }
