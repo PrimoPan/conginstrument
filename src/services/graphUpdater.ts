@@ -18,6 +18,12 @@ const GRAPH_MODEL = process.env.CI_GRAPH_MODEL || config.model;
 const RISK_HEALTH_RE =
   /心脏|心肺|冠心|心血管|高血压|糖尿病|哮喘|慢性病|手术|过敏|孕|老人|老年|儿童|行动不便|不能爬山|不能久走|危险|安全|急救|摔倒|health|medical|heart|cardiac|safety|risk/i;
 const HARD_CONSTRAINT_RE = /不能|不宜|避免|禁忌|必须|只能|不要|不可|不得|无法|不方便|不能够/i;
+const HARD_REQUIRE_RE = /硬性要求|一定要|必须|务必|绝对/i;
+const CULTURE_PREF_RE = /人文|历史|文化|博物馆|古城|古镇|遗址|美术馆|展览|文博/i;
+const NATURE_TOPIC_RE = /自然景观|自然风光|爬山|徒步|森林|湿地|海边|户外/i;
+const PREFERENCE_MARKER_RE = /喜欢|更喜欢|偏好|倾向|感兴趣|想看|想去|不感兴趣|不喜欢|厌恶/i;
+const ITINERARY_NOISE_RE = /第[一二三四五六七八九十0-9]+天|上午|中午|下午|晚上|行程|建议|入住|晚餐|午餐|景点|游览|返回|酒店|餐馆|安排如下/i;
+const STRUCTURED_PREFIX_RE = /^(意图|目的地|同行人数|预算(?:上限)?|行程时长|健康约束|景点偏好|活动偏好|住宿偏好|交通偏好|饮食偏好|人数|时长)[:：]/;
 
 function cleanStatement(s: any, maxLen = 180) {
   return String(s ?? "")
@@ -81,6 +87,61 @@ function inferEvidenceFromStatement(userText: string, statement: string): string
 
   if (t.includes(s)) return [s];
   return undefined;
+}
+
+function sentenceParts(text: string) {
+  return String(text || "")
+    .split(/[。！？!?；;\n]/)
+    .map((x) => cleanStatement(x, 120))
+    .filter(Boolean);
+}
+
+function normalizePreferenceStatement(raw: string) {
+  const s = cleanStatement(raw, 160);
+  if (!s) return null;
+
+  const hasCulture = CULTURE_PREF_RE.test(s);
+  const hasNature = NATURE_TOPIC_RE.test(s);
+  const dislikeNature = hasNature && /不感兴趣|不喜欢|避免|不要|不能|厌恶/.test(s);
+  if (!hasCulture && !dislikeNature) return null;
+  if (!PREFERENCE_MARKER_RE.test(s) && !HARD_REQUIRE_RE.test(s) && !HARD_CONSTRAINT_RE.test(s)) return null;
+
+  const hard = HARD_REQUIRE_RE.test(s) || HARD_CONSTRAINT_RE.test(s);
+  const statement =
+    hasCulture && dislikeNature
+      ? "景点偏好：优先人文景观，减少纯自然景观"
+      : hasCulture
+        ? "景点偏好：人文景观优先"
+        : "景点偏好：尽量避免纯自然景观";
+  return {
+    statement,
+    hard,
+    evidence: s,
+  };
+}
+
+function isStructuredStatement(statement: string) {
+  return STRUCTURED_PREFIX_RE.test(cleanStatement(statement, 200));
+}
+
+function isLikelyNarrativeNoise(statement: string, type?: string) {
+  const s = cleanStatement(statement, 240);
+  if (!s) return true;
+  if (type === "goal") return false;
+  if (isStructuredStatement(s)) return false;
+  if (RISK_HEALTH_RE.test(s) || normalizePreferenceStatement(s)) return false;
+  if (s.length >= 30) return true;
+  if (ITINERARY_NOISE_RE.test(s) && s.length >= 16) return true;
+  return false;
+}
+
+function isStrategicNode(node: any) {
+  const s = cleanStatement(node?.statement || "", 160);
+  if (!s) return false;
+  if (String(node?.type || "") === "goal") return true;
+  if (isHealthConstraintNode(node)) return true;
+  if (isStructuredStatement(s)) return true;
+  return false;
 }
 
 function mergeTextSegments(parts: string[]) {
@@ -296,6 +357,9 @@ type IntentSignals = {
   budgetEvidence?: string;
   healthConstraint?: string;
   healthEvidence?: string;
+  scenicPreference?: string;
+  scenicPreferenceEvidence?: string;
+  scenicPreferenceHard?: boolean;
 };
 
 function isTravelIntentText(text: string, signals: IntentSignals) {
@@ -326,10 +390,7 @@ function shouldNormalizeGoalStatement(statement: string, signals: IntentSignals,
 }
 
 function pickHealthClause(userText: string): string | undefined {
-  const parts = String(userText)
-    .split(/[。！？!?；;\n]/)
-    .map((x) => cleanStatement(x, 60))
-    .filter(Boolean);
+  const parts = sentenceParts(userText);
   const hit = parts.find((x) => RISK_HEALTH_RE.test(x));
   return hit || undefined;
 }
@@ -396,6 +457,13 @@ function extractIntentSignals(userText: string): IntentSignals {
     out.healthEvidence = healthClause;
   }
 
+  const prefClause = sentenceParts(text).map(normalizePreferenceStatement).find(Boolean);
+  if (prefClause) {
+    out.scenicPreference = prefClause.statement;
+    out.scenicPreferenceHard = prefClause.hard;
+    out.scenicPreferenceEvidence = prefClause.evidence;
+  }
+
   return out;
 }
 
@@ -418,9 +486,11 @@ function buildHeuristicIntentOps(
   let rootId: string | null = pickRootGoalId(graph);
   const layer2Set = new Set<string>();
   if (rootId) {
+    const nodesById = new Map((graph.nodes || []).map((n: any) => [n.id, n]));
     for (const e of graph.edges || []) {
       if (e?.to === rootId && (e.type === "enable" || e.type === "constraint" || e.type === "determine")) {
-        layer2Set.add(e.from);
+        const n = nodesById.get(e.from);
+        if (isStrategicNode(n)) layer2Set.add(e.from);
       }
     }
   }
@@ -569,6 +639,24 @@ function buildHeuristicIntentOps(
     if (id && rootId) pushEdge(id, rootId, "constraint");
   }
 
+  if (signals.scenicPreference) {
+    const hardPref = !!signals.scenicPreferenceHard;
+    const prefType = hardPref ? "constraint" : "preference";
+    const id = pushNode({
+      type: prefType,
+      statement: signals.scenicPreference,
+      strength: hardPref ? "hard" : "soft",
+      status: "proposed",
+      confidence: hardPref ? 0.88 : 0.82,
+      severity: "medium",
+      importance: hardPref ? 0.8 : 0.68,
+      tags: ["preference", "culture"],
+      evidenceIds: [signals.scenicPreferenceEvidence || signals.scenicPreference],
+    });
+    if (id) layer2Set.add(id);
+    if (id && rootId) pushEdge(id, rootId, hardPref ? "constraint" : "enable");
+  }
+
   let healthId: string | null = null;
   const existingHealth = (graph.nodes || []).find(isHealthConstraintNode);
   const existingHealthInSeed = (seedOps || []).find(
@@ -629,16 +717,6 @@ function buildHeuristicIntentOps(
     for (const sid of Array.from(layer2Set)) {
       if (!sid || sid === healthId) continue;
       pushEdge(sid, healthId, "determine");
-    }
-  }
-
-  if (rootId) {
-    for (const n of graph.nodes || []) {
-      if (!n?.id || n.id === rootId || n.type === "goal") continue;
-      const connected = (graph.edges || []).some((e: any) => e?.from === n.id || e?.to === n.id);
-      if (!connected) {
-        pushEdge(n.id, rootId, n.type === "constraint" ? "constraint" : "enable");
-      }
     }
   }
 
@@ -750,6 +828,55 @@ function fallbackPatch(graph: CDG, userText: string, reason: string): GraphPatch
   };
 }
 
+function normalizeIncomingNode(node: any, signalText: string, latestUserText: string) {
+  if (!node || typeof node !== "object") return null;
+
+  const out: any = { ...node };
+  out.statement = cleanStatement(out.statement || "");
+  if (!out.statement) return null;
+
+  if (isLikelyNarrativeNoise(out.statement, out.type)) return null;
+
+  const healthClause =
+    (RISK_HEALTH_RE.test(out.statement) && pickHealthClause(out.statement)) ||
+    pickHealthClause(latestUserText) ||
+    pickHealthClause(signalText);
+  if (healthClause && RISK_HEALTH_RE.test(out.statement)) {
+    return {
+      ...out,
+      type: "constraint",
+      statement: `健康约束：${healthClause}`,
+      strength: "hard",
+      severity: "critical",
+      importance: Math.max(Number(out.importance) || 0, 0.95),
+      confidence: Math.max(Number(out.confidence) || 0.6, 0.9),
+      locked: true,
+      tags: mergeTags(out.tags, ["health", "safety"]),
+    };
+  }
+
+  const pref = normalizePreferenceStatement(out.statement);
+  if (pref) {
+    const hardPref = !!pref.hard;
+    return {
+      ...out,
+      type: hardPref ? "constraint" : "preference",
+      statement: pref.statement,
+      strength: hardPref ? "hard" : "soft",
+      severity: out.severity || "medium",
+      importance: Math.max(Number(out.importance) || 0, hardPref ? 0.78 : 0.66),
+      confidence: Math.max(Number(out.confidence) || 0.6, hardPref ? 0.82 : 0.76),
+      tags: mergeTags(out.tags, ["preference", "culture"]),
+    };
+  }
+
+  if (out.type !== "goal" && !isStructuredStatement(out.statement) && out.statement.length >= 32) {
+    return null;
+  }
+
+  return out;
+}
+
 /** 后处理：去重 + 自动补边 + 限制 op 数量 */
 function postProcessPatch(
   graph: CDG,
@@ -829,20 +956,39 @@ function postProcessPatch(
   const edgePairs = new Set<string>((graph.edges || []).map((e) => `${e.from}|${e.to}|${e.type}`));
   const prepped = (mergedOps || []).reduce<any[]>((acc, op: any) => {
     if (op?.op === "add_node" && op?.node) {
-      if (!isValidAtomicNode(op.node)) return acc;
-      const sid = String(op.node.id || "");
+      const normalizedNode = normalizeIncomingNode(op.node, signalText, latestUserText);
+      if (!normalizedNode) return acc;
+      if (!isValidAtomicNode(normalizedNode)) return acc;
+      const sid = String(normalizedNode.id || op.node.id || "");
       if (sid && idRemap.has(sid)) return acc;
-      acc.push(op);
+      acc.push({
+        ...op,
+        node: { ...normalizedNode, id: sid || op.node.id },
+      });
       return acc;
     }
     if (op?.op === "update_node" && op?.patch && typeof op.patch === "object") {
       const patchObj: any = { ...op.patch };
       if (typeof patchObj.statement === "string") {
-        const s = cleanStatement(patchObj.statement);
-        if (!isValidDestinationStatement(s) || !isValidPeopleStatement(s) || !isValidBudgetStatement(s)) {
+        const normalizedPatch = normalizeIncomingNode(
+          { type: patchObj.type || "fact", ...patchObj, statement: patchObj.statement },
+          signalText,
+          latestUserText
+        );
+        if (!normalizedPatch) {
           delete patchObj.statement;
         } else {
-          patchObj.statement = s;
+          const s = cleanStatement(normalizedPatch.statement);
+          if (!isValidDestinationStatement(s) || !isValidPeopleStatement(s) || !isValidBudgetStatement(s)) {
+            delete patchObj.statement;
+          } else {
+            patchObj.statement = s;
+            if (normalizedPatch.strength) patchObj.strength = normalizedPatch.strength;
+            if (normalizedPatch.severity) patchObj.severity = normalizedPatch.severity;
+            if (normalizedPatch.importance != null) patchObj.importance = normalizedPatch.importance;
+            if (normalizedPatch.tags) patchObj.tags = normalizedPatch.tags;
+            if (normalizedPatch.locked != null) patchObj.locked = normalizedPatch.locked;
+          }
         }
       }
       if (!Object.keys(patchObj).length) return acc;
@@ -870,7 +1016,21 @@ function postProcessPatch(
     return acc;
   }, []);
 
+  const determineOutCount = new Map<string, number>();
+  const sparsePrepped: any[] = [];
   for (const op of prepped) {
+    if (op?.op !== "add_edge" || op?.edge?.type !== "determine") {
+      sparsePrepped.push(op);
+      continue;
+    }
+    const from = String(op.edge.from || "");
+    const next = (determineOutCount.get(from) || 0) + 1;
+    if (next > 2) continue;
+    determineOutCount.set(from, next);
+    sparsePrepped.push(op);
+  }
+
+  for (const op of sparsePrepped) {
     if (op?.op === "add_node" && typeof op?.node?.statement === "string") {
       const key = normalizeForMatch(op.node.statement);
       if (!key) continue;
@@ -894,7 +1054,7 @@ function postProcessPatch(
 
   const kept: any[] = [];
   const addedEdgeKeys = new Set<string>((graph.edges || []).map((e) => `${e.from}|${e.to}|${e.type}`));
-  for (const op of prepped) {
+  for (const op of sparsePrepped) {
     if (op?.op === "add_node") {
       if (keptAddIds.has(op.node.id)) kept.push(op);
       continue;
@@ -964,8 +1124,10 @@ const GRAPH_SYSTEM_PROMPT = `
 - constraint 可带 strength: hard|soft
 - 若信息包含健康/安全/法律等高风险因素，务必设置 severity（high 或 critical），并可补 tags（如 ["health"]）。
 - 若信息表达“不能/必须/禁忌”等限制，优先用 constraint，且 strength 优先 hard。
+- 若出现“喜欢/更喜欢/不感兴趣”这类景点偏好，优先生成 preference；若用户明确“硬性要求”，可升为 constraint（通常 severity=medium）。
 - statement 保持简洁，不要加“用户补充：/用户任务：”前缀。
 - 旅行类请求优先拆分成原子节点：人数、目的地、时长、预算、健康限制，不要把所有信息塞进一个节点。
+- 避免把“第一天/第二天/详细行程建议”这类叙事文本直接建成节点。
 - 意图（goal）作为根节点，子节点尽量与根节点连通，避免孤立节点。
 - 若有健康/安全硬约束，可作为第三层约束节点，第二层关键节点可用 determine 指向它。
 - 节点尽量附 evidenceIds（来自用户原句的短片段），用于前端高亮证据文本。
