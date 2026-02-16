@@ -86,7 +86,7 @@ const GENERIC_TIMELINE_HINT_RE = /截止|deadline|里程碑|周期|排期|冲刺
 const GENERIC_STAKEHOLDER_HINT_RE = /用户|客户|老板|团队|同事|角色|stakeholder|owner|reviewer|审批/i;
 const GENERIC_RISK_HINT_RE = /风险|故障|安全|合规|隐私|法律|阻塞|依赖|上线事故|risk|security|privacy|compliance/i;
 const DESTINATION_BAD_TOKEN_RE =
-  /我|你|他|她|我们|时间|之外|之前|之后|必须|到场|安排|计划|pre|chi|会议|汇报|报告|论文|一天|两天|三天|四天|五天/i;
+  /我|你|他|她|我们|时间|之外|之前|之后|必须|到场|安排|计划|pre|chi|会议|汇报|报告|论文|一天|两天|三天|四天|五天|顺带|顺便|顺路|顺道/i;
 
 type TopologyTuning = {
   lambdaSparsity: number;
@@ -215,10 +215,17 @@ function durationDaysOfNode(node: ConceptNode): number {
   return Number(m[1]) || 0;
 }
 
-function chooseDurationTotalWinner(nodes: ConceptNode[], touched: Set<string>): ConceptNode {
+function chooseDurationTotalWinner(
+  nodes: ConceptNode[],
+  touched: Set<string>,
+  touchedOrder?: Map<string, number>
+): ConceptNode {
   return nodes
     .slice()
     .sort((a, b) => {
+      const orderScore = (touchedOrder?.get(b.id) || 0) - (touchedOrder?.get(a.id) || 0);
+      if (orderScore !== 0) return orderScore;
+
       const touchScore = (touched.has(b.id) ? 1 : 0) - (touched.has(a.id) ? 1 : 0);
       if (touchScore !== 0) return touchScore;
 
@@ -243,10 +250,17 @@ function chooseDurationTotalWinner(nodes: ConceptNode[], touched: Set<string>): 
     })[0];
 }
 
-function chooseSlotWinner(nodes: ConceptNode[], touched: Set<string>): ConceptNode {
+function chooseSlotWinner(
+  nodes: ConceptNode[],
+  touched: Set<string>,
+  touchedOrder?: Map<string, number>
+): ConceptNode {
   return nodes
     .slice()
     .sort((a, b) => {
+      const orderScore = (touchedOrder?.get(b.id) || 0) - (touchedOrder?.get(a.id) || 0);
+      if (orderScore !== 0) return orderScore;
+
       const touchScore = (touched.has(b.id) ? 1 : 0) - (touched.has(a.id) ? 1 : 0);
       if (touchScore !== 0) return touchScore;
 
@@ -269,7 +283,8 @@ function chooseSlotWinner(nodes: ConceptNode[], touched: Set<string>): ConceptNo
 function compactSingletonSlots(
   nodesById: Map<string, ConceptNode>,
   edgesById: Map<string, ConceptEdge>,
-  touched: Set<string>
+  touched: Set<string>,
+  touchedOrder?: Map<string, number>
 ): boolean {
   const slotToNodes = new Map<string, ConceptNode[]>();
   for (const n of nodesById.values()) {
@@ -282,7 +297,10 @@ function compactSingletonSlots(
   let changed = false;
   for (const [slot, nodes] of slotToNodes.entries()) {
     if (nodes.length <= 1) continue;
-    const winner = slotFamily(slot) === "duration_total" ? chooseDurationTotalWinner(nodes, touched) : chooseSlotWinner(nodes, touched);
+    const winner =
+      slotFamily(slot) === "duration_total"
+        ? chooseDurationTotalWinner(nodes, touched, touchedOrder)
+        : chooseSlotWinner(nodes, touched, touchedOrder);
     for (const n of nodes) {
       if (n.id === winner.id) continue;
       nodesById.delete(n.id);
@@ -338,12 +356,18 @@ function rootEdgeTypeForNode(node: ConceptNode, slot: string | null): EdgeType {
   return "enable";
 }
 
-function chooseRootGoal(nodesById: Map<string, ConceptNode>, touched: Set<string>): ConceptNode | null {
+function chooseRootGoal(
+  nodesById: Map<string, ConceptNode>,
+  touched: Set<string>,
+  touchedOrder?: Map<string, number>
+): ConceptNode | null {
   const goals = Array.from(nodesById.values()).filter((n) => n.type === "goal");
   if (!goals.length) return null;
   return goals
     .slice()
     .sort((a, b) => {
+      const orderScore = (touchedOrder?.get(b.id) || 0) - (touchedOrder?.get(a.id) || 0);
+      if (orderScore !== 0) return orderScore;
       const touchScore = (touched.has(b.id) ? 1 : 0) - (touched.has(a.id) ? 1 : 0);
       if (touchScore !== 0) return touchScore;
       const statusScore = (b.status === "confirmed" ? 1 : 0) - (a.status === "confirmed" ? 1 : 0);
@@ -864,7 +888,8 @@ function repairDisconnectedNodes(params: {
 function rebalanceIntentTopology(
   nodesById: Map<string, ConceptNode>,
   edgesById: Map<string, ConceptEdge>,
-  touched: Set<string>
+  touched: Set<string>,
+  touchedOrder?: Map<string, number>
 ): boolean {
   let changed = false;
 
@@ -901,7 +926,7 @@ function rebalanceIntentTopology(
     }
   }
 
-  let rootGoal = chooseRootGoal(nodesById, touched);
+  let rootGoal = chooseRootGoal(nodesById, touched, touchedOrder);
   if (!rootGoal) {
     const synthetic: ConceptNode = {
       id: `n_${randomUUID()}`,
@@ -939,7 +964,7 @@ function rebalanceIntentTopology(
   const slotNodes = new Map<string, ConceptNode>();
   for (const [slot, nodes] of slotGroups.entries()) {
     if (!nodes.length) continue;
-    const winner = chooseSlotWinner(nodes, touched);
+    const winner = chooseSlotWinner(nodes, touched, touchedOrder);
     slotNodes.set(slot, winner);
     for (const n of nodes) {
       if (n.id === winner.id) continue;
@@ -1287,6 +1312,8 @@ export function applyPatchWithGuards(graph: CDG, patch: GraphPatch) {
   const edgesById = new Map(graph.edges.map((e) => [e.id, e]));
   const locked = new Set(graph.nodes.filter((n) => n.locked).map((n) => n.id));
   const touchedNodeIds = new Set<string>();
+  const touchedNodeOrder = new Map<string, number>();
+  let touchSeq = 1;
 
   // 2) rewrite 临时 id（包括 edge.from/to）
   const rewrittenOps = patch.ops.map((op) => {
@@ -1319,6 +1346,7 @@ export function applyPatchWithGuards(graph: CDG, patch: GraphPatch) {
       if (!nodesById.has(node.id)) {
         nodesById.set(node.id, node);
         touchedNodeIds.add(node.id);
+        touchedNodeOrder.set(node.id, touchSeq++);
         appliedOps.push({ ...op, node });
       }
       continue;
@@ -1348,6 +1376,7 @@ export function applyPatchWithGuards(graph: CDG, patch: GraphPatch) {
 
       nodesById.set(op.id, merged);
       touchedNodeIds.add(op.id);
+      touchedNodeOrder.set(op.id, touchSeq++);
       appliedOps.push({ ...op, patch: patchNorm });
       continue;
     }
@@ -1389,8 +1418,8 @@ export function applyPatchWithGuards(graph: CDG, patch: GraphPatch) {
     }
   }
 
-  const compactChanged = compactSingletonSlots(nodesById, edgesById, touchedNodeIds);
-  const topologyChanged = rebalanceIntentTopology(nodesById, edgesById, touchedNodeIds);
+  const compactChanged = compactSingletonSlots(nodesById, edgesById, touchedNodeIds, touchedNodeOrder);
+  const topologyChanged = rebalanceIntentTopology(nodesById, edgesById, touchedNodeIds, touchedNodeOrder);
 
   // ✅ 只有真正应用了 op 才 bump 版本（更符合“版本=结构变化”）
   const versionInc = appliedOps.length > 0 || compactChanged || topologyChanged ? 1 : 0;

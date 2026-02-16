@@ -375,6 +375,12 @@ conginstrument/
       ├─ llm.ts
       ├─ chatResponder.ts
       ├─ graphUpdater.ts
+      ├─ graphUpdater/
+      │  ├─ constants.ts
+      │  ├─ text.ts
+      │  ├─ intentSignals.ts
+      │  ├─ nodeNormalization.ts
+      │  └─ common.ts
       ├─ patchGuard.ts
       └─ textSanitizer.ts
 ```
@@ -402,7 +408,12 @@ conginstrument/
 | `src/core/nodeLayer.ts` | 节点四层分类（Intent/Requirement/Preference/Risk）的推断与归一化 |
 | `src/services/llmClient.ts` | OpenAI SDK 客户端实例 |
 | `src/services/chatResponder.ts` | 助手文本生成（非流式/伪流/真流） |
-| `src/services/graphUpdater.ts` | 图 patch 生成、启发式补全、后处理去重 |
+| `src/services/graphUpdater.ts` | 图 patch 主流程（LLM 调用、启发式融合、后处理） |
+| `src/services/graphUpdater/constants.ts` | 建图正则与槽位识别常量 |
+| `src/services/graphUpdater/text.ts` | 文本清洗、证据合并、去重工具 |
+| `src/services/graphUpdater/intentSignals.ts` | 用户意图信号抽取（目的地/时长/预算/人数/关键日） |
+| `src/services/graphUpdater/nodeNormalization.ts` | 节点归一化与原子校验（防噪声、保结构） |
+| `src/services/graphUpdater/common.ts` | patch 提取与临时 id 工具函数 |
 | `src/services/patchGuard.ts` | LLM patch 清洗与规范化（强约束） |
 | `src/services/textSanitizer.ts` | 把 Markdown/LaTeX 风格文本降级为纯文本 |
 | `src/services/llm.ts` | turn 编排：助手回复 + patch 生成 + 统一返回 |
@@ -530,7 +541,12 @@ src/core/graph.ts            # graph types and guarded patch apply
 src/core/nodeLayer.ts        # 4-layer node taxonomy inference and normalization
 src/services/llmClient.ts    # OpenAI client
 src/services/chatResponder.ts# assistant text generation
-src/services/graphUpdater.ts # graph patch generation + heuristics
+src/services/graphUpdater.ts # graph patch orchestrator
+src/services/graphUpdater/constants.ts         # graph regex/constants
+src/services/graphUpdater/text.ts              # text/evidence helpers
+src/services/graphUpdater/intentSignals.ts     # intent signal extraction
+src/services/graphUpdater/nodeNormalization.ts # node normalization + validation
+src/services/graphUpdater/common.ts            # patch parsing/temp id helpers
 src/services/patchGuard.ts   # strict patch sanitizer
 src/services/textSanitizer.ts# markdown-to-plain sanitizer
 src/services/llm.ts          # turn orchestration
