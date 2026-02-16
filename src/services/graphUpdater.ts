@@ -19,6 +19,7 @@ import {
   type IntentSignals,
   normalizePreferenceStatement,
 } from "./graphUpdater/intentSignals.js";
+import { resolveIntentSignalsGeo } from "./graphUpdater/geoResolver.js";
 import {
   isHealthConstraintNode,
   isValidAtomicNode,
@@ -247,13 +248,13 @@ function fallbackPatch(graph: CDG, userText: string, reason: string): GraphPatch
 }
 
 /** 后处理：去重 + 自动补边 + 限制 op 数量 */
-function postProcessPatch(
+async function postProcessPatch(
   graph: CDG,
   patch: GraphPatch,
   latestUserText: string,
   recentTurns?: Array<{ role: "user" | "assistant"; content: string }>,
   seedSignals?: IntentSignals
-): GraphPatch {
+): Promise<GraphPatch> {
   const signalText = mergeTextSegments([
     ...((recentTurns || [])
       .filter((t) => t.role === "user")
@@ -265,7 +266,16 @@ function postProcessPatch(
   const textSignals = extractIntentSignalsWithRecency(signalText, latestUserText);
   // Prefer deterministic text parser on conflicting scalar slots (e.g., total duration),
   // while still preserving function-call slots as fallback for missing values.
-  const signals = seedSignals ? mergeIntentSignals(seedSignals, textSignals) : textSignals;
+  let signals = seedSignals ? mergeIntentSignals(seedSignals, textSignals) : textSignals;
+  try {
+    signals = await resolveIntentSignalsGeo({
+      signals,
+      latestUserText,
+      recentTurns,
+    });
+  } catch (e: any) {
+    dlog("geo resolver failed:", e?.message || e);
+  }
   const canonicalIntent = buildTravelIntentStatement(signals, signalText);
   const existingByStmt = new Map<string, string>();
   for (const n of graph.nodes || []) {
@@ -608,7 +618,7 @@ export async function generateGraphPatch(params: {
     }
   }
 
-  const post = postProcessPatch(
+  const post = await postProcessPatch(
     params.graph,
     basePatch,
     params.userText,

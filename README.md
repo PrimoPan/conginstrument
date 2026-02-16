@@ -62,6 +62,11 @@ curl http://localhost:3001/healthz
 | `CI_GRAPH_MODEL` | 否 | 与 `MODEL` 相同 | 建图模型 |
 | `CI_GRAPH_USE_FUNCTION_SLOTS` | 否 | `1` | 是否启用 function call 结构化槽位抽取 |
 | `CI_GRAPH_PATCH_LLM_WITH_SLOTS` | 否 | `0` | 槽位抽取成功后是否仍并行启用自由 patch LLM |
+| `CI_GEO_VALIDATE` | 否 | `1` | 是否启用地理校验层（Nominatim） |
+| `CI_GEO_ENDPOINT` | 否 | `https://nominatim.openstreetmap.org` | 地理解析服务地址 |
+| `CI_GEO_TIMEOUT_MS` | 否 | `2600` | 每次地理查询超时（毫秒） |
+| `CI_GEO_MAX_LOOKUPS` | 否 | `12` | 每轮最多地理查询次数 |
+| `CI_GEO_CACHE_TTL_MS` | 否 | `43200000` | 地理缓存 TTL（毫秒） |
 | `CI_ALLOW_DELETE` | 否 | `0` | 是否允许 remove_node/remove_edge |
 | `CI_DEBUG_LLM` | 否 | `0` | LLM 与 patch 调试日志 |
 
@@ -94,7 +99,7 @@ Base URL 示例：`http://localhost:3001`
 | `GET` | `/api/conversations` | 是 | 会话列表 |
 | `POST` | `/api/conversations` | 是 | 新建会话 |
 | `GET` | `/api/conversations/:id` | 是 | 会话详情（含图） |
-| `PUT` | `/api/conversations/:id/graph` | 是 | 保存前端编辑后的整图快照 |
+| `PUT` | `/api/conversations/:id/graph` | 是 | 保存前端编辑后的整图快照（可选触发“基于新图”的建议） |
 | `GET` | `/api/conversations/:id/turns?limit=30` | 是 | 历史轮次 |
 | `POST` | `/api/conversations/:id/turn` | 是 | 非流式单轮 |
 | `POST` | `/api/conversations/:id/turn/stream` | 是 | SSE 流式单轮 |
@@ -226,7 +231,7 @@ Base URL 示例：`http://localhost:3001`
 ]
 ```
 
-#### 7.7 `PUT /api/conversations/:id/graph`（保存前端修改图）
+#### 7.7 `PUT /api/conversations/:id/graph`（保存前端修改图，可选生成建议）
 
 请求：
 
@@ -237,15 +242,18 @@ Base URL 示例：`http://localhost:3001`
     "version": 6,
     "nodes": [],
     "edges": []
-  }
+  },
+  "requestAdvice": true,
+  "advicePrompt": "用户已手动调整意图图，请基于最新图给出下一步建议"
 }
 ```
 
 行为：
 
-1. 服务端把前端图快照转换为 `add_node + add_edge` 的 snapshot patch。
-2. 统一走 `applyPatchWithGuards`（字段清洗、去重、拓扑修复）。
+1. 服务端用 `normalizeGraphSnapshot` 对前端整图做轻量规范化（字段清洗、ID 修复、悬挂边过滤、重复边去重）。
+2. 不做自动拓扑重排，尽量保留用户手工编辑结构。
 3. 持久化到 `conversations.graph`，下一轮对话建图会直接基于这份图继续。
+4. 若 `requestAdvice=true`，服务端会把“最新图 + 最近对话 + advicePrompt（或默认提示）”送入聊天模型，返回建议文本。
 
 响应：
 
@@ -258,7 +266,9 @@ Base URL 示例：`http://localhost:3001`
     "nodes": [],
     "edges": []
   },
-  "updatedAt": "2026-02-16T00:00:00.000Z"
+  "updatedAt": "2026-02-16T00:00:00.000Z",
+  "assistantText": "基于你手工修正后的意图图，建议先锁定关键约束再排城市节奏...",
+  "adviceError": ""
 }
 ```
 
@@ -366,6 +376,13 @@ data: {"assistantText":"...","graphPatch":{"ops":[]},"graph":{"id":"65f1...","ve
 6. 子地点归属采用 function-call 槽位：
    - 把“场馆/景点/街区”提取为 `sub_locations`，并尽量给出 `parent_city`。
    - 子地点不作为一级目的地，建图时会挂到对应城市（如城市节点/城市时长节点）下。
+7. 手工改图保存与自动建图分离：
+   - 对话 turn（自动建图）走 `applyPatchWithGuards`（包含拓扑修复/去重策略）。
+   - 前端整图保存走 `normalizeGraphSnapshot`（仅做合法化，不重排用户图结构）。
+8. 地理校验层（Global-ready）：
+   - 合并后的槽位会进入 `geoResolver`（Nominatim）做地理规范化。
+   - 自动判断“子地点 -> 父城市”关系（如冷门地点/场馆），避免把子地点误当一级目的地。
+   - 查询失败时自动降级为本地规则，不阻断对话与建图。
 
 ---
 
@@ -374,10 +391,11 @@ data: {"assistantText":"...","graphPatch":{"ops":[]},"graph":{"id":"65f1...","ve
 1. `generateTurn` / `generateTurnStreaming` 先生成助手文本。
 2. `generateGraphPatch` 生成图增量 patch。
 3. `sanitizeGraphPatchStrict` 做严格清洗（防漂移字段、非法 op）。
-4. `postProcessPatch` + 启发式规则补齐原子节点与连边。
-5. `applyPatchWithGuards` 应用 patch 并输出新图。
-6. 持久化 `turns` 与 `conversations.graph`。
-7. 若调用 `PUT /api/conversations/:id/graph` 保存前端改图，后续 turn 的 LLM 输入直接使用这份更新图。
+4. 合并槽位后进入 `geoResolver` 做地理规范化（目的地/城市时长/子地点父城校正）。
+5. `postProcessPatch` + 启发式规则补齐原子节点与连边。
+6. `applyPatchWithGuards` 应用 patch 并输出新图。
+7. 持久化 `turns` 与 `conversations.graph`。
+8. 若调用 `PUT /api/conversations/:id/graph` 保存前端改图，后续 turn 的 LLM 输入直接使用这份更新图；若 `requestAdvice=true`，同一次请求会返回“基于编辑图”的建议文本。
 
 ---
 
@@ -433,6 +451,7 @@ conginstrument/
       │  ├─ constants.ts
       │  ├─ text.ts
       │  ├─ intentSignals.ts
+      │  ├─ geoResolver.ts
       │  ├─ nodeNormalization.ts
       │  ├─ heuristicOps.ts
       │  ├─ slotFunctionCall.ts
@@ -470,6 +489,7 @@ conginstrument/
 | `src/services/graphUpdater/constants.ts` | 建图正则与槽位识别常量 |
 | `src/services/graphUpdater/text.ts` | 文本清洗、证据合并、去重工具 |
 | `src/services/graphUpdater/intentSignals.ts` | 用户意图信号抽取（目的地/时长/预算/人数/关键日），含跨轮时长合并与相对时间过滤 |
+| `src/services/graphUpdater/geoResolver.ts` | 地理校验层（Nominatim），做目的地规范化与子地点父城归属修复 |
 | `src/services/graphUpdater/nodeNormalization.ts` | 节点归一化与原子校验（防噪声、保结构） |
 | `src/services/graphUpdater/heuristicOps.ts` | 启发式建图（槽位胜出、根节点连通、关键约束落图） |
 | `src/services/graphUpdater/slotFunctionCall.ts` | function call 槽位抽取（结构化输出，含子地点归属）与信号映射 |
@@ -542,6 +562,7 @@ See the Chinese section above for the full table. Key vars include:
 - `SESSION_TTL_DAYS`
 - `CI_STREAM_MODE`, `CI_GRAPH_MODEL`, `CI_ALLOW_DELETE`, `CI_DEBUG_LLM`
 - `CI_GRAPH_USE_FUNCTION_SLOTS`, `CI_GRAPH_PATCH_LLM_WITH_SLOTS`
+- `CI_GEO_VALIDATE`, `CI_GEO_ENDPOINT`, `CI_GEO_TIMEOUT_MS`, `CI_GEO_MAX_LOOKUPS`, `CI_GEO_CACHE_TTL_MS`
 
 ---
 
@@ -552,7 +573,7 @@ See the Chinese section above for the full table. Key vars include:
 - `GET /api/conversations`
 - `POST /api/conversations`
 - `GET /api/conversations/:id`
-- `PUT /api/conversations/:id/graph`
+- `PUT /api/conversations/:id/graph` (supports `requestAdvice` + `advicePrompt`)
 - `GET /api/conversations/:id/turns?limit=30`
 - `POST /api/conversations/:id/turn`
 - `POST /api/conversations/:id/turn/stream` (SSE)
@@ -589,6 +610,12 @@ Patch application pipeline:
 3. compact singleton slots (budget/duration/people/destination/health/preference)
 4. bump graph version when structural changes happen
 
+Manual full-graph save path:
+
+1. `PUT /graph` uses `normalizeGraphSnapshot` (light validation only).
+2. It preserves user-edited topology instead of auto-rebalancing.
+3. Optional advice generation can return `assistantText` in the same response.
+
 ---
 
 ### 7. File map
@@ -609,6 +636,7 @@ src/services/graphUpdater.ts # graph patch orchestrator
 src/services/graphUpdater/constants.ts         # graph regex/constants
 src/services/graphUpdater/text.ts              # text/evidence helpers
 src/services/graphUpdater/intentSignals.ts     # intent signal extraction
+src/services/graphUpdater/geoResolver.ts       # geo normalization + parent-city repair
 src/services/graphUpdater/nodeNormalization.ts # node normalization + validation
 src/services/graphUpdater/heuristicOps.ts      # heuristic graph construction from slots/signals
 src/services/graphUpdater/slotFunctionCall.ts  # function-call slot extraction

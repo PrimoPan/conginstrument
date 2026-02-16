@@ -78,7 +78,8 @@ const HEALTH_RE =
   /心脏|心肺|冠心|心血管|高血压|糖尿病|哮喘|慢性病|手术|过敏|孕|老人|老年|儿童|行动不便|不能爬山|不能久走|危险|安全|急救|摔倒|health|medical|heart|cardiac|safety|risk/i;
 const BUDGET_HINT_RE = /预算|花费|费用|开销|贵|便宜|酒店|住宿|房费|星级/i;
 const DURATION_HINT_RE = /时长|几天|多少天|周|日程|行程|节奏/i;
-const DESTINATION_HINT_RE = /目的地|城市|路线|交通|高铁|飞机|景点|昆明|大理|丽江|香格里拉|云南|江苏|盐城/i;
+const DESTINATION_HINT_RE =
+  /目的地|城市|国家|地区|路线|交通|高铁|飞机|机场|景点|出发|到达|行程段|flight|train|airport|city|destination/i;
 const PEOPLE_HINT_RE = /同行|一家|家人|父亲|母亲|老人|儿童|三口|两人|人数/i;
 const PREFERENCE_HINT_RE = /偏好|喜欢|不喜欢|感兴趣|人文|自然|文化|历史/i;
 const GENERIC_RESOURCE_HINT_RE = /预算|经费|成本|资源|工时|算力|内存|gpu|人天|cost|budget|resource|cpu|memory/i;
@@ -1279,6 +1280,85 @@ function normalizeEdgeForInsert(e: ConceptEdge): ConceptEdge | null {
     type: type as EdgeType,
     confidence: clamp01(e.confidence, 0.6),
     phi: e.phi != null ? cleanText(e.phi) : undefined,
+  };
+}
+
+/**
+ * 用于“前端整图编辑后保存”场景：
+ * - 仅做字段合法化、ID 修复、悬挂边过滤、重复边去重
+ * - 不做槽位压缩/拓扑重平衡，尽量保留用户手工结构
+ */
+export function normalizeGraphSnapshot(input: any, base?: { id?: string; version?: number }): CDG {
+  const rawNodes = Array.isArray(input?.nodes) ? input.nodes : [];
+  const rawEdges = Array.isArray(input?.edges) ? input.edges : [];
+
+  const nodes: ConceptNode[] = [];
+  const nodeIdRemap = new Map<string, string>();
+  const usedNodeIds = new Set<string>();
+
+  for (const rawNode of rawNodes) {
+    if (!rawNode || typeof rawNode !== "object") continue;
+
+    const originalId = cleanText((rawNode as any).id);
+    let candidateId = originalId || `n_${randomUUID()}`;
+    if (usedNodeIds.has(candidateId)) candidateId = `n_${randomUUID()}`;
+
+    const normalized = normalizeNodeForInsert({
+      ...(rawNode as any),
+      id: candidateId,
+    } as ConceptNode);
+    if (!normalized) continue;
+
+    let finalId = normalized.id;
+    if (usedNodeIds.has(finalId)) {
+      finalId = `n_${randomUUID()}`;
+      normalized.id = finalId;
+    }
+
+    usedNodeIds.add(finalId);
+    if (originalId && originalId !== finalId) nodeIdRemap.set(originalId, finalId);
+    nodes.push(normalized);
+  }
+
+  const validNodeIds = new Set(nodes.map((n) => n.id));
+  const edges: ConceptEdge[] = [];
+  const usedEdgeIds = new Set<string>();
+  const edgeSigSet = new Set<string>();
+
+  for (const rawEdge of rawEdges) {
+    if (!rawEdge || typeof rawEdge !== "object") continue;
+
+    const rawFrom = cleanText((rawEdge as any).from);
+    const rawTo = cleanText((rawEdge as any).to);
+    const from = nodeIdRemap.get(rawFrom) || rawFrom;
+    const to = nodeIdRemap.get(rawTo) || rawTo;
+    if (!validNodeIds.has(from) || !validNodeIds.has(to)) continue;
+
+    const rawId = cleanText((rawEdge as any).id);
+    let edgeId = rawId || `e_${randomUUID()}`;
+    if (usedEdgeIds.has(edgeId)) edgeId = `e_${randomUUID()}`;
+
+    const normalized = normalizeEdgeForInsert({
+      ...(rawEdge as any),
+      id: edgeId,
+      from,
+      to,
+    } as ConceptEdge);
+    if (!normalized) continue;
+
+    const sig = edgeSignature(normalized.from, normalized.to, normalized.type);
+    if (edgeSigSet.has(sig)) continue;
+
+    edgeSigSet.add(sig);
+    usedEdgeIds.add(normalized.id);
+    edges.push(normalized);
+  }
+
+  return {
+    id: cleanText(base?.id || input?.id || ""),
+    version: Number(base?.version || input?.version || 0),
+    nodes,
+    edges,
   };
 }
 

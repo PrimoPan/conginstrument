@@ -3,9 +3,10 @@ import { ObjectId } from "mongodb";
 import { authMiddleware, AuthedRequest } from "../middleware/auth.js";
 import { collections } from "../db/mongo.js";
 import { generateTurn, generateTurnStreaming } from "../services/llm.js";
-import { applyPatchWithGuards } from "../core/graph.js";
-import type { CDG, GraphPatch } from "../core/graph.js";
+import { applyPatchWithGuards, normalizeGraphSnapshot } from "../core/graph.js";
+import type { CDG } from "../core/graph.js";
 import { config } from "../server/config.js";
+import { generateAssistantTextNonStreaming } from "../services/chatResponder.js";
 
 export const convRouter = Router();
 convRouter.use(authMiddleware);
@@ -24,21 +25,50 @@ function parseObjectId(id: string): ObjectId | null {
   return new ObjectId(id);
 }
 
-function buildSnapshotPatchFromGraph(rawGraph: any): GraphPatch {
-  const nodes = Array.isArray(rawGraph?.nodes) ? rawGraph.nodes : [];
-  const edges = Array.isArray(rawGraph?.edges) ? rawGraph.edges : [];
+function graphComparablePayload(g: CDG) {
+  const nodes = (g.nodes || [])
+    .map((n) => ({
+      id: n.id,
+      type: n.type,
+      layer: n.layer,
+      strength: n.strength,
+      statement: n.statement,
+      status: n.status,
+      confidence: n.confidence,
+      locked: !!n.locked,
+      severity: n.severity,
+      importance: n.importance,
+      tags: n.tags || [],
+      key: n.key,
+      value: n.value,
+      evidenceIds: n.evidenceIds || [],
+      sourceMsgIds: n.sourceMsgIds || [],
+    }))
+    .sort((a, b) => String(a.id).localeCompare(String(b.id)));
+  const edges = (g.edges || [])
+    .map((e) => ({
+      id: e.id,
+      from: e.from,
+      to: e.to,
+      type: e.type,
+      confidence: e.confidence,
+      phi: e.phi,
+    }))
+    .sort((a, b) => String(a.id).localeCompare(String(b.id)));
+  return { nodes, edges };
+}
 
-  const ops: GraphPatch["ops"] = [];
-  for (const n of nodes) {
-    if (!n || typeof n !== "object") continue;
-    ops.push({ op: "add_node", node: n as any });
-  }
-  for (const e of edges) {
-    if (!e || typeof e !== "object") continue;
-    ops.push({ op: "add_edge", edge: e as any });
-  }
+function graphChanged(a: CDG, b: CDG): boolean {
+  return JSON.stringify(graphComparablePayload(a)) !== JSON.stringify(graphComparablePayload(b));
+}
 
-  return { ops, notes: ["manual_graph_save_snapshot"] };
+function parseBoolFlag(v: any): boolean {
+  if (v === true || v === 1) return true;
+  if (typeof v === "string") {
+    const s = v.trim().toLowerCase();
+    return s === "1" || s === "true" || s === "yes" || s === "on";
+  }
+  return false;
 }
 
 /**
@@ -147,16 +177,22 @@ convRouter.put("/:id/graph", async (req: AuthedRequest, res) => {
     return res.status(400).json({ error: "graph.nodes and graph.edges must be arrays" });
   }
 
-  const baseGraph: CDG = {
+  const prevGraph: CDG = {
     id: String(conv.graph?.id || id),
     version: Number(conv.graph?.version || 0),
-    nodes: [],
-    edges: [],
+    nodes: Array.isArray(conv.graph?.nodes) ? conv.graph.nodes : [],
+    edges: Array.isArray(conv.graph?.edges) ? conv.graph.edges : [],
   };
 
-  const snapshotPatch = buildSnapshotPatchFromGraph(incomingGraph);
-  const normalized = applyPatchWithGuards(baseGraph, snapshotPatch).newGraph;
-  normalized.id = baseGraph.id;
+  const normalized = normalizeGraphSnapshot(incomingGraph, {
+    id: prevGraph.id,
+    version: prevGraph.version,
+  });
+  normalized.id = prevGraph.id;
+  normalized.version = prevGraph.version + (graphChanged(prevGraph, normalized) ? 1 : 0);
+
+  const requestAdvice = parseBoolFlag(req.body?.requestAdvice);
+  const advicePrompt = String(req.body?.advicePrompt || "").trim().slice(0, 1200);
 
   const now = new Date();
   await collections.conversations.updateOne(
@@ -164,10 +200,43 @@ convRouter.put("/:id/graph", async (req: AuthedRequest, res) => {
     { $set: { graph: normalized, updatedAt: now } }
   );
 
+  let assistantText = "";
+  let adviceError = "";
+  if (requestAdvice) {
+    try {
+      const recent = await collections.turns
+        .find({ conversationId: oid, userId })
+        .sort({ createdAt: -1 })
+        .limit(12)
+        .toArray();
+      const recentTurns = recent
+        .reverse()
+        .flatMap((t) => [
+          { role: "user" as const, content: t.userText },
+          { role: "assistant" as const, content: t.assistantText },
+        ]);
+
+      const mergedPrompt =
+        advicePrompt ||
+        "用户已经手动修改了意图流程图。请把这个图视为最新有效意图，结合最近对话给出下一步可执行建议。先给具体行动方案，再给1-2个澄清问题。";
+
+      assistantText = await generateAssistantTextNonStreaming({
+        graph: normalized,
+        userText: mergedPrompt,
+        recentTurns,
+        systemPrompt: conv.systemPrompt,
+      });
+    } catch (e: any) {
+      adviceError = String(e?.message || "advice_generation_failed");
+    }
+  }
+
   res.json({
     conversationId: id,
     graph: normalized,
     updatedAt: now,
+    assistantText,
+    adviceError,
   });
 });
 

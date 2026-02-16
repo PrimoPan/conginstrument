@@ -469,7 +469,10 @@ function extractDurationCandidates(text: string): DurationCandidate[] {
     const isTotal = /(总共|一共|总计|全程|整个(?:行程|旅行)?|整体|行程时长|trip length|overall|total|in total)/i.test(ctx);
     const isMeeting = /(学术会议|会议|开会|chi|conference|workshop|forum|summit|参会)/i.test(ctx);
     const isCriticalEvent = hasHardDayReservationSignal(ctx);
-    const isSegment = /(米兰|巴塞罗那|停留|逛|游|玩|旅行|旅游|度假|行程|city|stay|香港|机场|飞到|前往)/i.test(ctx);
+    const isSegment =
+      /(停留|经过|先去|再去|之后去|前往|飞到|抵达|转机|行程段|逛|游|玩|旅行|旅游|度假|city|stay|flight|arrive|depart|before|after)/i.test(
+        ctx
+      );
 
     let kind: DurationCandidate["kind"] = "unknown";
     let strength = 0.55;
