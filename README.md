@@ -60,6 +60,8 @@ curl http://localhost:3001/healthz
 | `SESSION_TTL_DAYS` | 否 | `7` | session 过期天数 |
 | `CI_STREAM_MODE` | 否 | `pseudo` | `pseudo`（伪流）/`upstream`（上游真流） |
 | `CI_GRAPH_MODEL` | 否 | 与 `MODEL` 相同 | 建图模型 |
+| `CI_GRAPH_USE_FUNCTION_SLOTS` | 否 | `1` | 是否启用 function call 结构化槽位抽取 |
+| `CI_GRAPH_PATCH_LLM_WITH_SLOTS` | 否 | `0` | 槽位抽取成功后是否仍并行启用自由 patch LLM |
 | `CI_ALLOW_DELETE` | 否 | `0` | 是否允许 remove_node/remove_edge |
 | `CI_DEBUG_LLM` | 否 | `0` | LLM 与 patch 调试日志 |
 
@@ -380,6 +382,10 @@ conginstrument/
       │  ├─ text.ts
       │  ├─ intentSignals.ts
       │  ├─ nodeNormalization.ts
+      │  ├─ heuristicOps.ts
+      │  ├─ slotFunctionCall.ts
+      │  ├─ graphOpsHelpers.ts
+      │  ├─ prompt.ts
       │  └─ common.ts
       ├─ patchGuard.ts
       └─ textSanitizer.ts
@@ -413,6 +419,10 @@ conginstrument/
 | `src/services/graphUpdater/text.ts` | 文本清洗、证据合并、去重工具 |
 | `src/services/graphUpdater/intentSignals.ts` | 用户意图信号抽取（目的地/时长/预算/人数/关键日） |
 | `src/services/graphUpdater/nodeNormalization.ts` | 节点归一化与原子校验（防噪声、保结构） |
+| `src/services/graphUpdater/heuristicOps.ts` | 启发式建图（槽位胜出、根节点连通、关键约束落图） |
+| `src/services/graphUpdater/slotFunctionCall.ts` | function call 槽位抽取（结构化输出）与信号映射 |
+| `src/services/graphUpdater/graphOpsHelpers.ts` | 证据推断、语句去重 key、root goal 选择工具 |
+| `src/services/graphUpdater/prompt.ts` | graph patch LLM 系统提示词（与主流程解耦） |
 | `src/services/graphUpdater/common.ts` | patch 提取与临时 id 工具函数 |
 | `src/services/patchGuard.ts` | LLM patch 清洗与规范化（强约束） |
 | `src/services/textSanitizer.ts` | 把 Markdown/LaTeX 风格文本降级为纯文本 |
@@ -479,6 +489,7 @@ See the Chinese section above for the full table. Key vars include:
 - `OPENAI_API_KEY`, `OPENAI_BASE_URL`, `MODEL`
 - `SESSION_TTL_DAYS`
 - `CI_STREAM_MODE`, `CI_GRAPH_MODEL`, `CI_ALLOW_DELETE`, `CI_DEBUG_LLM`
+- `CI_GRAPH_USE_FUNCTION_SLOTS`, `CI_GRAPH_PATCH_LLM_WITH_SLOTS`
 
 ---
 
@@ -546,6 +557,10 @@ src/services/graphUpdater/constants.ts         # graph regex/constants
 src/services/graphUpdater/text.ts              # text/evidence helpers
 src/services/graphUpdater/intentSignals.ts     # intent signal extraction
 src/services/graphUpdater/nodeNormalization.ts # node normalization + validation
+src/services/graphUpdater/heuristicOps.ts      # heuristic graph construction from slots/signals
+src/services/graphUpdater/slotFunctionCall.ts  # function-call slot extraction
+src/services/graphUpdater/graphOpsHelpers.ts   # evidence/dedup/root-goal helpers
+src/services/graphUpdater/prompt.ts            # graph patch system prompt
 src/services/graphUpdater/common.ts            # patch parsing/temp id helpers
 src/services/patchGuard.ts   # strict patch sanitizer
 src/services/textSanitizer.ts# markdown-to-plain sanitizer

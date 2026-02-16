@@ -42,13 +42,17 @@ type DateRangeCandidate = {
 export type IntentSignals = {
   peopleCount?: number;
   peopleEvidence?: string;
+  peopleImportance?: number;
   destination?: string;
   destinationEvidence?: string;
   destinations?: string[];
   destinationEvidences?: string[];
+  destinationImportance?: number;
+  destinationImportanceByCity?: Record<string, number>;
   durationDays?: number;
   durationEvidence?: string;
   durationStrength?: number;
+  durationImportance?: number;
   hasTemporalAnchor?: boolean;
   hasDurationUpdateCue?: boolean;
   cityDurations?: Array<{
@@ -57,21 +61,31 @@ export type IntentSignals = {
     evidence: string;
     kind: "travel" | "meeting";
   }>;
+  cityDurationImportanceByCity?: Record<string, number>;
   criticalPresentation?: {
     days: number;
     reason: string;
     evidence: string;
     city?: string;
   };
+  criticalImportance?: number;
   durationUnknown?: boolean;
   durationUnknownEvidence?: string;
   budgetCny?: number;
   budgetEvidence?: string;
+  budgetImportance?: number;
   healthConstraint?: string;
   healthEvidence?: string;
+  healthImportance?: number;
   scenicPreference?: string;
   scenicPreferenceEvidence?: string;
   scenicPreferenceHard?: boolean;
+  scenicPreferenceImportance?: number;
+  lodgingPreference?: string;
+  lodgingPreferenceEvidence?: string;
+  lodgingPreferenceHard?: boolean;
+  lodgingPreferenceImportance?: number;
+  goalImportance?: number;
 };
 
 export function parseCnInt(raw: string): number | null {
@@ -705,6 +719,56 @@ export function normalizePreferenceStatement(raw: string) {
   };
 }
 
+export function normalizeLodgingPreferenceStatement(raw: string) {
+  const s = cleanStatement(raw, 160);
+  if (!s) return null;
+  const hasLodging =
+    /酒店|民宿|住宿|房型|星级|房费|住在|入住|住全程|全程住|酒店标准/i.test(s);
+  if (!hasLodging) return null;
+  const hard = HARD_REQUIRE_RE.test(s) || HARD_CONSTRAINT_RE.test(s);
+
+  if (/(五星|5星|豪华|高端)/i.test(s)) {
+    return {
+      statement: "住宿偏好：全程高星级酒店优先",
+      hard,
+      evidence: s,
+    };
+  }
+  if (/(经济型|省钱|便宜|青年旅舍|青旅)/i.test(s)) {
+    return {
+      statement: "住宿偏好：优先经济型住宿",
+      hard,
+      evidence: s,
+    };
+  }
+  return {
+    statement: "住宿偏好：需满足指定住宿标准",
+    hard,
+    evidence: s,
+  };
+}
+
+function clampImportance(x: any, fallback = 0.72) {
+  const n = Number(x);
+  if (!Number.isFinite(n)) return fallback;
+  return Math.max(0.35, Math.min(0.98, n));
+}
+
+function mergeImportanceMap(
+  a?: Record<string, number>,
+  b?: Record<string, number>
+): Record<string, number> | undefined {
+  const out: Record<string, number> = {};
+  for (const src of [a, b]) {
+    if (!src) continue;
+    for (const [k, v] of Object.entries(src)) {
+      if (!k) continue;
+      out[k] = Math.max(out[k] || 0, clampImportance(v, 0.72));
+    }
+  }
+  return Object.keys(out).length ? out : undefined;
+}
+
 export function pickHealthClause(userText: string): string | undefined {
   const parts = sentenceParts(userText);
   const hit = parts.find((x) => RISK_HEALTH_RE.test(x));
@@ -869,6 +933,15 @@ export function extractIntentSignals(userText: string, opts?: { historyMode?: bo
     out.scenicPreference = prefClause.statement;
     out.scenicPreferenceHard = prefClause.hard;
     out.scenicPreferenceEvidence = prefClause.evidence;
+    out.scenicPreferenceImportance = prefClause.hard ? 0.8 : 0.68;
+  }
+
+  const lodgingClause = sentenceParts(text).map(normalizeLodgingPreferenceStatement).find(Boolean);
+  if (lodgingClause) {
+    out.lodgingPreference = lodgingClause.statement;
+    out.lodgingPreferenceHard = lodgingClause.hard;
+    out.lodgingPreferenceEvidence = lodgingClause.evidence;
+    out.lodgingPreferenceImportance = lodgingClause.hard ? 0.82 : 0.66;
   }
 
   return out;
@@ -916,9 +989,23 @@ function mergeSignalsWithLatest(history: IntentSignals, latest: IntentSignals): 
     out.peopleCount = latest.peopleCount;
     out.peopleEvidence = latest.peopleEvidence || out.peopleEvidence;
   }
+  if (latest.peopleImportance != null) {
+    out.peopleImportance = clampImportance(latest.peopleImportance, out.peopleImportance || 0.72);
+  }
+
   out.destinations = mergeDestinations(out.destinations, latest.destinations);
   if (out.destinations?.length) {
     out.destination = out.destinations[0];
+  }
+  out.destinationImportanceByCity = mergeImportanceMap(
+    out.destinationImportanceByCity,
+    latest.destinationImportanceByCity
+  );
+  if (latest.destinationImportance != null) {
+    out.destinationImportance = clampImportance(
+      latest.destinationImportance,
+      out.destinationImportance || 0.8
+    );
   }
   if (latest.destination) {
     out.destination = latest.destination;
@@ -936,9 +1023,19 @@ function mergeSignalsWithLatest(history: IntentSignals, latest: IntentSignals): 
   } else {
     out.cityDurations = mergeCityDurations(out.cityDurations, latest.cityDurations);
   }
+  out.cityDurationImportanceByCity = mergeImportanceMap(
+    out.cityDurationImportanceByCity,
+    latest.cityDurationImportanceByCity
+  );
 
   if (latest.criticalPresentation) {
     out.criticalPresentation = latest.criticalPresentation;
+  }
+  if (latest.criticalImportance != null) {
+    out.criticalImportance = clampImportance(
+      latest.criticalImportance,
+      out.criticalImportance || 0.96
+    );
   }
 
   if (latest.durationDays != null) {
@@ -963,6 +1060,12 @@ function mergeSignalsWithLatest(history: IntentSignals, latest: IntentSignals): 
       out.durationStrength = latestStrength;
       out.durationUnknown = false;
       out.durationUnknownEvidence = undefined;
+      if (latest.durationImportance != null) {
+        out.durationImportance = clampImportance(
+          latest.durationImportance,
+          out.durationImportance || 0.78
+        );
+      }
     }
   } else if (latest.durationUnknown) {
     out.durationUnknown = true;
@@ -1000,14 +1103,47 @@ function mergeSignalsWithLatest(history: IntentSignals, latest: IntentSignals): 
     out.budgetCny = latest.budgetCny;
     out.budgetEvidence = latest.budgetEvidence || out.budgetEvidence;
   }
+  if (latest.budgetImportance != null) {
+    out.budgetImportance = clampImportance(
+      latest.budgetImportance,
+      out.budgetImportance || 0.86
+    );
+  }
   if (latest.healthConstraint) {
     out.healthConstraint = latest.healthConstraint;
     out.healthEvidence = latest.healthEvidence || out.healthEvidence;
+  }
+  if (latest.healthImportance != null) {
+    out.healthImportance = clampImportance(
+      latest.healthImportance,
+      out.healthImportance || 0.96
+    );
   }
   if (latest.scenicPreference) {
     out.scenicPreference = latest.scenicPreference;
     out.scenicPreferenceEvidence = latest.scenicPreferenceEvidence || out.scenicPreferenceEvidence;
     out.scenicPreferenceHard = latest.scenicPreferenceHard;
+  }
+  if (latest.scenicPreferenceImportance != null) {
+    out.scenicPreferenceImportance = clampImportance(
+      latest.scenicPreferenceImportance,
+      out.scenicPreferenceImportance || 0.68
+    );
+  }
+  if (latest.lodgingPreference) {
+    out.lodgingPreference = latest.lodgingPreference;
+    out.lodgingPreferenceEvidence =
+      latest.lodgingPreferenceEvidence || out.lodgingPreferenceEvidence;
+    out.lodgingPreferenceHard = latest.lodgingPreferenceHard;
+  }
+  if (latest.lodgingPreferenceImportance != null) {
+    out.lodgingPreferenceImportance = clampImportance(
+      latest.lodgingPreferenceImportance,
+      out.lodgingPreferenceImportance || 0.66
+    );
+  }
+  if (latest.goalImportance != null) {
+    out.goalImportance = clampImportance(latest.goalImportance, out.goalImportance || 0.82);
   }
 
   return out;
@@ -1017,4 +1153,8 @@ export function extractIntentSignalsWithRecency(historyText: string, latestUserT
   const fromHistory = extractIntentSignals(historyText, { historyMode: true });
   const fromLatest = extractIntentSignals(latestUserText);
   return mergeSignalsWithLatest(fromHistory, fromLatest);
+}
+
+export function mergeIntentSignals(base: IntentSignals, incoming: IntentSignals): IntentSignals {
+  return mergeSignalsWithLatest(base, incoming);
 }
