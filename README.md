@@ -94,6 +94,7 @@ Base URL 示例：`http://localhost:3001`
 | `GET` | `/api/conversations` | 是 | 会话列表 |
 | `POST` | `/api/conversations` | 是 | 新建会话 |
 | `GET` | `/api/conversations/:id` | 是 | 会话详情（含图） |
+| `PUT` | `/api/conversations/:id/graph` | 是 | 保存前端编辑后的整图快照 |
 | `GET` | `/api/conversations/:id/turns?limit=30` | 是 | 历史轮次 |
 | `POST` | `/api/conversations/:id/turn` | 是 | 非流式单轮 |
 | `POST` | `/api/conversations/:id/turn/stream` | 是 | SSE 流式单轮 |
@@ -225,7 +226,50 @@ Base URL 示例：`http://localhost:3001`
 ]
 ```
 
-#### 7.7 `POST /api/conversations/:id/turn`（非流式）
+#### 7.7 `PUT /api/conversations/:id/graph`（保存前端修改图）
+
+请求：
+
+```json
+{
+  "graph": {
+    "id": "65f1...",
+    "version": 6,
+    "nodes": [],
+    "edges": []
+  }
+}
+```
+
+行为：
+
+1. 服务端把前端图快照转换为 `add_node + add_edge` 的 snapshot patch。
+2. 统一走 `applyPatchWithGuards`（字段清洗、去重、拓扑修复）。
+3. 持久化到 `conversations.graph`，下一轮对话建图会直接基于这份图继续。
+
+响应：
+
+```json
+{
+  "conversationId": "65f1...",
+  "graph": {
+    "id": "65f1...",
+    "version": 7,
+    "nodes": [],
+    "edges": []
+  },
+  "updatedAt": "2026-02-16T00:00:00.000Z"
+}
+```
+
+错误：
+
+- `400 {"error":"invalid conversation id"}`
+- `400 {"error":"graph required"}`
+- `400 {"error":"graph.nodes and graph.edges must be arrays"}`
+- `404 {"error":"conversation not found"}`
+
+#### 7.8 `POST /api/conversations/:id/turn`（非流式）
 
 请求：
 
@@ -257,7 +301,7 @@ Base URL 示例：`http://localhost:3001`
 - `400 {"error":"userText required"}`
 - `404 {"error":"conversation not found"}`
 
-#### 7.8 `POST /api/conversations/:id/turn/stream`（SSE）
+#### 7.9 `POST /api/conversations/:id/turn/stream`（SSE）
 
 请求：
 
@@ -326,6 +370,7 @@ data: {"assistantText":"...","graphPatch":{"ops":[]},"graph":{"id":"65f1...","ve
 4. `postProcessPatch` + 启发式规则补齐原子节点与连边。
 5. `applyPatchWithGuards` 应用 patch 并输出新图。
 6. 持久化 `turns` 与 `conversations.graph`。
+7. 若调用 `PUT /api/conversations/:id/graph` 保存前端改图，后续 turn 的 LLM 输入直接使用这份更新图。
 
 ---
 
@@ -500,6 +545,7 @@ See the Chinese section above for the full table. Key vars include:
 - `GET /api/conversations`
 - `POST /api/conversations`
 - `GET /api/conversations/:id`
+- `PUT /api/conversations/:id/graph`
 - `GET /api/conversations/:id/turns?limit=30`
 - `POST /api/conversations/:id/turn`
 - `POST /api/conversations/:id/turn/stream` (SSE)

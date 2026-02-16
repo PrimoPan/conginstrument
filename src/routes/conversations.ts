@@ -3,7 +3,8 @@ import { ObjectId } from "mongodb";
 import { authMiddleware, AuthedRequest } from "../middleware/auth.js";
 import { collections } from "../db/mongo.js";
 import { generateTurn, generateTurnStreaming } from "../services/llm.js";
-import { applyPatchWithGuards, CDG } from "../core/graph.js";
+import { applyPatchWithGuards } from "../core/graph.js";
+import type { CDG, GraphPatch } from "../core/graph.js";
 import { config } from "../server/config.js";
 
 export const convRouter = Router();
@@ -21,6 +22,23 @@ function emptyGraph(conversationId: string): CDG {
 function parseObjectId(id: string): ObjectId | null {
   if (!ObjectId.isValid(id)) return null;
   return new ObjectId(id);
+}
+
+function buildSnapshotPatchFromGraph(rawGraph: any): GraphPatch {
+  const nodes = Array.isArray(rawGraph?.nodes) ? rawGraph.nodes : [];
+  const edges = Array.isArray(rawGraph?.edges) ? rawGraph.edges : [];
+
+  const ops: GraphPatch["ops"] = [];
+  for (const n of nodes) {
+    if (!n || typeof n !== "object") continue;
+    ops.push({ op: "add_node", node: n as any });
+  }
+  for (const e of edges) {
+    if (!e || typeof e !== "object") continue;
+    ops.push({ op: "add_edge", edge: e as any });
+  }
+
+  return { ops, notes: ["manual_graph_save_snapshot"] };
 }
 
 /**
@@ -108,6 +126,48 @@ convRouter.get("/:id", async (req: AuthedRequest, res) => {
     title: conv.title,
     systemPrompt: conv.systemPrompt,
     graph: conv.graph,
+  });
+});
+
+convRouter.put("/:id/graph", async (req: AuthedRequest, res) => {
+  const userId = req.userId!;
+  const id = req.params.id;
+
+  const oid = parseObjectId(id);
+  if (!oid) return res.status(400).json({ error: "invalid conversation id" });
+
+  const conv = await collections.conversations.findOne({ _id: oid, userId });
+  if (!conv) return res.status(404).json({ error: "conversation not found" });
+
+  const incomingGraph = req.body?.graph;
+  if (!incomingGraph || typeof incomingGraph !== "object") {
+    return res.status(400).json({ error: "graph required" });
+  }
+  if (!Array.isArray(incomingGraph.nodes) || !Array.isArray(incomingGraph.edges)) {
+    return res.status(400).json({ error: "graph.nodes and graph.edges must be arrays" });
+  }
+
+  const baseGraph: CDG = {
+    id: String(conv.graph?.id || id),
+    version: Number(conv.graph?.version || 0),
+    nodes: [],
+    edges: [],
+  };
+
+  const snapshotPatch = buildSnapshotPatchFromGraph(incomingGraph);
+  const normalized = applyPatchWithGuards(baseGraph, snapshotPatch).newGraph;
+  normalized.id = baseGraph.id;
+
+  const now = new Date();
+  await collections.conversations.updateOne(
+    { _id: oid, userId },
+    { $set: { graph: normalized, updatedAt: now } }
+  );
+
+  res.json({
+    conversationId: id,
+    graph: normalized,
+    updatedAt: now,
   });
 });
 

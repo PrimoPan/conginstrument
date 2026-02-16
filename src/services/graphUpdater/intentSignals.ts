@@ -485,6 +485,7 @@ export function normalizeDestination(raw: string): string {
   let s = cleanStatement(raw, 24);
   s = s.replace(/^(在|于|到|去|从|飞到|前往|抵达)\s*/i, "");
   s = s.replace(/^(我想|想|想去|想到|想逛|逛一逛|逛逛|逛|游览|游玩|探索|体验|顺带|顺便|顺路|顺道)\s*/i, "");
+  s = s.replace(/^(的|在|于)\s*/i, "");
   s = s.replace(/(这座城市|这座城|这座|城市|城区|城)$/i, "");
   s = s.replace(/(之外|之内|以内|以内地区)$/i, "");
   // 迭代剥离尾部噪声，避免“巴塞罗那参加CHI”“米兰玩”这类污染目的地槽位。
@@ -496,8 +497,10 @@ export function normalizeDestination(raw: string): string {
     changed = next !== s;
     s = next.trim();
   }
+  s = s.replace(/^的+/g, "").replace(/的+$/g, "");
   s = s.replace(/省/g, "").replace(/市/g, "");
   s = s.replace(COUNTRY_PREFIX_RE, "");
+  s = s.replace(/^的+/g, "");
   s = s.replace(/(旅游|旅行|游玩|出行|度假|参会|开会|会议|行程|计划|玩|逛)$/i, "");
   s = s.trim();
   return s;
@@ -507,11 +510,14 @@ export function isLikelyDestinationCandidate(x: string): boolean {
   const s = normalizeDestination(x);
   if (!s) return false;
   if (s.length < 2 || s.length > 16) return false;
+  if (/^的/.test(s)) return false;
   if (!/^[A-Za-z\u4e00-\u9fff]+$/.test(s)) return false;
   if (DESTINATION_NOISE_RE.test(s)) return false;
   if (PLACE_STOPWORD_RE.test(s)) return false;
   if (/[A-Za-z]/.test(s) && /[\u4e00-\u9fff]/.test(s)) return false;
   if (/^[A-Za-z]+$/.test(s) && s.length <= 2) return false;
+  if (/(其中|其中有|其余|其他时候|海地区|该地区)/.test(s)) return false;
+  if (s.endsWith("地区") && s.length <= 4) return false;
   if (/(参加|参会|开会|会议|玩|旅游|旅行|度假|计划|安排)$/i.test(s)) return false;
   if (
     /心脏|母亲|父亲|家人|预算|人数|行程|计划|注意|高强度|旅行时|旅游时|需要|限制|不能|安排|在此之前|此前|之前|之后|然后|再从|我会|我要|参会|参加|开会|会议|飞到|出发|机场|航班|汇报|论文|报告|顺带|顺便|顺路|顺道/i.test(
