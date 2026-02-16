@@ -9,6 +9,27 @@ export type Status = "proposed" | "confirmed" | "rejected" | "disputed";
 
 // ✅ 新增：风险等级（给前端映射颜色用）
 export type Severity = "low" | "medium" | "high" | "critical";
+export type MotifType = "belief" | "hypothesis" | "expectation" | "cognitive_step";
+
+export type MotifStructure = {
+  premises?: string[];
+  inference?: string;
+  conclusion?: string;
+};
+
+export type MotifEvidence = {
+  id?: string;
+  quote: string;
+  source?: string;
+  link?: string;
+};
+
+export type RevisionRecord = {
+  at: string;
+  action: "created" | "updated" | "replaced" | "merged";
+  reason?: string;
+  by?: "user" | "assistant" | "system";
+};
 
 export type ConceptNode = {
   id: string;
@@ -30,6 +51,17 @@ export type ConceptNode = {
   value?: any;
   evidenceIds?: string[];
   sourceMsgIds?: string[];
+
+  // PRD: motif/intent metadata
+  motifType?: MotifType;
+  claim?: string;
+  structure?: MotifStructure;
+  evidence?: MotifEvidence[];
+  linkedIntentIds?: string[];
+  rebuttalPoints?: string[];
+  revisionHistory?: RevisionRecord[];
+  priority?: number;
+  successCriteria?: string[];
 };
 
 export type EdgeType = "enable" | "constraint" | "determine" | "conflicts_with";
@@ -65,6 +97,7 @@ const ALLOW_DELETE = process.env.CI_ALLOW_DELETE === "1";
 const ALLOWED_STATUS = new Set<Status>(["proposed", "confirmed", "rejected", "disputed"]);
 const ALLOWED_STRENGTH = new Set<Strength>(["hard", "soft"]);
 const ALLOWED_SEVERITY = new Set<Severity>(["low", "medium", "high", "critical"]);
+const ALLOWED_MOTIF_TYPES = new Set<MotifType>(["belief", "hypothesis", "expectation", "cognitive_step"]);
 const ALLOWED_NODE_TYPES = new Set<ConceptType>([
   "goal",
   "constraint",
@@ -145,6 +178,76 @@ function normalizeSeverity(x: any): Severity | undefined {
   if (!s) return undefined;
   if (ALLOWED_SEVERITY.has(s as Severity)) return s as Severity;
   return undefined;
+}
+
+function normalizeStringArray(input: any, max = 12): string[] | undefined {
+  if (!Array.isArray(input)) return undefined;
+  const out = input.map((x) => cleanText(x)).filter(Boolean).slice(0, max);
+  return out.length ? out : undefined;
+}
+
+function normalizeMotifType(x: any): MotifType | undefined {
+  const s = cleanText(x).toLowerCase();
+  if (!s) return undefined;
+  if (ALLOWED_MOTIF_TYPES.has(s as MotifType)) return s as MotifType;
+  return undefined;
+}
+
+function normalizeMotifStructure(input: any): MotifStructure | undefined {
+  if (!input || typeof input !== "object") return undefined;
+  const premises = normalizeStringArray((input as any).premises, 8);
+  const inference = cleanText((input as any).inference);
+  const conclusion = cleanText((input as any).conclusion);
+  const out: MotifStructure = {};
+  if (premises) out.premises = premises;
+  if (inference) out.inference = inference;
+  if (conclusion) out.conclusion = conclusion;
+  return Object.keys(out).length ? out : undefined;
+}
+
+function normalizeMotifEvidence(input: any): MotifEvidence[] | undefined {
+  if (!Array.isArray(input)) return undefined;
+  const out: MotifEvidence[] = [];
+  for (const row of input) {
+    if (!row || typeof row !== "object") continue;
+    const quote = cleanText((row as any).quote);
+    if (!quote) continue;
+    const item: MotifEvidence = { quote };
+    const id = cleanText((row as any).id);
+    const source = cleanText((row as any).source);
+    const link = cleanText((row as any).link);
+    if (id) item.id = id;
+    if (source) item.source = source;
+    if (link) item.link = link;
+    out.push(item);
+    if (out.length >= 8) break;
+  }
+  return out.length ? out : undefined;
+}
+
+function normalizeRevisionHistory(input: any): RevisionRecord[] | undefined {
+  if (!Array.isArray(input)) return undefined;
+  const out: RevisionRecord[] = [];
+  const allowedAction = new Set<RevisionRecord["action"]>(["created", "updated", "replaced", "merged"]);
+  const allowedBy = new Set<RevisionRecord["by"]>(["user", "assistant", "system"]);
+
+  for (const row of input) {
+    if (!row || typeof row !== "object") continue;
+    const at = cleanText((row as any).at);
+    const actionRaw = cleanText((row as any).action).toLowerCase();
+    if (!at || !allowedAction.has(actionRaw as RevisionRecord["action"])) continue;
+    const item: RevisionRecord = {
+      at,
+      action: actionRaw as RevisionRecord["action"],
+    };
+    const reason = cleanText((row as any).reason);
+    const byRaw = cleanText((row as any).by).toLowerCase();
+    if (reason) item.reason = reason;
+    if (allowedBy.has(byRaw as RevisionRecord["by"])) item.by = byRaw as RevisionRecord["by"];
+    out.push(item);
+    if (out.length >= 10) break;
+  }
+  return out.length ? out : undefined;
 }
 
 function slotKeyOfNode(node: ConceptNode): string | null {
@@ -1236,6 +1339,17 @@ function normalizeNodeForInsert(n: ConceptNode): ConceptNode | null {
   const severity = normalizeSeverity((n as any).severity);
   const importance = n.importance != null ? clamp01(n.importance, 0.5) : undefined;
   const tags = normalizeTags((n as any).tags);
+  const motifType = normalizeMotifType((n as any).motifType);
+  const claim = cleanText((n as any).claim);
+  const structure = normalizeMotifStructure((n as any).structure);
+  const evidence = normalizeMotifEvidence((n as any).evidence);
+  const linkedIntentIds = normalizeStringArray((n as any).linkedIntentIds, 8);
+  const rebuttalPoints = normalizeStringArray((n as any).rebuttalPoints, 8);
+  const revisionHistory = normalizeRevisionHistory((n as any).revisionHistory);
+  const priority = n.priority != null ? clamp01(n.priority, 0.65) : undefined;
+  const successCriteria = normalizeStringArray((n as any).successCriteria, 8);
+  const evidenceIds = normalizeStringArray((n as any).evidenceIds, 12);
+  const sourceMsgIds = normalizeStringArray((n as any).sourceMsgIds, 12);
   const layer =
     normalizeNodeLayer((n as any).layer) ||
     inferNodeLayer({
@@ -1260,6 +1374,19 @@ function normalizeNodeForInsert(n: ConceptNode): ConceptNode | null {
     severity,
     importance,
     tags,
+    key: n.key != null ? cleanText(n.key) : undefined,
+    value: n.value,
+    evidenceIds,
+    sourceMsgIds,
+    motifType,
+    claim: claim || undefined,
+    structure,
+    evidence,
+    linkedIntentIds,
+    rebuttalPoints,
+    revisionHistory,
+    priority,
+    successCriteria,
   };
 }
 
@@ -1404,8 +1531,22 @@ function normalizeNodePatch(patch: Partial<ConceptNode>): Partial<ConceptNode> {
   // 预留字段（如果你未来想让 LLM 更新结构化信息）
   if (patch.key != null) out.key = cleanText(patch.key);
   if (patch.value !== undefined) out.value = patch.value;
-  if (patch.evidenceIds != null && Array.isArray(patch.evidenceIds)) out.evidenceIds = patch.evidenceIds.map(String).slice(0, 12);
-  if (patch.sourceMsgIds != null && Array.isArray(patch.sourceMsgIds)) out.sourceMsgIds = patch.sourceMsgIds.map(String).slice(0, 12);
+  if (patch.evidenceIds != null) out.evidenceIds = normalizeStringArray(patch.evidenceIds, 12);
+  if (patch.sourceMsgIds != null) out.sourceMsgIds = normalizeStringArray(patch.sourceMsgIds, 12);
+
+  if ((patch as any).motifType != null) (out as any).motifType = normalizeMotifType((patch as any).motifType);
+  if ((patch as any).claim != null) (out as any).claim = cleanText((patch as any).claim) || undefined;
+  if ((patch as any).structure != null) (out as any).structure = normalizeMotifStructure((patch as any).structure);
+  if ((patch as any).evidence != null) (out as any).evidence = normalizeMotifEvidence((patch as any).evidence);
+  if ((patch as any).linkedIntentIds != null)
+    (out as any).linkedIntentIds = normalizeStringArray((patch as any).linkedIntentIds, 8);
+  if ((patch as any).rebuttalPoints != null)
+    (out as any).rebuttalPoints = normalizeStringArray((patch as any).rebuttalPoints, 8);
+  if ((patch as any).revisionHistory != null)
+    (out as any).revisionHistory = normalizeRevisionHistory((patch as any).revisionHistory);
+  if ((patch as any).priority != null) (out as any).priority = clamp01((patch as any).priority, 0.65);
+  if ((patch as any).successCriteria != null)
+    (out as any).successCriteria = normalizeStringArray((patch as any).successCriteria, 8);
 
   return out;
 }

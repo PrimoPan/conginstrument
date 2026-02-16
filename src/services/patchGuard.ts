@@ -10,6 +10,7 @@ function dlog(...args: any[]) {
 const ALLOWED_NODE_TYPES = new Set(["goal", "constraint", "preference", "belief", "fact", "question"]);
 const ALLOWED_EDGE_TYPES = new Set(["enable", "constraint", "determine", "conflicts_with"]);
 const ALLOWED_SEVERITY = new Set(["low", "medium", "high", "critical"]);
+const ALLOWED_MOTIF_TYPES = new Set(["belief", "hypothesis", "expectation", "cognitive_step"]);
 
 // 默认只允许增/改/加边；删除要显式开开关
 const ALLOW_DELETE = process.env.CI_ALLOW_DELETE === "1";
@@ -48,6 +49,53 @@ function normalizeStringArray(input: any, max = 8): string[] | undefined {
     .map((x) => String(x ?? "").trim())
     .filter(Boolean)
     .slice(0, max);
+  return out.length ? out : undefined;
+}
+
+function normalizeMotifType(input: any): string | undefined {
+  const s = String(input ?? "").trim().toLowerCase();
+  if (!s) return undefined;
+  return ALLOWED_MOTIF_TYPES.has(s) ? s : undefined;
+}
+
+function normalizeMotifEvidence(input: any): any[] | undefined {
+  if (!Array.isArray(input)) return undefined;
+  const out: any[] = [];
+  for (const row of input) {
+    if (!row || typeof row !== "object") continue;
+    const quote = String((row as any).quote ?? "").trim();
+    if (!quote) continue;
+    const item: any = { quote };
+    const id = String((row as any).id ?? "").trim();
+    const source = String((row as any).source ?? "").trim();
+    const link = String((row as any).link ?? "").trim();
+    if (id) item.id = id;
+    if (source) item.source = source;
+    if (link) item.link = link;
+    out.push(item);
+    if (out.length >= 8) break;
+  }
+  return out.length ? out : undefined;
+}
+
+function normalizeRevisionHistory(input: any): any[] | undefined {
+  if (!Array.isArray(input)) return undefined;
+  const out: any[] = [];
+  const allowedAction = new Set(["created", "updated", "replaced", "merged"]);
+  const allowedBy = new Set(["user", "assistant", "system"]);
+  for (const row of input) {
+    if (!row || typeof row !== "object") continue;
+    const at = String((row as any).at ?? "").trim();
+    const action = String((row as any).action ?? "").trim().toLowerCase();
+    if (!at || !allowedAction.has(action)) continue;
+    const item: any = { at, action };
+    const reason = String((row as any).reason ?? "").trim();
+    const by = String((row as any).by ?? "").trim().toLowerCase();
+    if (reason) item.reason = reason;
+    if (allowedBy.has(by)) item.by = by;
+    out.push(item);
+    if (out.length >= 10) break;
+  }
   return out.length ? out : undefined;
 }
 
@@ -221,6 +269,15 @@ export function sanitizeGraphPatchStrict(raw: any): GraphPatch {
       const tags = normalizeTags(node?.tags);
       const evidenceIds = normalizeStringArray(node?.evidenceIds, 6);
       const sourceMsgIds = normalizeStringArray(node?.sourceMsgIds, 6);
+      const linkedIntentIds = normalizeStringArray(node?.linkedIntentIds, 8);
+      const rebuttalPoints = normalizeStringArray(node?.rebuttalPoints, 8);
+      const successCriteria = normalizeStringArray(node?.successCriteria, 8);
+      const motifType = normalizeMotifType(node?.motifType);
+      const evidence = normalizeMotifEvidence(node?.evidence);
+      const revisionHistory = normalizeRevisionHistory(node?.revisionHistory);
+      const priority = node?.priority != null ? clamp01(node?.priority, 0.65) : undefined;
+      const claim = typeof node?.claim === "string" ? node.claim.trim() : undefined;
+      const key = typeof node?.key === "string" ? node.key.trim() : undefined;
 
       opsOut.push({
         op: "add_node",
@@ -237,6 +294,15 @@ export function sanitizeGraphPatchStrict(raw: any): GraphPatch {
           tags,
           evidenceIds,
           sourceMsgIds,
+          key,
+          motifType,
+          claim,
+          evidence,
+          linkedIntentIds,
+          rebuttalPoints,
+          revisionHistory,
+          priority,
+          successCriteria,
         },
       });
       continue;
@@ -278,6 +344,21 @@ export function sanitizeGraphPatchStrict(raw: any): GraphPatch {
 
       const sourceMsgIds = normalizeStringArray((patchSrc as any).sourceMsgIds, 6);
       if (sourceMsgIds) outPatch.sourceMsgIds = sourceMsgIds;
+      if ((patchSrc as any).key != null && String((patchSrc as any).key).trim()) outPatch.key = String((patchSrc as any).key).trim();
+      const motifType = normalizeMotifType((patchSrc as any).motifType);
+      if (motifType) outPatch.motifType = motifType;
+      if ((patchSrc as any).claim != null && String((patchSrc as any).claim).trim()) outPatch.claim = String((patchSrc as any).claim).trim();
+      const linkedIntentIds = normalizeStringArray((patchSrc as any).linkedIntentIds, 8);
+      if (linkedIntentIds) outPatch.linkedIntentIds = linkedIntentIds;
+      const rebuttalPoints = normalizeStringArray((patchSrc as any).rebuttalPoints, 8);
+      if (rebuttalPoints) outPatch.rebuttalPoints = rebuttalPoints;
+      const successCriteria = normalizeStringArray((patchSrc as any).successCriteria, 8);
+      if (successCriteria) outPatch.successCriteria = successCriteria;
+      const evidence = normalizeMotifEvidence((patchSrc as any).evidence);
+      if (evidence) outPatch.evidence = evidence;
+      const revisionHistory = normalizeRevisionHistory((patchSrc as any).revisionHistory);
+      if (revisionHistory) outPatch.revisionHistory = revisionHistory;
+      if ((patchSrc as any).priority != null) outPatch.priority = clamp01((patchSrc as any).priority, 0.65);
 
       if (Object.keys(outPatch).length === 0) {
         notes.push("drop:update_node_empty_patch");

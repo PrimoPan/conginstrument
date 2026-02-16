@@ -61,7 +61,7 @@ curl http://localhost:3001/healthz
 | `CI_STREAM_MODE` | 否 | `pseudo` | `pseudo`（伪流）/`upstream`（上游真流） |
 | `CI_GRAPH_MODEL` | 否 | 与 `MODEL` 相同 | 建图模型 |
 | `CI_GRAPH_USE_FUNCTION_SLOTS` | 否 | `1` | 是否启用 function call 结构化槽位抽取 |
-| `CI_GRAPH_PATCH_LLM_WITH_SLOTS` | 否 | `0` | 槽位抽取成功后是否仍并行启用自由 patch LLM |
+| `CI_GRAPH_PATCH_LLM_WITH_SLOTS` | 否 | `0` | 兼容旧版参数；当前 V2 槽位流水线默认不走自由 patch LLM |
 | `CI_GEO_VALIDATE` | 否 | `1` | 是否启用地理校验层（Nominatim） |
 | `CI_GEO_ENDPOINT` | 否 | `https://nominatim.openstreetmap.org` | 地理解析服务地址 |
 | `CI_GEO_TIMEOUT_MS` | 否 | `2600` | 每次地理查询超时（毫秒） |
@@ -359,6 +359,7 @@ data: {"assistantText":"...","graphPatch":{"ops":[]},"graph":{"id":"65f1...","ve
 - `ConceptNode.type`：`goal | constraint | preference | belief | fact | question`
 - `ConceptNode.layer`：`intent | requirement | preference | risk`
 - `ConceptNode.severity`：`low | medium | high | critical`
+- `ConceptNode.motifType`：`belief | hypothesis | expectation | cognitive_step`
 - `ConceptEdge.type`：`enable | constraint | determine | conflicts_with`
 - `GraphPatch.ops`：`add_node | update_node | remove_node | add_edge | remove_edge`
 
@@ -367,7 +368,7 @@ data: {"assistantText":"...","graphPatch":{"ops":[]},"graph":{"id":"65f1...","ve
 1. `applyPatchWithGuards` 会做字段归一化、白名单校验、ID 重写。
 2. 默认禁删（除非 `CI_ALLOW_DELETE=1`）。
 3. 单值槽位会做自动压缩（例如预算/人数/目的地/时长，保留更优节点）。
-4. `layer` 可由 LLM 显式提供；若缺失，后端会根据节点语义自动推断：
+4. `layer` 可由系统显式提供；若缺失，后端会根据节点语义自动推断：
    `goal -> intent`，硬约束/结构化事实 -> `requirement`，偏好语义 -> `preference`，高风险/健康/安全语义 -> `risk`。
 5. 时长槽位采用“城市分段优先合并”：
    - 对话中若出现 `城市A n天 + 城市B m天`，后端会优先合成为 `总行程时长 = n+m`。
@@ -379,23 +380,27 @@ data: {"assistantText":"...","graphPatch":{"ops":[]},"graph":{"id":"65f1...","ve
 7. 手工改图保存与自动建图分离：
    - 对话 turn（自动建图）走 `applyPatchWithGuards`（包含拓扑修复/去重策略）。
    - 前端整图保存走 `normalizeGraphSnapshot`（仅做合法化，不重排用户图结构）。
-8. 地理校验层（Global-ready）：
+8. PRD 元数据字段已入模（先存储，前端暂不复杂展示）：
+   - `claim/structure/evidence/linkedIntentIds/rebuttalPoints/revisionHistory`
+   - `priority/successCriteria`
+9. 地理校验层（Global-ready）：
    - 合并后的槽位会进入 `geoResolver`（Nominatim）做地理规范化。
    - 自动判断“子地点 -> 父城市”关系（如冷门地点/场馆），避免把子地点误当一级目的地。
    - 查询失败时自动降级为本地规则，不阻断对话与建图。
 
 ---
 
-### 9. 建图更新流水线（graph path）
+### 9. 建图更新流水线（V2：槽位状态机 -> 图编译器）
 
 1. `generateTurn` / `generateTurnStreaming` 先生成助手文本。
-2. `generateGraphPatch` 生成图增量 patch。
-3. `sanitizeGraphPatchStrict` 做严格清洗（防漂移字段、非法 op）。
-4. 合并槽位后进入 `geoResolver` 做地理规范化（目的地/城市时长/子地点父城校正）。
-5. `postProcessPatch` + 启发式规则补齐原子节点与连边。
-6. `applyPatchWithGuards` 应用 patch 并输出新图。
-7. 持久化 `turns` 与 `conversations.graph`。
-8. 若调用 `PUT /api/conversations/:id/graph` 保存前端改图，后续 turn 的 LLM 输入直接使用这份更新图；若 `requestAdvice=true`，同一次请求会返回“基于编辑图”的建议文本。
+2. `extractIntentSignalsWithRecency` + `slotFunctionCall` 抽取结构化槽位（并做冲突融合）。
+3. `geoResolver` 做地理规范化（目的地/城市时长/子地点父城归属）。
+4. `slotStateMachine` 产出“标准化槽位状态”（slot winners）。
+5. `slotGraphCompiler` 把槽位状态编译为 `GraphPatch`（add/update/edge + stale 降级）。
+6. `sanitizeGraphPatchStrict` 严格清洗 patch。
+7. `applyPatchWithGuards` 应用 patch 并输出新图（含压缩、拓扑修复）。
+8. 持久化 `turns` 与 `conversations.graph`。
+9. 若调用 `PUT /api/conversations/:id/graph` 保存前端改图，后续 turn 会使用这份更新图作为最新真值。
 
 ---
 
@@ -452,11 +457,10 @@ conginstrument/
       │  ├─ text.ts
       │  ├─ intentSignals.ts
       │  ├─ geoResolver.ts
-      │  ├─ nodeNormalization.ts
-      │  ├─ heuristicOps.ts
+      │  ├─ slotTypes.ts
+      │  ├─ slotStateMachine.ts
+      │  ├─ slotGraphCompiler.ts
       │  ├─ slotFunctionCall.ts
-      │  ├─ graphOpsHelpers.ts
-      │  ├─ prompt.ts
       │  └─ common.ts
       ├─ patchGuard.ts
       └─ textSanitizer.ts
@@ -485,16 +489,15 @@ conginstrument/
 | `src/core/nodeLayer.ts` | 节点四层分类（Intent/Requirement/Preference/Risk）的推断与归一化 |
 | `src/services/llmClient.ts` | OpenAI SDK 客户端实例 |
 | `src/services/chatResponder.ts` | 助手文本生成（非流式/伪流/真流） |
-| `src/services/graphUpdater.ts` | 图 patch 主流程（LLM 调用、启发式融合、后处理） |
+| `src/services/graphUpdater.ts` | 图 patch 主流程（槽位抽取、状态机融合、图编译） |
 | `src/services/graphUpdater/constants.ts` | 建图正则与槽位识别常量 |
 | `src/services/graphUpdater/text.ts` | 文本清洗、证据合并、去重工具 |
 | `src/services/graphUpdater/intentSignals.ts` | 用户意图信号抽取（目的地/时长/预算/人数/关键日），含跨轮时长合并与相对时间过滤 |
 | `src/services/graphUpdater/geoResolver.ts` | 地理校验层（Nominatim），做目的地规范化与子地点父城归属修复 |
-| `src/services/graphUpdater/nodeNormalization.ts` | 节点归一化与原子校验（防噪声、保结构） |
-| `src/services/graphUpdater/heuristicOps.ts` | 启发式建图（槽位胜出、根节点连通、关键约束落图） |
+| `src/services/graphUpdater/slotTypes.ts` | 槽位状态机与图编译器共享类型 |
+| `src/services/graphUpdater/slotStateMachine.ts` | 槽位状态机（slot winners、总时长合并、关键约束稳态） |
+| `src/services/graphUpdater/slotGraphCompiler.ts` | 图编译器（slot state -> GraphPatch，含 stale 节点降级） |
 | `src/services/graphUpdater/slotFunctionCall.ts` | function call 槽位抽取（结构化输出，含子地点归属）与信号映射 |
-| `src/services/graphUpdater/graphOpsHelpers.ts` | 证据推断、语句去重 key、root goal 选择工具 |
-| `src/services/graphUpdater/prompt.ts` | graph patch LLM 系统提示词（与主流程解耦） |
 | `src/services/graphUpdater/common.ts` | patch 提取与临时 id 工具函数 |
 | `src/services/patchGuard.ts` | LLM patch 清洗与规范化（强约束） |
 | `src/services/textSanitizer.ts` | 把 Markdown/LaTeX 风格文本降级为纯文本 |
@@ -637,11 +640,10 @@ src/services/graphUpdater/constants.ts         # graph regex/constants
 src/services/graphUpdater/text.ts              # text/evidence helpers
 src/services/graphUpdater/intentSignals.ts     # intent signal extraction
 src/services/graphUpdater/geoResolver.ts       # geo normalization + parent-city repair
-src/services/graphUpdater/nodeNormalization.ts # node normalization + validation
-src/services/graphUpdater/heuristicOps.ts      # heuristic graph construction from slots/signals
+src/services/graphUpdater/slotTypes.ts         # slot state/compiler shared schema
+src/services/graphUpdater/slotStateMachine.ts  # slot-state machine (winner selection)
+src/services/graphUpdater/slotGraphCompiler.ts # slot-state -> graph patch compiler
 src/services/graphUpdater/slotFunctionCall.ts  # function-call slot extraction
-src/services/graphUpdater/graphOpsHelpers.ts   # evidence/dedup/root-goal helpers
-src/services/graphUpdater/prompt.ts            # graph patch system prompt
 src/services/graphUpdater/common.ts            # patch parsing/temp id helpers
 src/services/patchGuard.ts   # strict patch sanitizer
 src/services/textSanitizer.ts# markdown-to-plain sanitizer
