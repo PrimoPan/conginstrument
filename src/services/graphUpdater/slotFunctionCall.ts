@@ -21,12 +21,23 @@ type SlotExtractionResult = {
     importance?: number;
     confidence?: number;
     role?: "travel" | "meeting" | "transit" | "other";
+    granularity?: "country" | "region" | "city" | "district" | "venue" | "poi" | "other";
+    parent_city?: string;
   }>;
   city_durations?: Array<{
     city?: string;
     days?: number;
     kind?: "travel" | "meeting";
     evidence?: string;
+    importance?: number;
+    confidence?: number;
+  }>;
+  sub_locations?: Array<{
+    name?: string;
+    parent_city?: string;
+    kind?: "district" | "venue" | "poi" | "landmark" | "area" | "other";
+    evidence?: string;
+    hard?: boolean;
     importance?: number;
     confidence?: number;
   }>;
@@ -140,6 +151,32 @@ function pickTopCritical(
 
 function slotsToSignals(slots: SlotExtractionResult): IntentSignals {
   const out: IntentSignals = {};
+  const subLocationChildToParent = new Map<string, string>();
+
+  if (Array.isArray(slots.sub_locations) && slots.sub_locations.length) {
+    const seen = new Set<string>();
+    const subLocations: NonNullable<IntentSignals["subLocations"]> = [];
+    for (const s of slots.sub_locations) {
+      const name = cleanStatement(s?.name || "", 32);
+      if (!name) continue;
+      const nameNorm = normalizeDestination(name) || name.toLowerCase();
+      const parentCity = normalizeDestination(s?.parent_city || "");
+      const parentOk = parentCity && isLikelyDestinationCandidate(parentCity) ? parentCity : undefined;
+      const key = `${nameNorm.toLowerCase()}|${(parentOk || "").toLowerCase()}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      if (parentOk) subLocationChildToParent.set(nameNorm.toLowerCase(), parentOk);
+      subLocations.push({
+        name,
+        parentCity: parentOk,
+        evidence: cleanStatement(s?.evidence || s?.name || "", 60),
+        kind: (s?.kind as any) || "other",
+        hard: !!s?.hard,
+        importance: clampImportance(s?.importance, s?.hard ? 0.78 : 0.62),
+      });
+    }
+    if (subLocations.length) out.subLocations = subLocations.slice(0, 12);
+  }
 
   if (slots.intent_importance != null) {
     out.goalImportance = clampImportance(slots.intent_importance, 0.82);
@@ -154,6 +191,16 @@ function slotsToSignals(slots: SlotExtractionResult): IntentSignals {
     for (const d of slots.destinations) {
       const city = normalizeDestination(d?.name || "");
       if (!city || !isLikelyDestinationCandidate(city) || seen.has(city)) continue;
+      const granularity = d?.granularity || "city";
+      const isSubGranularity =
+        granularity === "district" || granularity === "venue" || granularity === "poi" || granularity === "other";
+      const parentCity = normalizeDestination(d?.parent_city || "");
+      const parentOk = parentCity && isLikelyDestinationCandidate(parentCity) ? parentCity : undefined;
+      if (isSubGranularity || d?.role === "other") {
+        if (parentOk) subLocationChildToParent.set(city.toLowerCase(), parentOk);
+        continue;
+      }
+      if (subLocationChildToParent.has(city.toLowerCase())) continue;
       seen.add(city);
       dests.push(city);
       evidences.push(cleanStatement(d?.evidence || d?.name || city, 40));
@@ -173,11 +220,41 @@ function slotsToSignals(slots: SlotExtractionResult): IntentSignals {
     }
   }
 
+  if (out.subLocations?.length) {
+    const blocked = new Set(
+      out.subLocations
+        .filter((x) => x.parentCity)
+        .map((x) => normalizeDestination(x.name || "").toLowerCase())
+        .filter(Boolean)
+    );
+    const kept = (out.destinations || []).filter(
+      (x) => x && !blocked.has(normalizeDestination(x).toLowerCase())
+    );
+    for (const sub of out.subLocations) {
+      if (!sub.parentCity) continue;
+      const parent = normalizeDestination(sub.parentCity);
+      if (!parent || !isLikelyDestinationCandidate(parent)) continue;
+      if (!kept.includes(parent)) kept.push(parent);
+      if (out.destinationImportanceByCity) {
+        out.destinationImportanceByCity[parent] = Math.max(
+          Number(out.destinationImportanceByCity[parent]) || 0,
+          clampImportance(sub.importance, 0.76)
+        );
+      }
+    }
+    if (kept.length) {
+      out.destinations = kept.slice(0, 6);
+      out.destination = out.destinations[0];
+      if (!out.destinationEvidence) out.destinationEvidence = out.destinations[0];
+    }
+  }
+
   const cityDurationImportanceByCity: Record<string, number> = {};
   if (Array.isArray(slots.city_durations)) {
     const map = new Map<string, { city: string; days: number; evidence: string; kind: "travel" | "meeting" }>();
     for (const seg of slots.city_durations) {
-      const city = normalizeDestination(seg?.city || "");
+      const rawCity = normalizeDestination(seg?.city || "");
+      const city = rawCity ? subLocationChildToParent.get(rawCity.toLowerCase()) || rawCity : "";
       const days = toInt(seg?.days);
       if (!city || !days || days <= 0 || days > 120 || !isLikelyDestinationCandidate(city)) continue;
       const kind: "travel" | "meeting" = seg?.kind === "meeting" ? "meeting" : "travel";
@@ -317,7 +394,8 @@ const SLOT_SYSTEM_PROMPT = `你是结构化槽位抽取器。只调用给定函�
 2) 如用户在后续消息更新预算/时长/目的地，使用最新约束。
 3) “留一天做事/发表论文/见亲戚”归入 critical_days，不得覆盖 total_duration。
 4) destinations 只能是地名，禁止“顺带/其他时间/这座城之外”等描述词。
-5) 不确定就留空，不要编造。`;
+5) 若提到 B 地点是 A 城市中的场馆/景点/街区（例如“去A城，在B看球”），B 放入 sub_locations，并尽量给出 parent_city=A；不要把 B 当 destinations。
+6) 不确定就留空，不要编造。`;
 
 const SLOT_PARAMETERS = {
   type: "object",
@@ -344,6 +422,8 @@ const SLOT_PARAMETERS = {
           name: { type: "string" },
           evidence: { type: "string" },
           role: { type: "string", enum: ["travel", "meeting", "transit", "other"] },
+          granularity: { type: "string", enum: ["country", "region", "city", "district", "venue", "poi", "other"] },
+          parent_city: { type: "string" },
           importance: { type: "number" },
           confidence: { type: "number" },
         },
@@ -359,6 +439,22 @@ const SLOT_PARAMETERS = {
           days: { type: "number" },
           kind: { type: "string", enum: ["travel", "meeting"] },
           evidence: { type: "string" },
+          importance: { type: "number" },
+          confidence: { type: "number" },
+        },
+      },
+    },
+    sub_locations: {
+      type: "array",
+      items: {
+        type: "object",
+        additionalProperties: false,
+        properties: {
+          name: { type: "string" },
+          parent_city: { type: "string" },
+          kind: { type: "string", enum: ["district", "venue", "poi", "landmark", "area", "other"] },
+          evidence: { type: "string" },
+          hard: { type: "boolean" },
           importance: { type: "number" },
           confidence: { type: "number" },
         },
@@ -515,6 +611,7 @@ export async function extractIntentSignalsByFunctionCall(params: {
     !!signals.criticalPresentation ||
     !!signals.scenicPreference ||
     !!signals.lodgingPreference ||
+    (signals.subLocations?.length || 0) > 0 ||
     (signals.cityDurations?.length || 0) > 0;
 
   if (!hasAnySignal) return null;

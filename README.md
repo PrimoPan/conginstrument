@@ -363,6 +363,9 @@ data: {"assistantText":"...","graphPatch":{"ops":[]},"graph":{"id":"65f1...","ve
    - 对话中若出现 `城市A n天 + 城市B m天`，后端会优先合成为 `总行程时长 = n+m`。
    - `前两天/后一天` 这类相对时间不会直接覆盖总时长槽位。
    - 历史中的脏目的地（如“顺带”）会在 merge 阶段被清洗，避免污染后续图结构。
+6. 子地点归属采用 function-call 槽位：
+   - 把“场馆/景点/街区”提取为 `sub_locations`，并尽量给出 `parent_city`。
+   - 子地点不作为一级目的地，建图时会挂到对应城市（如城市节点/城市时长节点）下。
 
 ---
 
@@ -469,7 +472,7 @@ conginstrument/
 | `src/services/graphUpdater/intentSignals.ts` | 用户意图信号抽取（目的地/时长/预算/人数/关键日），含跨轮时长合并与相对时间过滤 |
 | `src/services/graphUpdater/nodeNormalization.ts` | 节点归一化与原子校验（防噪声、保结构） |
 | `src/services/graphUpdater/heuristicOps.ts` | 启发式建图（槽位胜出、根节点连通、关键约束落图） |
-| `src/services/graphUpdater/slotFunctionCall.ts` | function call 槽位抽取（结构化输出）与信号映射 |
+| `src/services/graphUpdater/slotFunctionCall.ts` | function call 槽位抽取（结构化输出，含子地点归属）与信号映射 |
 | `src/services/graphUpdater/graphOpsHelpers.ts` | 证据推断、语句去重 key、root goal 选择工具 |
 | `src/services/graphUpdater/prompt.ts` | graph patch LLM 系统提示词（与主流程解耦） |
 | `src/services/graphUpdater/common.ts` | patch 提取与临时 id 工具函数 |

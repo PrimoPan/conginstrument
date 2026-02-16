@@ -86,7 +86,7 @@ const GENERIC_TIMELINE_HINT_RE = /截止|deadline|里程碑|周期|排期|冲刺
 const GENERIC_STAKEHOLDER_HINT_RE = /用户|客户|老板|团队|同事|角色|stakeholder|owner|reviewer|审批/i;
 const GENERIC_RISK_HINT_RE = /风险|故障|安全|合规|隐私|法律|阻塞|依赖|上线事故|risk|security|privacy|compliance/i;
 const DESTINATION_BAD_TOKEN_RE =
-  /我|你|他|她|我们|时间|之外|之前|之后|必须|到场|安排|计划|pre|chi|会议|汇报|报告|论文|一天|两天|三天|四天|五天|顺带|顺便|顺路|顺道|其中|其中有|其余|其他时候|海地区|该地区/i;
+  /我|你|他|她|我们|时间|之外|之前|之后|必须|到场|安排|计划|pre|chi|会议|汇报|报告|论文|一天|两天|三天|四天|五天|顺带|顺便|顺路|顺道|其中|其中有|其余|其他时候|海地区|该地区|看球|观赛|比赛|演讲|发表|打卡|参观|游览|所以这|因此|另外|此外/i;
 
 type TopologyTuning = {
   lambdaSparsity: number;
@@ -329,6 +329,7 @@ function pruneInvalidStructuredNodes(
       const city = cleanText(dest[1]);
       if (!city || DESTINATION_BAD_TOKEN_RE.test(city) || /^的/.test(city)) invalid = true;
       if (/地区$/.test(city) && city.length <= 4) invalid = true;
+      if (/(前|后)$/.test(city)) invalid = true;
     }
 
     const cityDur = s.match(/^(?:城市时长|停留时长)[:：]\s*(.+?)\s+[0-9]{1,3}\s*天$/);
@@ -336,6 +337,7 @@ function pruneInvalidStructuredNodes(
       const city = cleanText(cityDur[1]);
       if (!city || DESTINATION_BAD_TOKEN_RE.test(city) || /^的/.test(city)) invalid = true;
       if (/地区$/.test(city) && city.length <= 4) invalid = true;
+      if (/(前|后)$/.test(city)) invalid = true;
     }
 
     if (!invalid) continue;

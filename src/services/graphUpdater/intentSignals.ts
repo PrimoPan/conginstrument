@@ -63,6 +63,14 @@ export type IntentSignals = {
     kind: "travel" | "meeting";
   }>;
   cityDurationImportanceByCity?: Record<string, number>;
+  subLocations?: Array<{
+    name: string;
+    parentCity?: string;
+    evidence: string;
+    kind?: "poi" | "venue" | "district" | "landmark" | "area" | "other";
+    hard?: boolean;
+    importance?: number;
+  }>;
   criticalPresentation?: {
     days: number;
     reason: string;
@@ -123,6 +131,145 @@ export function parseCnInt(raw: string): number | null {
 
 function escapeRegExp(input: string): string {
   return String(input || "").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function normalizeSubLocationName(raw: string): string {
+  let s = cleanStatement(raw, 40);
+  s = s.replace(/^(在|于|到|去|前往|飞到|抵达)\s*/i, "");
+  s = s.replace(/(看球|观赛|比赛|参观|游览|打卡|逛|散步|汇报|演讲|发表|讲论文|参加|参会|开会)$/i, "");
+  return s.trim();
+}
+
+function mergeSubLocations(
+  a?: IntentSignals["subLocations"],
+  b?: IntentSignals["subLocations"]
+): IntentSignals["subLocations"] | undefined {
+  const map = new Map<string, NonNullable<IntentSignals["subLocations"]>[number]>();
+  for (const x of [...(a || []), ...(b || [])]) {
+    const name = normalizeSubLocationName(x?.name || "");
+    if (!name) continue;
+    const parentCity = x?.parentCity ? normalizeDestination(x.parentCity) : undefined;
+    const key = `${name.toLowerCase()}|${(parentCity || "").toLowerCase()}`;
+    const cur = map.get(key);
+    const cand = {
+      name,
+      parentCity: parentCity && isLikelyDestinationCandidate(parentCity) ? parentCity : undefined,
+      evidence: cleanStatement(x?.evidence || name, 60),
+      kind: x?.kind,
+      hard: !!x?.hard,
+      importance: x?.importance,
+    };
+    if (!cur) {
+      map.set(key, cand);
+      continue;
+    }
+    map.set(key, {
+      ...cur,
+      evidence: cleanStatement(`${cur.evidence}; ${cand.evidence}`, 60),
+      hard: cur.hard || cand.hard,
+      importance: Math.max(Number(cur.importance) || 0, Number(cand.importance) || 0) || undefined,
+      kind: cur.kind || cand.kind,
+      parentCity: cur.parentCity || cand.parentCity,
+    });
+  }
+  return map.size ? Array.from(map.values()).slice(0, 12) : undefined;
+}
+
+function remapBySubLocationParent(
+  city: string,
+  subLocations?: IntentSignals["subLocations"]
+): string {
+  const c = normalizeDestination(city || "");
+  if (!c) return c;
+  if (!subLocations?.length) return c;
+  const hit = subLocations.find(
+    (x) =>
+      normalizeDestination(x.name || "") === c &&
+      x.parentCity &&
+      isLikelyDestinationCandidate(x.parentCity)
+  );
+  return hit?.parentCity ? normalizeDestination(hit.parentCity) : c;
+}
+
+function filterDestinationsBySubLocations(
+  destinations?: string[],
+  subLocations?: IntentSignals["subLocations"]
+): string[] | undefined {
+  if (!destinations?.length) return undefined;
+  if (!subLocations?.length) return destinations;
+  const childWithParent = new Set(
+    subLocations
+      .filter((x) => x.parentCity)
+      .map((x) => normalizeDestination(x.name || ""))
+      .filter(Boolean)
+  );
+  const parentCities = subLocations
+    .map((x) => (x.parentCity ? normalizeDestination(x.parentCity) : ""))
+    .filter((x) => x && isLikelyDestinationCandidate(x));
+
+  const out = destinations
+    .map((x) => normalizeDestination(x))
+    .filter((x) => x && isLikelyDestinationCandidate(x) && !childWithParent.has(x));
+  for (const p of parentCities) {
+    if (!out.includes(p)) out.push(p);
+  }
+  return out.length ? out.slice(0, 8) : undefined;
+}
+
+function extractSubLocationsFromText(
+  text: string,
+  destinationHints?: string[]
+): IntentSignals["subLocations"] {
+  const out: NonNullable<IntentSignals["subLocations"]> = [];
+  const t = String(text || "");
+  if (!t) return undefined;
+
+  const knownCities = (destinationHints || [])
+    .map((x) => normalizeDestination(x))
+    .filter((x) => x && isLikelyDestinationCandidate(x));
+
+  const cityMentions: Array<{ city: string; index: number }> = [];
+  if (knownCities.length) {
+    for (const city of knownCities) {
+      const cityEsc = escapeRegExp(city);
+      const re = new RegExp(cityEsc, "gi");
+      for (const m of t.matchAll(re)) {
+        cityMentions.push({ city, index: Number(m.index) || 0 });
+      }
+    }
+    cityMentions.sort((a, b) => a.index - b.index);
+  }
+
+  const activityPoiRe =
+    /(?:到|去|在|于|抵达)\s*([A-Za-z\u4e00-\u9fff]{2,24}?)(?=看球|观赛|比赛|参观|游览|看展|打卡|拍照|购物|吃饭|就餐|汇报|演讲|发表|讲论文|参加|参会|开会)/gi;
+  for (const m of t.matchAll(activityPoiRe)) {
+    const rawName = String(m[1] || "");
+    const name = normalizeSubLocationName(rawName);
+    if (!name) continue;
+
+    const idx = Number(m.index) || 0;
+    const nameAsCity = normalizeDestination(name);
+    if (knownCities.includes(nameAsCity)) continue;
+    let parentCity: string | undefined;
+    for (let i = cityMentions.length - 1; i >= 0; i -= 1) {
+      const c = cityMentions[i];
+      if (normalizeDestination(c.city) === nameAsCity) continue;
+      if (c.index <= idx && idx - c.index <= 64) {
+        parentCity = c.city;
+        break;
+      }
+    }
+    out.push({
+      name,
+      parentCity,
+      evidence: cleanStatement(m[0] || name, 60),
+      kind: "venue",
+      hard: false,
+      importance: 0.62,
+    });
+  }
+
+  return mergeSubLocations(undefined, out);
 }
 
 function pickLatestBudgetMatch(
@@ -517,6 +664,7 @@ export function isLikelyDestinationCandidate(x: string): boolean {
   if (!s) return false;
   if (s.length < 2 || s.length > 16) return false;
   if (/^的/.test(s)) return false;
+  if (/^(所以|因此|然后|另外|此外|这|那|此次|本次)/.test(s)) return false;
   if (!/^[A-Za-z\u4e00-\u9fff]+$/.test(s)) return false;
   if (DESTINATION_NOISE_RE.test(s)) return false;
   if (PLACE_STOPWORD_RE.test(s)) return false;
@@ -628,6 +776,7 @@ function extractCityDurationSegments(text: string): Array<{ city: string; days: 
     const days = parseCnInt(m?.[2] || "");
     if (!city || !days || days <= 0 || days > 60) continue;
     if (!isLikelyDestinationCandidate(city)) continue;
+    if (/^(所以|因此|然后|另外|此外|这|那|此次|本次)/.test(city)) continue;
     const idx = Number(m.index) || 0;
     const snippet = cleanStatement(m[0] || `${city}${days}天`, 80);
     if (hasRelativeDayOffset(snippet, city)) continue;
@@ -651,6 +800,7 @@ function extractCityDurationSegments(text: string): Array<{ city: string; days: 
     const days = parseCnInt(rawDays);
     if (!city || !days || days <= 0 || days > 60) continue;
     if (!isLikelyDestinationCandidate(city)) continue;
+    if (/^(所以|因此|然后|另外|此外|这|那|此次|本次)/.test(city)) continue;
     if (DESTINATION_NOISE_RE.test(city) || PLACE_STOPWORD_RE.test(city)) continue;
 
     const idx = Number(m.index) || 0;
@@ -956,6 +1106,16 @@ export function extractIntentSignals(userText: string, opts?: { historyMode?: bo
     }
   }
 
+  const textSubLocations = extractSubLocationsFromText(text, out.destinations || []);
+  if (textSubLocations?.length) {
+    out.subLocations = textSubLocations;
+    out.destinations = filterDestinationsBySubLocations(out.destinations, out.subLocations);
+    if (out.destinations?.length) {
+      out.destination = out.destinations[0];
+      if (!out.destinationEvidence) out.destinationEvidence = out.destinationEvidences?.[0] || out.destinations[0];
+    }
+  }
+
   const duration = inferDurationFromText(text, { historyMode: !!opts?.historyMode });
   if (duration?.days) {
     out.durationDays = duration.days;
@@ -966,7 +1126,7 @@ export function extractIntentSignals(userText: string, opts?: { historyMode?: bo
   const citySegments = extractCityDurationSegments(text);
   if (citySegments.length) {
     out.cityDurations = citySegments.map((x) => ({
-      city: x.city,
+      city: remapBySubLocationParent(x.city, out.subLocations),
       days: x.days,
       evidence: x.evidence,
       kind: x.kind,
@@ -974,8 +1134,9 @@ export function extractIntentSignals(userText: string, opts?: { historyMode?: bo
     for (const seg of citySegments) {
       if (!out.destinations) out.destinations = [];
       if (!out.destinationEvidences) out.destinationEvidences = [];
-      if (!out.destinations.includes(seg.city)) {
-        out.destinations.push(seg.city);
+      const mappedCity = remapBySubLocationParent(seg.city, out.subLocations);
+      if (!out.destinations.includes(mappedCity)) {
+        out.destinations.push(mappedCity);
         out.destinationEvidences.push(seg.evidence);
       }
     }
@@ -1017,7 +1178,7 @@ export function extractIntentSignals(userText: string, opts?: { historyMode?: bo
     if (hasSingleDestination) {
       out.cityDurations = [
         {
-          city: out.destination,
+          city: remapBySubLocationParent(out.destination, out.subLocations),
           days: out.durationDays,
           evidence: out.durationEvidence || `${out.destination}${out.durationDays}天`,
           kind: /(会议|开会|chi|conference|workshop|论坛|参会)/i.test(text) ? "meeting" : "travel",
@@ -1030,6 +1191,16 @@ export function extractIntentSignals(userText: string, opts?: { historyMode?: bo
         out.destinationEvidences = [out.destinationEvidence || out.durationEvidence || out.destination];
       }
     }
+  }
+
+  if (out.subLocations?.length) {
+    out.destinations = filterDestinationsBySubLocations(out.destinations, out.subLocations);
+    if (out.cityDurations?.length) {
+      out.cityDurations = out.cityDurations
+        .map((x) => ({ ...x, city: remapBySubLocationParent(x.city, out.subLocations) }))
+        .filter((x) => !!x.city && isLikelyDestinationCandidate(x.city));
+    }
+    if (out.destinations?.length) out.destination = out.destinations[0];
   }
 
   if (!out.durationDays && /几天|多少天|天数待定|时长待定/i.test(text)) {
@@ -1093,7 +1264,8 @@ function mergeSignalsWithLatest(history: IntentSignals, latest: IntentSignals): 
   ) => {
     const map = new Map<string, { city: string; days: number; evidence: string; kind: "travel" | "meeting" }>();
     for (const seg of [...(a || []), ...(b || [])]) {
-      const city = normalizeDestination(seg?.city || "");
+      const rawCity = normalizeDestination(seg?.city || "");
+      const city = remapBySubLocationParent(rawCity, mergeSubLocations(out.subLocations, latest.subLocations));
       const days = Number(seg?.days) || 0;
       if (!city || days <= 0 || days > 60) continue;
       if (!isLikelyDestinationCandidate(city)) continue;
@@ -1121,6 +1293,7 @@ function mergeSignalsWithLatest(history: IntentSignals, latest: IntentSignals): 
   }
   out.cityDurations = mergeCityDurations(undefined, out.cityDurations);
   if (!out.destination && out.destinations?.length) out.destination = out.destinations[0];
+  out.subLocations = mergeSubLocations(out.subLocations, undefined);
 
   if (latest.peopleCount != null) {
     out.peopleCount = latest.peopleCount;
@@ -1152,6 +1325,7 @@ function mergeSignalsWithLatest(history: IntentSignals, latest: IntentSignals): 
       out.destinations = mergeDestinations(out.destinations, [normalizedLatestDestination]);
     }
   }
+  out.subLocations = mergeSubLocations(out.subLocations, latest.subLocations);
   out.hasTemporalAnchor = !!latest.hasTemporalAnchor || !!out.hasTemporalAnchor;
   out.hasDurationUpdateCue = !!latest.hasDurationUpdateCue || !!out.hasDurationUpdateCue;
   out.hasExplicitTotalCue = !!latest.hasExplicitTotalCue || !!out.hasExplicitTotalCue;
@@ -1166,6 +1340,16 @@ function mergeSignalsWithLatest(history: IntentSignals, latest: IntentSignals): 
   } else {
     out.cityDurations = mergeCityDurations(out.cityDurations, latest.cityDurations);
   }
+  if (out.cityDurations?.length) {
+    out.cityDurations = out.cityDurations
+      .map((x) => ({ ...x, city: remapBySubLocationParent(x.city, out.subLocations) }))
+      .filter((x) => !!x.city && isLikelyDestinationCandidate(x.city));
+  }
+  out.destinations = filterDestinationsBySubLocations(
+    mergeDestinations(out.destinations, undefined),
+    out.subLocations
+  );
+  if (out.destinations?.length) out.destination = out.destinations[0];
   out.cityDurationImportanceByCity = mergeImportanceMap(
     out.cityDurationImportanceByCity,
     latest.cityDurationImportanceByCity

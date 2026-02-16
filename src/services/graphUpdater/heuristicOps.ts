@@ -234,6 +234,7 @@ export function buildHeuristicIntentOps(params: {
     if (id && rootId) pushEdge(id, rootId, "determine");
   }
 
+  const cityDurationNodeIds = new Map<string, string>();
   for (const seg of signals.cityDurations || []) {
     const city = normalizeDestination(seg.city);
     if (!city) continue;
@@ -251,10 +252,40 @@ export function buildHeuristicIntentOps(params: {
       evidenceIds: [seg.evidence || `${city}${seg.days}天`],
     });
     if (!id) continue;
+    cityDurationNodeIds.set(city, id);
     layer2Set.add(id);
     const cityDestinationId = destinationNodeIds.get(city);
     if (cityDestinationId) pushEdge(id, cityDestinationId, "determine");
     else if (rootId) pushEdge(id, rootId, "determine");
+  }
+
+  for (const sub of signals.subLocations || []) {
+    const name = cleanStatement(sub?.name || "", 28);
+    if (!name) continue;
+    const parentCity = sub?.parentCity ? normalizeDestination(sub.parentCity) : "";
+    const evidence = cleanStatement(sub?.evidence || name, 64);
+    const hard = !!sub?.hard;
+    const id = pushNode({
+      type: hard ? "constraint" : "fact",
+      statement: `子地点：${name}${parentCity ? `（${parentCity}）` : ""}`,
+      strength: hard ? "hard" : undefined,
+      status: "proposed",
+      confidence: hard ? 0.86 : 0.76,
+      importance: importanceWithHint(sub?.importance, hard ? 0.78 : 0.62),
+      tags: ["sub_location", sub?.kind || "other"].filter(Boolean),
+      evidenceIds: [evidence],
+    });
+    if (!id) continue;
+
+    const parentDurationId = parentCity ? cityDurationNodeIds.get(parentCity) : null;
+    const parentDestinationId = parentCity ? destinationNodeIds.get(parentCity) : null;
+    if (parentDurationId) {
+      pushEdge(id, parentDurationId, hard ? "constraint" : "determine");
+    } else if (parentDestinationId) {
+      pushEdge(id, parentDestinationId, hard ? "constraint" : "determine");
+    } else if (rootId) {
+      pushEdge(id, rootId, hard ? "constraint" : "enable");
+    }
   }
 
   if (signals.criticalPresentation) {

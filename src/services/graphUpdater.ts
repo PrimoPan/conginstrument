@@ -113,6 +113,7 @@ function shouldAutoAttachToRoot(node: {
 }) {
   const s = cleanStatement(node?.statement || "", 180);
   if (!s) return false;
+  if (/^子地点[:：]/.test(s)) return false;
   if (isStructuredStatement(s)) return true;
   if (/^健康约束[:：]/.test(s)) return true;
   if (String(node?.severity || "") === "high" || String(node?.severity || "") === "critical") return true;
