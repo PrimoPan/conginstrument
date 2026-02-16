@@ -55,6 +55,7 @@ export type IntentSignals = {
   durationImportance?: number;
   hasTemporalAnchor?: boolean;
   hasDurationUpdateCue?: boolean;
+  hasExplicitTotalCue?: boolean;
   cityDurations?: Array<{
     city: string;
     days: number;
@@ -118,6 +119,10 @@ export function parseCnInt(raw: string): number | null {
 
   if (map[s] != null) return map[s];
   return null;
+}
+
+function escapeRegExp(input: string): string {
+  return String(input || "").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
 function pickLatestBudgetMatch(
@@ -488,6 +493,7 @@ export function normalizeDestination(raw: string): string {
   s = s.replace(/^(的|在|于)\s*/i, "");
   s = s.replace(/(这座城市|这座城|这座|城市|城区|城)$/i, "");
   s = s.replace(/(之外|之内|以内|以内地区)$/i, "");
+  s = s.replace(/(?:前|后)$/i, "");
   // 迭代剥离尾部噪声，避免“巴塞罗那参加CHI”“米兰玩”这类污染目的地槽位。
   const tailNoiseRe =
     /(参加|参会|开会|会议|chi|conference|workshop|summit|论坛|峰会|玩|逛|旅游|旅行|游玩|出行|度假|计划|安排)$/i;
@@ -531,6 +537,10 @@ export function isLikelyDestinationCandidate(x: string): boolean {
 
 function extractDestinationList(text: string): Array<{ city: string; evidence: string; index: number }> {
   const out: Array<{ city: string; evidence: string; index: number }> = [];
+  const scanText = text.replace(
+    /在此之前|在此之后|此前|此后|之前|之后|然后|再从|再去|再到|(前|后)\s*[0-9一二三四五六七八九十两]{1,2}\s*天/g,
+    (m) => "，".repeat(m.length)
+  );
   const push = (raw: string, evidence: string, index: number) => {
     const city = normalizeDestination(raw);
     if (!isLikelyDestinationCandidate(city)) return;
@@ -543,31 +553,32 @@ function extractDestinationList(text: string): Array<{ city: string; evidence: s
 
   const routeRe =
     /从\s*([A-Za-z\u4e00-\u9fff]{2,20})[^\n。；;，,]{0,10}?(?:飞|出发|前往|去|到)?[^\n。；;，,]{0,3}?到\s*([A-Za-z\u4e00-\u9fff]{2,20})/gi;
-  for (const m of text.matchAll(routeRe)) {
+  for (const m of scanText.matchAll(routeRe)) {
     if (!m?.[2]) continue;
     push(m[2], m[0] || m[2], Number(m.index) || 0);
   }
 
-  const goRe = /(?:去|到|前往|飞到|抵达)\s*([A-Za-z\u4e00-\u9fff]{2,14}?)(?=参加|参会|开会|会议|玩|旅游|旅行|度假|逛|游|[，。,；;！!？?\s]|$)/gi;
-  for (const m of text.matchAll(goRe)) {
+  const goRe =
+    /(?:去|到|前往|飞到|抵达)\s*([A-Za-z\u4e00-\u9fff]{2,14}?)(?=[0-9一二三四五六七八九十两]{1,3}\s*天|之前|之后|参加|参会|开会|会议|玩|旅游|旅行|度假|逛|游|[，。,；;！!？?\s]|$)/gi;
+  for (const m of scanText.matchAll(goRe)) {
     if (!m?.[1]) continue;
     push(m[1], m[1], Number(m.index) || 0);
   }
 
   const visitRe = /(?:逛|游览|游玩|探索|体验)\s*(?:一逛|一下|一圈|一遍)?\s*([A-Za-z\u4e00-\u9fff]{2,14})(?:这座城市|这座城|城市|城)?/gi;
-  for (const m of text.matchAll(visitRe)) {
+  for (const m of scanText.matchAll(visitRe)) {
     if (!m?.[1]) continue;
     push(m[1], m[1], Number(m.index) || 0);
   }
 
   const atMeetingRe = /(?:在|于)\s*([A-Za-z\u4e00-\u9fff]{2,20})\s*(?:参加|参会|开会|办会|召开)/gi;
-  for (const m of text.matchAll(atMeetingRe)) {
+  for (const m of scanText.matchAll(atMeetingRe)) {
     if (!m?.[1]) continue;
     push(m[1], m[1], Number(m.index) || 0);
   }
 
   const pairRe = /(?:去|到|在)?\s*([^\s，。,；;！!？?\d]{2,16})\s*(?:和|与|及|、|,|，)\s*([^\s，。,；;！!？?\d]{2,16})(?:旅游|旅行|出行|玩|度假|开会|会议|chi|conference|$)/gi;
-  for (const m of text.matchAll(pairRe)) {
+  for (const m of scanText.matchAll(pairRe)) {
     if (!m?.[1] || !m?.[2]) continue;
     const idx = Number(m.index) || 0;
     push(m[1], m[1], idx);
@@ -588,15 +599,38 @@ function extractDestinationList(text: string): Array<{ city: string; evidence: s
 
 function extractCityDurationSegments(text: string): Array<{ city: string; days: number; evidence: string; kind: "travel" | "meeting"; index: number }> {
   const out: Array<{ city: string; days: number; evidence: string; kind: "travel" | "meeting"; index: number }> = [];
+  const scanText = text.replace(
+    /在此之前|在此之后|此前|此后|之前|之后|然后|再从|再去|再到|(前|后)\s*[0-9一二三四五六七八九十两]{1,2}\s*天/g,
+    (m) => "，".repeat(m.length)
+  );
+  const hasRelativeDayOffset = (snippet: string, city: string) => {
+    const s = cleanStatement(snippet, 120);
+    if (!s || !city) return false;
+    const cityEsc = escapeRegExp(city);
+    const directRel = new RegExp(
+      `(?:在|于|到|去|飞到|抵达)?\\s*${cityEsc}\\s*(?:前|后)\\s*[0-9一二三四五六七八九十两]{1,2}\\s*天`,
+      "i"
+    );
+    if (directRel.test(s)) return true;
+    if (
+      /(在去|去|到|飞到|抵达).{0,16}(之前|之前会|之前先|之前再|前面|此前)/.test(s) &&
+      /(前|后)\s*[0-9一二三四五六七八九十两]{1,2}\s*天/.test(s)
+    ) {
+      return true;
+    }
+    return false;
+  };
+
   const travelHintRe =
-    /(?:在|于|到|去|飞到|抵达)\s*([A-Za-z\u4e00-\u9fff]{2,16})\s*(?:玩|逛|停留|待|旅行|旅游|参会|开会|参加)?\s*([0-9一二三四五六七八九十两]{1,3})\s*天/gi;
-  for (const m of text.matchAll(travelHintRe)) {
+    /(?:在|于|到|去|飞到|抵达)\s*([A-Za-z\u4e00-\u9fff]{2,16}?)(?=(?:玩|逛|停留|待|旅行|旅游|参会|开会|参加|[，。,；;！!？?\s]))\s*(?:玩|逛|停留|待|旅行|旅游|参会|开会|参加)?\s*([0-9一二三四五六七八九十两]{1,3})\s*天/gi;
+  for (const m of scanText.matchAll(travelHintRe)) {
     const city = normalizeDestination(m?.[1] || "");
     const days = parseCnInt(m?.[2] || "");
     if (!city || !days || days <= 0 || days > 60) continue;
     if (!isLikelyDestinationCandidate(city)) continue;
     const idx = Number(m.index) || 0;
     const snippet = cleanStatement(m[0] || `${city}${days}天`, 80);
+    if (hasRelativeDayOffset(snippet, city)) continue;
     if (hasHardDayReservationSignal(snippet) && days <= 2) continue;
     const kind: "travel" | "meeting" =
       /(会议|开会|chi|conference|workshop|论坛|参会)/i.test(snippet) ? "meeting" : "travel";
@@ -610,7 +644,7 @@ function extractCityDurationSegments(text: string): Array<{ city: string; days: 
   }
 
   const re = /(?:在|于|到|去)?([^\s，。,；;！!？?\d]{2,14})[^\n。；;，,]{0,10}?([0-9一二三四五六七八九十两]{1,3})\s*天/g;
-  for (const m of text.matchAll(re)) {
+  for (const m of scanText.matchAll(re)) {
     const rawCity = m?.[1] || "";
     const rawDays = m?.[2] || "";
     const city = normalizeDestination(rawCity);
@@ -620,8 +654,9 @@ function extractCityDurationSegments(text: string): Array<{ city: string; days: 
     if (DESTINATION_NOISE_RE.test(city) || PLACE_STOPWORD_RE.test(city)) continue;
 
     const idx = Number(m.index) || 0;
-    const right = Math.min(text.length, idx + String(m[0] || "").length + 26);
-    const ctx = cleanStatement(text.slice(idx, right), 80);
+    const right = Math.min(scanText.length, idx + String(m[0] || "").length + 26);
+    const ctx = cleanStatement(scanText.slice(idx, right), 80);
+    if (hasRelativeDayOffset(ctx, city)) continue;
     if (hasHardDayReservationSignal(ctx) && days <= 2) continue;
     const kind: "travel" | "meeting" =
       /(会议|开会|chi|conference|workshop|论坛)/i.test(ctx) ? "meeting" : "travel";
@@ -636,17 +671,18 @@ function extractCityDurationSegments(text: string): Array<{ city: string; days: 
   }
 
   const rangeRe =
-    /([0-9]{1,2})月([0-9]{1,2})日?\s*[-~到至]\s*([0-9]{1,2})日?[^\n。；;]{0,28}?(?:去|到|在|飞到)\s*([A-Za-z\u4e00-\u9fff]{2,20})[^\n。；;]{0,20}?(参加|参会|开会|会议|chi|conference|workshop|玩|旅游|旅行|度假)?/gi;
-  for (const m of text.matchAll(rangeRe)) {
-    const month = Number(m[1]);
+    /([0-9]{1,2})月([0-9]{1,2})日?\s*[-~到至]\s*(?:([0-9]{1,2})月)?([0-9]{1,2})日?[^\n。；;]{0,28}?(?:去|到|在|飞到)\s*([A-Za-z\u4e00-\u9fff]{2,20}?)(?=参加|参会|开会|会议|玩|旅游|旅行|度假|[，。,；;！!？?\s]|$)[^\n。；;]{0,20}?(参加|参会|开会|会议|chi|conference|workshop|玩|旅游|旅行|度假)?/gi;
+  for (const m of scanText.matchAll(rangeRe)) {
+    const monthA = Number(m[1]);
     const startDay = Number(m[2]);
-    const endDay = Number(m[3]);
-    const city = normalizeDestination(m[4] || "");
-    if (!Number.isFinite(month) || !Number.isFinite(startDay) || !Number.isFinite(endDay)) continue;
+    const monthB = Number(m[3]) || monthA;
+    const endDay = Number(m[4]);
+    const city = normalizeDestination(m[5] || "");
+    if (!Number.isFinite(monthA) || !Number.isFinite(startDay) || !Number.isFinite(monthB) || !Number.isFinite(endDay)) continue;
     if (!city || !isLikelyDestinationCandidate(city)) continue;
-    const days = calcRangeDays(month, startDay, month, endDay);
+    const days = calcRangeDays(monthA, startDay, monthB, endDay);
     if (days <= 0 || days > 31) continue;
-    const action = String(m[5] || "");
+    const action = String(m[6] || "");
     const kind: "travel" | "meeting" =
       /(参加|参会|开会|会议|chi|conference|workshop)/i.test(action) ? "meeting" : "travel";
     out.push({
@@ -658,10 +694,58 @@ function extractCityDurationSegments(text: string): Array<{ city: string; days: 
     });
   }
 
+  const cityMentions = Array.from(
+    scanText.matchAll(
+      /(?:在|于|去|到|飞到|抵达)\s*([A-Za-z\u4e00-\u9fff]{2,14}?)(?=玩|逛|停留|待|旅行|旅游|参会|开会|参加|[，。,；;！!？?\s（(]|$)/gi
+    )
+  )
+    .map((m) => {
+      const city = normalizeDestination(m?.[1] || "");
+      const idx = Number(m.index) || 0;
+      if (!city || !isLikelyDestinationCandidate(city)) return null;
+      return { city, index: idx };
+    })
+    .filter((x): x is { city: string; index: number } => !!x);
+  if (cityMentions.length) {
+    const fallbackDuration = extractDurationCandidates(scanText)
+      .filter((x) => x.days > 0 && x.days <= 30 && (x.kind === "segment" || x.kind === "meeting" || x.kind === "unknown"))
+      .sort((a, b) => a.index - b.index);
+    for (const d of fallbackDuration) {
+      const ctx = cleanStatement(
+        scanText.slice(Math.max(0, d.index - 28), Math.min(scanText.length, d.index + 34)),
+        100
+      );
+      if (hasHardDayReservationSignal(ctx) && d.days <= 2) continue;
+      let nearest: { city: string; index: number } | null = null;
+      let bestDist = Number.POSITIVE_INFINITY;
+      for (const c of cityMentions) {
+        const dist = d.index - c.index;
+        if (dist < 0 || dist > 42) continue;
+        if (dist < bestDist) {
+          bestDist = dist;
+          nearest = c;
+        }
+      }
+      if (!nearest) continue;
+      if (hasRelativeDayOffset(ctx, nearest.city)) continue;
+      out.push({
+        city: nearest.city,
+        days: d.days,
+        evidence: cleanStatement(`${nearest.city}${d.days}天`, 50),
+        kind: d.kind === "meeting" ? "meeting" : "travel",
+        index: d.index,
+      });
+    }
+  }
+
   const bestByCity = new Map<string, { city: string; days: number; evidence: string; kind: "travel" | "meeting"; index: number }>();
   for (const x of out) {
     const cur = bestByCity.get(x.city);
-    if (!cur || x.days > cur.days || x.kind === "meeting") bestByCity.set(x.city, x);
+    const shouldReplace =
+      !cur ||
+      x.days > cur.days ||
+      (x.days === cur.days && x.kind === "meeting" && cur.kind !== "meeting");
+    if (shouldReplace) bestByCity.set(x.city, x);
   }
   return Array.from(bestByCity.values()).sort((a, b) => a.index - b.index).slice(0, 6);
 }
@@ -834,6 +918,9 @@ export function extractIntentSignals(userText: string, opts?: { historyMode?: bo
   const out: IntentSignals = {};
   out.hasTemporalAnchor = /([0-9]{1,2})月([0-9]{1,2})日?(?:\s*[-~到至]\s*([0-9]{1,2})日?)?/.test(text);
   out.hasDurationUpdateCue = /改成|改为|更新|调整|变为|变成|改到|上调|下调|放宽|改成了|改成到|从.*改到/i.test(text);
+  out.hasExplicitTotalCue = /(总共|一共|全程|总计|整体|整个(?:行程|旅行)?|总行程|行程时长|trip length|overall|total|in total)/i.test(
+    text
+  );
 
   const peopleM =
     text.match(/(?:一家|全家|我们|同行)[^\d一二三四五六七八九十两]{0,4}([0-9一二三四五六七八九十两]{1,3})\s*(?:口|人)/) ||
@@ -854,7 +941,9 @@ export function extractIntentSignals(userText: string, opts?: { historyMode?: bo
     out.destinationEvidence = destinationList[0].evidence;
   } else {
     const destM =
-      text.match(/(?:去|到|在)\s*([^\s，。,；;！!？?\d]{2,16}?)(?:玩|旅游|旅行|度假|出行|住|待|逛|，|。|,|$)/) ||
+      text.match(
+        /(?:去|到|在)\s*([^\s，。,；;！!？?\d]{2,16}?)(?:玩|旅游|旅行|度假|出行|住|待|逛|[0-9一二三四五六七八九十两]{1,3}\s*天|，|。|,|$)/
+      ) ||
       text.match(/目的地(?:是|为)?\s*([^\s，。,；;！!？?\d]{2,16})/);
     if (destM?.[1]) {
       const d = normalizeDestination(destM[1]);
@@ -894,8 +983,7 @@ export function extractIntentSignals(userText: string, opts?: { historyMode?: bo
     const sumDays = citySegments.reduce((acc, x) => acc + x.days, 0);
     const distinctCities = new Set(citySegments.map((x) => x.city)).size;
     const hasTravelSegment = citySegments.some((x) => x.kind === "travel");
-    const hasExplicitTotalCue = /(总共|一共|全程|总计|整体|整个(?:行程|旅行)?|总行程|行程时长)/.test(text);
-    const shouldPromoteAsTotal = hasExplicitTotalCue || (distinctCities >= 2 && hasTravelSegment);
+    const shouldPromoteAsTotal = !!out.hasExplicitTotalCue || (distinctCities >= 2 && hasTravelSegment);
     if (sumDays > 0 && shouldPromoteAsTotal) {
       const segmentStrength = citySegments.some((x) => x.kind === "meeting") ? 0.9 : 0.8;
       const shouldTakeSegments =
@@ -914,6 +1002,34 @@ export function extractIntentSignals(userText: string, opts?: { historyMode?: bo
   const criticalPresentation = extractCriticalPresentationRequirement(text);
   if (criticalPresentation) {
     out.criticalPresentation = criticalPresentation;
+  }
+
+  if (
+    (!out.cityDurations || out.cityDurations.length === 0) &&
+    out.durationDays &&
+    out.destination &&
+    isLikelyDestinationCandidate(out.destination) &&
+    !out.criticalPresentation &&
+    !hasHardDayReservationSignal(text)
+  ) {
+    const destinations = (out.destinations || []).filter((x) => isLikelyDestinationCandidate(x));
+    const hasSingleDestination = destinations.length <= 1;
+    if (hasSingleDestination) {
+      out.cityDurations = [
+        {
+          city: out.destination,
+          days: out.durationDays,
+          evidence: out.durationEvidence || `${out.destination}${out.durationDays}天`,
+          kind: /(会议|开会|chi|conference|workshop|论坛|参会)/i.test(text) ? "meeting" : "travel",
+        },
+      ];
+      if (!out.destinations?.includes(out.destination)) {
+        out.destinations = [...(out.destinations || []), out.destination];
+      }
+      if (!out.destinationEvidences?.length) {
+        out.destinationEvidences = [out.destinationEvidence || out.durationEvidence || out.destination];
+      }
+    }
   }
 
   if (!out.durationDays && /几天|多少天|天数待定|时长待定/i.test(text)) {
@@ -955,13 +1071,16 @@ export function extractIntentSignals(userText: string, opts?: { historyMode?: bo
 
 function mergeSignalsWithLatest(history: IntentSignals, latest: IntentSignals): IntentSignals {
   const out: IntentSignals = { ...history };
+  out.hasTemporalAnchor = !!history.hasTemporalAnchor;
+  out.hasDurationUpdateCue = !!history.hasDurationUpdateCue;
+  out.hasExplicitTotalCue = !!history.hasExplicitTotalCue;
 
   const mergeDestinations = (a?: string[], b?: string[]) => {
     const seen = new Set<string>();
     const result: string[] = [];
     for (const x of [...(a || []), ...(b || [])]) {
       const city = normalizeDestination(String(x || ""));
-      if (!city || seen.has(city)) continue;
+      if (!city || !isLikelyDestinationCandidate(city) || seen.has(city)) continue;
       seen.add(city);
       result.push(city);
     }
@@ -986,10 +1105,22 @@ function mergeSignalsWithLatest(history: IntentSignals, latest: IntentSignals): 
         evidence: cleanStatement(seg?.evidence || `${city}${days}天`, 40),
         kind,
       };
-      if (!cur || cand.days > cur.days || cand.kind === "meeting") map.set(city, cand);
+      const shouldReplace =
+        !cur ||
+        cand.days > cur.days ||
+        (cand.days === cur.days && cand.kind === "meeting" && cur.kind !== "meeting");
+      if (shouldReplace) map.set(city, cand);
     }
     return map.size ? Array.from(map.values()).slice(0, 6) : undefined;
   };
+
+  out.destinations = mergeDestinations(out.destinations, undefined);
+  if (out.destination) {
+    const d = normalizeDestination(out.destination);
+    out.destination = d && isLikelyDestinationCandidate(d) ? d : undefined;
+  }
+  out.cityDurations = mergeCityDurations(undefined, out.cityDurations);
+  if (!out.destination && out.destinations?.length) out.destination = out.destinations[0];
 
   if (latest.peopleCount != null) {
     out.peopleCount = latest.peopleCount;
@@ -1014,13 +1145,19 @@ function mergeSignalsWithLatest(history: IntentSignals, latest: IntentSignals): 
     );
   }
   if (latest.destination) {
-    out.destination = latest.destination;
-    out.destinationEvidence = latest.destinationEvidence || out.destinationEvidence;
-    out.destinations = mergeDestinations(out.destinations, [latest.destination]);
+    const normalizedLatestDestination = normalizeDestination(latest.destination);
+    if (normalizedLatestDestination && isLikelyDestinationCandidate(normalizedLatestDestination)) {
+      out.destination = normalizedLatestDestination;
+      out.destinationEvidence = latest.destinationEvidence || out.destinationEvidence;
+      out.destinations = mergeDestinations(out.destinations, [normalizedLatestDestination]);
+    }
   }
+  out.hasTemporalAnchor = !!latest.hasTemporalAnchor || !!out.hasTemporalAnchor;
+  out.hasDurationUpdateCue = !!latest.hasDurationUpdateCue || !!out.hasDurationUpdateCue;
+  out.hasExplicitTotalCue = !!latest.hasExplicitTotalCue || !!out.hasExplicitTotalCue;
   const latestHasSnapshotDuration =
     latest.durationDays != null &&
-    (!!latest.hasTemporalAnchor || !!latest.hasDurationUpdateCue || (latest.cityDurations?.length || 0) > 0);
+    (!!latest.hasDurationUpdateCue || (!!latest.hasTemporalAnchor && !!latest.hasExplicitTotalCue));
 
   if (latest.cityDurations?.length) {
     out.cityDurations = latestHasSnapshotDuration
@@ -1047,12 +1184,20 @@ function mergeSignalsWithLatest(history: IntentSignals, latest: IntentSignals): 
   if (latest.durationDays != null) {
     const latestStrength = Number(latest.durationStrength) || 0.55;
     const historyStrength = Number(out.durationStrength) || 0;
+    const mergedSegSum = (out.cityDurations || []).reduce((acc, x) => acc + (Number(x.days) || 0), 0);
+    const mergedSegDistinct = new Set((out.cityDurations || []).map((x) => normalizeDestination(x.city))).size;
+    const shouldProtectSegmentTotal =
+      !latest.hasDurationUpdateCue &&
+      mergedSegDistinct >= 2 &&
+      mergedSegSum > 0 &&
+      latest.durationDays < mergedSegSum;
     const tinyCriticalOnly =
       !!latest.criticalPresentation &&
       latest.durationDays <= 2 &&
       !latest.hasTemporalAnchor &&
       !latest.hasDurationUpdateCue;
     const shouldUseLatest =
+      !shouldProtectSegmentTotal &&
       !tinyCriticalOnly &&
       (out.durationDays == null ||
         latestHasSnapshotDuration ||
@@ -1083,11 +1228,12 @@ function mergeSignalsWithLatest(history: IntentSignals, latest: IntentSignals): 
     const distinctCities = new Set(out.cityDurations.map((x) => x.city)).size;
     const hasTravelSegment = out.cityDurations.some((x) => x.kind === "travel");
     const canPromoteBySegments = distinctCities >= 2 && hasTravelSegment;
-    const segStrength = out.cityDurations.some((x) => x.kind === "meeting") ? 0.9 : 0.82;
+    const segStrength = out.cityDurations.some((x) => x.kind === "meeting") ? 0.9 : 0.84;
     const shouldTakeSeg =
       canPromoteBySegments &&
       segSum > 0 &&
       (!out.durationDays ||
+        latestHasSnapshotDuration ||
         segSum > out.durationDays ||
         segStrength >= (Number(out.durationStrength) || 0) + 0.08 ||
         ((Number(out.durationStrength) || 0) <= 0.78 && Math.abs(segSum - (out.durationDays || 0)) <= 2));

@@ -359,6 +359,10 @@ data: {"assistantText":"...","graphPatch":{"ops":[]},"graph":{"id":"65f1...","ve
 3. 单值槽位会做自动压缩（例如预算/人数/目的地/时长，保留更优节点）。
 4. `layer` 可由 LLM 显式提供；若缺失，后端会根据节点语义自动推断：
    `goal -> intent`，硬约束/结构化事实 -> `requirement`，偏好语义 -> `preference`，高风险/健康/安全语义 -> `risk`。
+5. 时长槽位采用“城市分段优先合并”：
+   - 对话中若出现 `城市A n天 + 城市B m天`，后端会优先合成为 `总行程时长 = n+m`。
+   - `前两天/后一天` 这类相对时间不会直接覆盖总时长槽位。
+   - 历史中的脏目的地（如“顺带”）会在 merge 阶段被清洗，避免污染后续图结构。
 
 ---
 
@@ -462,7 +466,7 @@ conginstrument/
 | `src/services/graphUpdater.ts` | 图 patch 主流程（LLM 调用、启发式融合、后处理） |
 | `src/services/graphUpdater/constants.ts` | 建图正则与槽位识别常量 |
 | `src/services/graphUpdater/text.ts` | 文本清洗、证据合并、去重工具 |
-| `src/services/graphUpdater/intentSignals.ts` | 用户意图信号抽取（目的地/时长/预算/人数/关键日） |
+| `src/services/graphUpdater/intentSignals.ts` | 用户意图信号抽取（目的地/时长/预算/人数/关键日），含跨轮时长合并与相对时间过滤 |
 | `src/services/graphUpdater/nodeNormalization.ts` | 节点归一化与原子校验（防噪声、保结构） |
 | `src/services/graphUpdater/heuristicOps.ts` | 启发式建图（槽位胜出、根节点连通、关键约束落图） |
 | `src/services/graphUpdater/slotFunctionCall.ts` | function call 槽位抽取（结构化输出）与信号映射 |

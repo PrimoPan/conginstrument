@@ -183,7 +183,11 @@ function slotsToSignals(slots: SlotExtractionResult): IntentSignals {
       const kind: "travel" | "meeting" = seg?.kind === "meeting" ? "meeting" : "travel";
       const evidence = cleanStatement(seg?.evidence || `${city}${days}天`, 54);
       const cur = map.get(city);
-      if (!cur || days > cur.days || kind === "meeting") {
+      const shouldReplace =
+        !cur ||
+        days > cur.days ||
+        (days === cur.days && kind === "meeting" && cur.kind !== "meeting");
+      if (shouldReplace) {
         map.set(city, { city, days, evidence, kind });
       }
       cityDurationImportanceByCity[city] = clampImportance(seg?.importance, kind === "meeting" ? 0.82 : 0.72);
