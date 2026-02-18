@@ -11,6 +11,7 @@ import { resolveIntentSignalsGeo } from "./graphUpdater/geoResolver.js";
 import { extractIntentSignalsByFunctionCall } from "./graphUpdater/slotFunctionCall.js";
 import { buildSlotStateMachine } from "./graphUpdater/slotStateMachine.js";
 import { compileSlotStateToPatch } from "./graphUpdater/slotGraphCompiler.js";
+import { sanitizeIntentSignals } from "./graphUpdater/signalSanitizer.js";
 import { cleanStatement, mergeTextSegments } from "./graphUpdater/text.js";
 import { makeTempId } from "./graphUpdater/common.js";
 
@@ -157,6 +158,8 @@ async function buildSignals(params: {
   } catch (e: any) {
     dlog("geo resolver failed:", e?.message || e);
   }
+
+  signals = sanitizeIntentSignals(signals);
 
   const canonicalIntent = buildTravelIntentStatement(signals, signalText);
   if (canonicalIntent && !signals.destinationEvidence) {

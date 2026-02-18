@@ -67,6 +67,9 @@ curl http://localhost:3001/healthz
 | `CI_GEO_TIMEOUT_MS` | 否 | `2600` | 每次地理查询超时（毫秒） |
 | `CI_GEO_MAX_LOOKUPS` | 否 | `12` | 每轮最多地理查询次数 |
 | `CI_GEO_CACHE_TTL_MS` | 否 | `43200000` | 地理缓存 TTL（毫秒） |
+| `CI_MCP_GEO_URL` | 否 | 空 | 可选 MCP 地理工具桥接地址（优先于 Nominatim） |
+| `CI_MCP_GEO_TIMEOUT_MS` | 否 | `1800` | MCP 地理调用超时（毫秒） |
+| `CI_MCP_GEO_TOKEN` | 否 | 空 | MCP 地理桥接鉴权 Token（可选） |
 | `CI_ALLOW_DELETE` | 否 | `0` | 是否允许 remove_node/remove_edge |
 | `CI_DEBUG_LLM` | 否 | `0` | LLM 与 patch 调试日志 |
 
@@ -384,7 +387,8 @@ data: {"assistantText":"...","graphPatch":{"ops":[]},"graph":{"id":"65f1...","ve
    - `claim/structure/evidence/linkedIntentIds/rebuttalPoints/revisionHistory`
    - `priority/successCriteria`
 9. 地理校验层（Global-ready）：
-   - 合并后的槽位会进入 `geoResolver`（Nominatim）做地理规范化。
+   - 合并后的槽位会进入 `geoResolver` 做地理规范化。
+   - 若配置 `CI_MCP_GEO_URL`，优先走 MCP 地理工具桥接；失败时自动回退 Nominatim。
    - 自动判断“子地点 -> 父城市”关系（如冷门地点/场馆），避免把子地点误当一级目的地。
    - 查询失败时自动降级为本地规则，不阻断对话与建图。
 
@@ -394,13 +398,14 @@ data: {"assistantText":"...","graphPatch":{"ops":[]},"graph":{"id":"65f1...","ve
 
 1. `generateTurn` / `generateTurnStreaming` 先生成助手文本。
 2. `extractIntentSignalsWithRecency` + `slotFunctionCall` 抽取结构化槽位（并做冲突融合）。
-3. `geoResolver` 做地理规范化（目的地/城市时长/子地点父城归属）。
-4. `slotStateMachine` 产出“标准化槽位状态”（slot winners）。
-5. `slotGraphCompiler` 把槽位状态编译为 `GraphPatch`（add/update/edge + stale 降级）。
-6. `sanitizeGraphPatchStrict` 严格清洗 patch。
-7. `applyPatchWithGuards` 应用 patch 并输出新图（含压缩、拓扑修复）。
-8. 持久化 `turns` 与 `conversations.graph`。
-9. 若调用 `PUT /api/conversations/:id/graph` 保存前端改图，后续 turn 会使用这份更新图作为最新真值。
+3. `geoResolver` 做地理规范化（目的地/城市时长/子地点父城归属，支持 MCP 桥接）。
+4. `signalSanitizer` 做二次清洗（地名归一化、子地点回收、重复目的地去重、时长冲突收敛）。
+5. `slotStateMachine` 产出“标准化槽位状态”（slot winners）。
+6. `slotGraphCompiler` 把槽位状态编译为 `GraphPatch`（add/update/edge + stale 降级）。
+7. `sanitizeGraphPatchStrict` 严格清洗 patch。
+8. `applyPatchWithGuards` 应用 patch 并输出新图（含压缩、拓扑修复）。
+9. 持久化 `turns` 与 `conversations.graph`。
+10. 若调用 `PUT /api/conversations/:id/graph` 保存前端改图，后续 turn 会使用这份更新图作为最新真值。
 
 ---
 
@@ -432,6 +437,9 @@ conginstrument/
 ├─ package.json
 ├─ package-lock.json
 ├─ README.md
+├─ skills/
+│  └─ intent-graph-regression/
+│     └─ SKILL.md
 └─ src/
    ├─ index.ts
    ├─ server/
@@ -457,6 +465,8 @@ conginstrument/
       │  ├─ text.ts
       │  ├─ intentSignals.ts
       │  ├─ geoResolver.ts
+      │  ├─ mcpGeoBridge.ts
+      │  ├─ signalSanitizer.ts
       │  ├─ slotTypes.ts
       │  ├─ slotStateMachine.ts
       │  ├─ slotGraphCompiler.ts
@@ -471,6 +481,7 @@ conginstrument/
 | 文件 | 作用 |
 | --- | --- |
 | `README.md` | 后端说明文档（本文件） |
+| `skills/intent-graph-regression/SKILL.md` | 团队协作回归技能模板（重复节点/时长冲突/父子地点归属排查） |
 | `package.json` | 依赖与脚本（`dev:api`） |
 | `package-lock.json` | npm 锁定依赖版本 |
 
@@ -493,7 +504,9 @@ conginstrument/
 | `src/services/graphUpdater/constants.ts` | 建图正则与槽位识别常量 |
 | `src/services/graphUpdater/text.ts` | 文本清洗、证据合并、去重工具 |
 | `src/services/graphUpdater/intentSignals.ts` | 用户意图信号抽取（目的地/时长/预算/人数/关键日），含跨轮时长合并与相对时间过滤 |
-| `src/services/graphUpdater/geoResolver.ts` | 地理校验层（Nominatim），做目的地规范化与子地点父城归属修复 |
+| `src/services/graphUpdater/geoResolver.ts` | 地理校验层（MCP 可选 + Nominatim 回退），做目的地规范化与子地点父城归属修复 |
+| `src/services/graphUpdater/mcpGeoBridge.ts` | MCP 地理桥接（可选），解析地点层级关系并回传统一结构 |
+| `src/services/graphUpdater/signalSanitizer.ts` | 信号二次清洗（重复节点防抖、子地点回收、时长/城市归一化） |
 | `src/services/graphUpdater/slotTypes.ts` | 槽位状态机与图编译器共享类型 |
 | `src/services/graphUpdater/slotStateMachine.ts` | 槽位状态机（slot winners、总时长合并、关键约束稳态） |
 | `src/services/graphUpdater/slotGraphCompiler.ts` | 图编译器（slot state -> GraphPatch，含 stale 节点降级） |
@@ -566,6 +579,7 @@ See the Chinese section above for the full table. Key vars include:
 - `CI_STREAM_MODE`, `CI_GRAPH_MODEL`, `CI_ALLOW_DELETE`, `CI_DEBUG_LLM`
 - `CI_GRAPH_USE_FUNCTION_SLOTS`, `CI_GRAPH_PATCH_LLM_WITH_SLOTS`
 - `CI_GEO_VALIDATE`, `CI_GEO_ENDPOINT`, `CI_GEO_TIMEOUT_MS`, `CI_GEO_MAX_LOOKUPS`, `CI_GEO_CACHE_TTL_MS`
+- `CI_MCP_GEO_URL`, `CI_MCP_GEO_TIMEOUT_MS`, `CI_MCP_GEO_TOKEN`
 
 ---
 
@@ -631,6 +645,7 @@ src/db/mongo.ts              # Mongo collections + indexes
 src/middleware/auth.ts       # auth middleware
 src/routes/auth.ts           # login route
 src/routes/conversations.ts  # conversation + turn + SSE routes
+skills/intent-graph-regression/SKILL.md # team regression skill template
 src/core/graph.ts            # graph types and guarded patch apply
 src/core/nodeLayer.ts        # 4-layer node taxonomy inference and normalization
 src/services/llmClient.ts    # OpenAI client
@@ -639,7 +654,9 @@ src/services/graphUpdater.ts # graph patch orchestrator
 src/services/graphUpdater/constants.ts         # graph regex/constants
 src/services/graphUpdater/text.ts              # text/evidence helpers
 src/services/graphUpdater/intentSignals.ts     # intent signal extraction
-src/services/graphUpdater/geoResolver.ts       # geo normalization + parent-city repair
+src/services/graphUpdater/geoResolver.ts       # geo normalization + parent-city repair (MCP optional, OSM fallback)
+src/services/graphUpdater/mcpGeoBridge.ts      # optional MCP geo bridge
+src/services/graphUpdater/signalSanitizer.ts   # dedup/cleanup pass for slots
 src/services/graphUpdater/slotTypes.ts         # slot state/compiler shared schema
 src/services/graphUpdater/slotStateMachine.ts  # slot-state machine (winner selection)
 src/services/graphUpdater/slotGraphCompiler.ts # slot-state -> graph patch compiler

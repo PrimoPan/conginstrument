@@ -136,6 +136,37 @@ function normalizePlaceToken(raw: string): string {
     .toLowerCase();
 }
 
+function canonicalizeStructuredPlace(raw: string): string {
+  let s = cleanText(raw);
+  if (!s) return "";
+  s = s
+    .replace(/^(在|于|去|到|前往|飞到|抵达)\s*/i, "")
+    .replace(/(前|后)\s*[0-9一二三四五六七八九十两]{0,2}\s*天?$/i, "")
+    .replace(/^的+/, "")
+    .replace(/的+$/g, "")
+    .trim();
+
+  const sameRepeat = s.match(/^(.{2,20})的\1$/);
+  if (sameRepeat?.[1]) s = cleanText(sameRepeat[1]);
+
+  const dePair = s.match(/^(.{1,20})的(.{2,24})$/);
+  if (dePair?.[1] && dePair?.[2]) {
+    const left = cleanText(dePair[1]);
+    const right = cleanText(dePair[2]);
+    if (
+      right &&
+      (left === right ||
+        /(中国|美国|英国|法国|德国|意大利|西班牙|葡萄牙|荷兰|比利时|瑞士|奥地利|日本|韩国|新加坡|泰国|马来西亚|印度尼西亚|澳大利亚|加拿大|新西兰|阿联酋|欧洲|亚洲|非洲|北美|南美|中东)/i.test(
+          left
+        ))
+    ) {
+      s = right;
+    }
+  }
+
+  return s.replace(/^的+/, "").replace(/的+$/g, "").trim();
+}
+
 function slotFamily(slot: string | null | undefined): string {
   if (!slot) return "none";
   if (slot.startsWith("slot:destination:")) return "destination";
@@ -265,9 +296,11 @@ function slotKeyOfNode(node: ConceptNode): string | null {
   }
   if ((node.type === "fact" || node.type === "constraint") && /^(?:城市时长|停留时长)[:：]\s*.+\s+[0-9]{1,3}\s*天$/.test(s)) {
     const m = s.match(/^(?:城市时长|停留时长)[:：]\s*(.+?)\s+([0-9]{1,3})\s*天$/);
-    const rawCity = cleanText(m?.[1] || "");
+    const rawCity = canonicalizeStructuredPlace(m?.[1] || "");
     if (!rawCity) return null;
     if (DESTINATION_BAD_TOKEN_RE.test(rawCity)) return null;
+    if (/^的/.test(rawCity)) return null;
+    if (/(前|后)$/.test(rawCity)) return null;
     if (/[A-Za-z]/.test(rawCity) && /[\u4e00-\u9fff]/.test(rawCity)) return null;
     const city = normalizePlaceToken(rawCity);
     if (city) return `slot:duration_city:${city}`;
@@ -276,9 +309,11 @@ function slotKeyOfNode(node: ConceptNode): string | null {
   if (node.type === "fact" && /^同行人数[:：]\s*[0-9]{1,3}\s*人$/.test(s)) return "slot:people";
   if (node.type === "fact" && /^目的地[:：]\s*.+$/.test(s)) {
     const m = s.match(/^目的地[:：]\s*(.+)$/);
-    const rawCity = cleanText(m?.[1] || "");
+    const rawCity = canonicalizeStructuredPlace(m?.[1] || "");
     if (!rawCity) return null;
     if (DESTINATION_BAD_TOKEN_RE.test(rawCity)) return null;
+    if (/^的/.test(rawCity)) return null;
+    if (/(前|后)$/.test(rawCity)) return null;
     if (/[A-Za-z]/.test(rawCity) && /[\u4e00-\u9fff]/.test(rawCity)) return null;
     const city = normalizePlaceToken(rawCity);
     if (city) return `slot:destination:${city}`;

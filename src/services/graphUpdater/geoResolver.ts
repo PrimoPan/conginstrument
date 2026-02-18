@@ -4,6 +4,7 @@ import {
   normalizeDestination,
 } from "./intentSignals.js";
 import { cleanStatement } from "./text.js";
+import { isMcpGeoEnabled, resolvePlaceByMcp } from "./mcpGeoBridge.js";
 
 const GEO_ENABLED = process.env.CI_GEO_VALIDATE !== "0";
 const GEO_ENDPOINT = String(process.env.CI_GEO_ENDPOINT || "https://nominatim.openstreetmap.org").replace(
@@ -200,34 +201,53 @@ async function resolvePlace(query: string): Promise<ResolvedPlace | null> {
   });
   const url = `${GEO_ENDPOINT}/search?${params.toString()}`;
 
-  const timeout = withTimeout(GEO_TIMEOUT_MS);
   try {
-    const resp = await fetch(url, {
-      method: "GET",
-      headers: {
-        "User-Agent": "CogInstrument/1.0 (intent-graph research)",
-      },
-      signal: timeout.signal,
-    });
-    if (!resp.ok) {
-      cache.set(key, { expiresAt: now + 45_000, value: null });
-      return null;
+    if (isMcpGeoEnabled()) {
+      const mcp = await resolvePlaceByMcp(q);
+      if (mcp) {
+        const normalized: ResolvedPlace = {
+          query: mcp.query,
+          label: mcp.label,
+          cityAnchor: mcp.cityAnchor,
+          parentCity: mcp.parentCity,
+          isCityLevel: !!mcp.isCityLevel,
+          isSubLocation: !!mcp.isSubLocation,
+          score: Number(mcp.score) || 0.7,
+        };
+        cache.set(key, { expiresAt: now + GEO_CACHE_TTL_MS, value: normalized });
+        return normalized;
+      }
     }
-    const data = (await resp.json().catch(() => [])) as NominatimItem[];
-    const candidates = (Array.isArray(data) ? data : [])
-      .map((x) => classify(x, q))
-      .filter((x): x is ResolvedPlace => !!x)
-      .sort((a, b) => b.score - a.score);
 
-    const best = candidates[0] || null;
-    cache.set(key, { expiresAt: now + GEO_CACHE_TTL_MS, value: best });
-    if (best) dlog("resolved", q, "->", best.label, "parent=", best.parentCity, "cityLevel=", best.isCityLevel);
-    return best;
+    const timeout = withTimeout(GEO_TIMEOUT_MS);
+    try {
+      const resp = await fetch(url, {
+        method: "GET",
+        headers: {
+          "User-Agent": "CogInstrument/1.0 (intent-graph research)",
+        },
+        signal: timeout.signal,
+      });
+      if (!resp.ok) {
+        cache.set(key, { expiresAt: now + 45_000, value: null });
+        return null;
+      }
+      const data = (await resp.json().catch(() => [])) as NominatimItem[];
+      const candidates = (Array.isArray(data) ? data : [])
+        .map((x) => classify(x, q))
+        .filter((x): x is ResolvedPlace => !!x)
+        .sort((a, b) => b.score - a.score);
+
+      const best = candidates[0] || null;
+      cache.set(key, { expiresAt: now + GEO_CACHE_TTL_MS, value: best });
+      if (best) dlog("resolved", q, "->", best.label, "parent=", best.parentCity, "cityLevel=", best.isCityLevel);
+      return best;
+    } finally {
+      timeout.clear();
+    }
   } catch {
     cache.set(key, { expiresAt: now + 45_000, value: null });
     return null;
-  } finally {
-    timeout.clear();
   }
 }
 
@@ -397,4 +417,3 @@ export async function resolveIntentSignalsGeo(params: {
 
   return out;
 }
-

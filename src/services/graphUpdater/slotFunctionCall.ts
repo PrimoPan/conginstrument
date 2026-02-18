@@ -107,6 +107,9 @@ function parseJsonSafe(raw: string): any | null {
   }
 }
 
+const SUB_LOCATION_HINT_RE =
+  /(球场|体育场|会展中心|会议中心|大学|学院|博物馆|公园|海滩|车站|机场|码头|教堂|广场|大道|街区|酒店|剧院|stadium|arena|museum|park|beach|district|quarter|square|centre|center|ccib|fira)/i;
+
 function toInt(x: any): number | undefined {
   const n = Number(x);
   if (!Number.isFinite(n)) return undefined;
@@ -152,30 +155,47 @@ function pickTopCritical(
 function slotsToSignals(slots: SlotExtractionResult): IntentSignals {
   const out: IntentSignals = {};
   const subLocationChildToParent = new Map<string, string>();
+  const subLocationDedup = new Set<string>();
+  const ensureSubLocation = (params: {
+    name: string;
+    parentCity?: string;
+    evidence?: string;
+    kind?: "district" | "venue" | "poi" | "landmark" | "area" | "other";
+    hard?: boolean;
+    importance?: number;
+  }) => {
+    const name = cleanStatement(params.name || "", 32);
+    if (!name) return;
+    const nameNorm = normalizeDestination(name) || name.toLowerCase();
+    const parentCity = normalizeDestination(params.parentCity || "");
+    const parentOk = parentCity && isLikelyDestinationCandidate(parentCity) ? parentCity : undefined;
+    const key = `${nameNorm.toLowerCase()}|${(parentOk || "").toLowerCase()}`;
+    if (subLocationDedup.has(key)) return;
+    subLocationDedup.add(key);
+    if (!out.subLocations) out.subLocations = [];
+    if (parentOk) subLocationChildToParent.set(nameNorm.toLowerCase(), parentOk);
+    out.subLocations.push({
+      name,
+      parentCity: parentOk,
+      evidence: cleanStatement(params.evidence || name, 60),
+      kind: params.kind || "other",
+      hard: !!params.hard,
+      importance: clampImportance(params.importance, params.hard ? 0.78 : 0.62),
+    });
+  };
 
   if (Array.isArray(slots.sub_locations) && slots.sub_locations.length) {
-    const seen = new Set<string>();
-    const subLocations: NonNullable<IntentSignals["subLocations"]> = [];
     for (const s of slots.sub_locations) {
-      const name = cleanStatement(s?.name || "", 32);
-      if (!name) continue;
-      const nameNorm = normalizeDestination(name) || name.toLowerCase();
-      const parentCity = normalizeDestination(s?.parent_city || "");
-      const parentOk = parentCity && isLikelyDestinationCandidate(parentCity) ? parentCity : undefined;
-      const key = `${nameNorm.toLowerCase()}|${(parentOk || "").toLowerCase()}`;
-      if (seen.has(key)) continue;
-      seen.add(key);
-      if (parentOk) subLocationChildToParent.set(nameNorm.toLowerCase(), parentOk);
-      subLocations.push({
-        name,
-        parentCity: parentOk,
-        evidence: cleanStatement(s?.evidence || s?.name || "", 60),
+      ensureSubLocation({
+        name: s?.name || "",
+        parentCity: s?.parent_city || "",
+        evidence: s?.evidence || s?.name || "",
         kind: (s?.kind as any) || "other",
         hard: !!s?.hard,
-        importance: clampImportance(s?.importance, s?.hard ? 0.78 : 0.62),
+        importance: s?.importance,
       });
     }
-    if (subLocations.length) out.subLocations = subLocations.slice(0, 12);
+    if (out.subLocations?.length) out.subLocations = out.subLocations.slice(0, 12);
   }
 
   if (slots.intent_importance != null) {
@@ -196,8 +216,16 @@ function slotsToSignals(slots: SlotExtractionResult): IntentSignals {
         granularity === "district" || granularity === "venue" || granularity === "poi" || granularity === "other";
       const parentCity = normalizeDestination(d?.parent_city || "");
       const parentOk = parentCity && isLikelyDestinationCandidate(parentCity) ? parentCity : undefined;
-      if (isSubGranularity || d?.role === "other") {
-        if (parentOk) subLocationChildToParent.set(city.toLowerCase(), parentOk);
+      const shouldTreatAsSub = isSubGranularity || d?.role === "other" || SUB_LOCATION_HINT_RE.test(city);
+      if (shouldTreatAsSub) {
+        ensureSubLocation({
+          name: city,
+          parentCity: parentOk,
+          evidence: d?.evidence || d?.name || city,
+          kind: isSubGranularity ? ((d?.granularity as any) || "other") : "venue",
+          hard: false,
+          importance: d?.importance,
+        });
         continue;
       }
       if (subLocationChildToParent.has(city.toLowerCase())) continue;
