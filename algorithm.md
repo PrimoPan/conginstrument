@@ -2,8 +2,8 @@
 
 This document summarizes the current graph-construction and graph-optimization pipeline implemented in:
 
-- `/Users/primopan/UISTcoginstrument/app/conginstrument/src/core/graph.ts`
-- `/Users/primopan/UISTcoginstrument/app/conginstrument/src/services/graphUpdater.ts`
+- `src/core/graph.ts`
+- `src/services/graphUpdater.ts`
 
 The goal is to keep the intent graph stable, connected, sparse, and explainable across multi-turn dialogue.
 

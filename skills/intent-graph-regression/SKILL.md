@@ -16,7 +16,7 @@ Focus checks:
 1. Confirm backend compile:
 
 ```bash
-cd /Users/primopan/UISTcoginstrument/app/conginstrument
+cd <repo-root>
 npx tsc --noEmit --module NodeNext --moduleResolution NodeNext --target ES2022 --skipLibCheck --esModuleInterop $(find src -name '*.ts' -maxdepth 5 | tr '\n' ' ')
 ```
 
