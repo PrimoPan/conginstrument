@@ -28,6 +28,11 @@ function parseSlotKeyFromStatement(node: ConceptNode): string | null {
   if (/^预算(?:上限)?[:：]/.test(s)) return "slot:budget";
   if (/^同行人数[:：]/.test(s)) return "slot:people";
   if (/^健康约束[:：]/.test(s)) return "slot:health";
+  if (/^语言约束[:：]/.test(s)) return "slot:language";
+  if (/^(关键约束|法律约束|安全约束|出行约束|行程约束)[:：]/.test(s)) {
+    const x = s.split(/[:：]/)[1] || "constraint";
+    return `slot:constraint:${slug(x)}`;
+  }
   if (/^(?:会议关键日|关键会议日|论文汇报日|关键日)[:：]/.test(s)) {
     const x = s.split(/[:：]/)[1] || "critical";
     return `slot:meeting_critical:${slug(x)}`;

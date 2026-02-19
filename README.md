@@ -397,15 +397,16 @@ data: {"assistantText":"...","graphPatch":{"ops":[]},"graph":{"id":"65f1...","ve
 ### 9. 建图更新流水线（V2：槽位状态机 -> 图编译器）
 
 1. `generateTurn` / `generateTurnStreaming` 先生成助手文本。
-2. `extractIntentSignalsWithRecency` + `slotFunctionCall` 抽取结构化槽位（并做冲突融合）。
+2. `extractIntentSignalsWithRecency` + `slotFunctionCall` 抽取结构化槽位（并做冲突融合；语言约束与健康约束分流）。
 3. `geoResolver` 做地理规范化（目的地/城市时长/子地点父城归属，支持 MCP 桥接）。
 4. `signalSanitizer` 做二次清洗（地名归一化、子地点回收、重复目的地去重、时长冲突收敛）。
-5. `slotStateMachine` 产出“标准化槽位状态”（slot winners）。
-6. `slotGraphCompiler` 把槽位状态编译为 `GraphPatch`（add/update/edge + stale 降级）。
-7. `sanitizeGraphPatchStrict` 严格清洗 patch。
-8. `applyPatchWithGuards` 应用 patch 并输出新图（含压缩、拓扑修复）。
-9. 持久化 `turns` 与 `conversations.graph`。
-10. 若调用 `PUT /api/conversations/:id/graph` 保存前端改图，后续 turn 会使用这份更新图作为最新真值。
+5. `constraintClassifier` 做硬约束语义归类（health/language/legal/safety/mobility/logistics），减少 prompt 写死规则依赖。
+6. `slotStateMachine` 产出“标准化槽位状态”（slot winners）。
+7. `slotGraphCompiler` 把槽位状态编译为 `GraphPatch`（add/update/edge + stale 降级）。
+8. `sanitizeGraphPatchStrict` 严格清洗 patch。
+9. `applyPatchWithGuards` 应用 patch 并输出新图（含压缩、拓扑修复）。
+10. 持久化 `turns` 与 `conversations.graph`。
+11. 若调用 `PUT /api/conversations/:id/graph` 保存前端改图，后续 turn 会使用这份更新图作为最新真值。
 
 ---
 
@@ -503,12 +504,13 @@ conginstrument/
 | `src/services/graphUpdater.ts` | 图 patch 主流程（槽位抽取、状态机融合、图编译） |
 | `src/services/graphUpdater/constants.ts` | 建图正则与槽位识别常量 |
 | `src/services/graphUpdater/text.ts` | 文本清洗、证据合并、去重工具 |
-| `src/services/graphUpdater/intentSignals.ts` | 用户意图信号抽取（目的地/时长/预算/人数/关键日），含跨轮时长合并与相对时间过滤 |
+| `src/services/graphUpdater/intentSignals.ts` | 用户意图信号抽取（目的地/时长/预算/人数/关键日/语言约束/健康约束），含跨轮时长合并与相对时间过滤 |
 | `src/services/graphUpdater/geoResolver.ts` | 地理校验层（MCP 可选 + Nominatim 回退），做目的地规范化与子地点父城归属修复 |
 | `src/services/graphUpdater/mcpGeoBridge.ts` | MCP 地理桥接（可选），解析地点层级关系并回传统一结构 |
 | `src/services/graphUpdater/signalSanitizer.ts` | 信号二次清洗（重复节点防抖、子地点回收、时长/城市归一化） |
+| `src/services/graphUpdater/constraintClassifier.ts` | 约束语义分类器（health/language/legal/safety/mobility/logistics） |
 | `src/services/graphUpdater/slotTypes.ts` | 槽位状态机与图编译器共享类型 |
-| `src/services/graphUpdater/slotStateMachine.ts` | 槽位状态机（slot winners、总时长合并、关键约束稳态） |
+| `src/services/graphUpdater/slotStateMachine.ts` | 槽位状态机（slot winners、总时长合并、单城市时长去重、关键约束稳态） |
 | `src/services/graphUpdater/slotGraphCompiler.ts` | 图编译器（slot state -> GraphPatch，含 stale 节点降级） |
 | `src/services/graphUpdater/slotFunctionCall.ts` | function call 槽位抽取（结构化输出，含子地点归属）与信号映射 |
 | `src/services/graphUpdater/common.ts` | patch 提取与临时 id 工具函数 |
@@ -624,7 +626,7 @@ Patch application pipeline:
 
 1. sanitize patch
 2. apply guards
-3. compact singleton slots (budget/duration/people/destination/health/preference)
+3. compact singleton slots (budget/duration/people/destination/health/language/preference)
 4. bump graph version when structural changes happen
 
 Manual full-graph save path:
@@ -657,6 +659,7 @@ src/services/graphUpdater/intentSignals.ts     # intent signal extraction
 src/services/graphUpdater/geoResolver.ts       # geo normalization + parent-city repair (MCP optional, OSM fallback)
 src/services/graphUpdater/mcpGeoBridge.ts      # optional MCP geo bridge
 src/services/graphUpdater/signalSanitizer.ts   # dedup/cleanup pass for slots
+src/services/graphUpdater/constraintClassifier.ts # constraint semantic classifier
 src/services/graphUpdater/slotTypes.ts         # slot state/compiler shared schema
 src/services/graphUpdater/slotStateMachine.ts  # slot-state machine (winner selection)
 src/services/graphUpdater/slotGraphCompiler.ts # slot-state -> graph patch compiler

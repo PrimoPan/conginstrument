@@ -58,6 +58,35 @@ function looksLikeSubLocation(name: string): boolean {
 export function sanitizeIntentSignals(input: IntentSignals): IntentSignals {
   const out: IntentSignals = { ...input };
 
+  if (out.genericConstraints?.length) {
+    const map = new Map<string, NonNullable<IntentSignals["genericConstraints"]>[number]>();
+    for (const c of out.genericConstraints) {
+      const text = cleanStatement(c?.text || "", 120);
+      if (!text) continue;
+      const key = text.toLowerCase();
+      const prev = map.get(key);
+      const cur = {
+        text,
+        evidence: cleanStatement(c?.evidence || text, 80),
+        kind: c?.kind || "other",
+        hard: !!c?.hard,
+        severity: c?.severity,
+        importance: Math.max(Number(c?.importance) || 0, Number(prev?.importance) || 0) || undefined,
+      } as NonNullable<IntentSignals["genericConstraints"]>[number];
+      if (!prev) {
+        map.set(key, cur);
+        continue;
+      }
+      map.set(key, {
+        ...prev,
+        ...cur,
+        hard: prev.hard || cur.hard,
+        importance: Math.max(Number(prev.importance) || 0, Number(cur.importance) || 0) || undefined,
+      });
+    }
+    out.genericConstraints = map.size ? Array.from(map.values()).slice(0, 6) : undefined;
+  }
+
   const subParentByName = new Map<string, string>();
   if (out.subLocations?.length) {
     const dedup = new Map<string, NonNullable<IntentSignals["subLocations"]>[number]>();
@@ -190,4 +219,3 @@ export function sanitizeIntentSignals(input: IntentSignals): IntentSignals {
 
   return out;
 }
-

@@ -7,11 +7,17 @@ import {
   HARD_DAY_ACTION_RE,
   HARD_DAY_FORCE_RE,
   HARD_REQUIRE_RE,
+  LANGUAGE_CONSTRAINT_RE,
+  MEDICAL_HEALTH_RE,
   NATURE_TOPIC_RE,
   PLACE_STOPWORD_RE,
   PREFERENCE_MARKER_RE,
-  RISK_HEALTH_RE,
 } from "./constants.js";
+import {
+  classifyConstraintText,
+  dedupeClassifiedConstraints,
+  type GenericConstraintKind,
+} from "./constraintClassifier.js";
 import { cleanStatement, sentenceParts } from "./text.js";
 
 type BudgetMatch = { value: number; evidence: string; index: number };
@@ -86,6 +92,17 @@ export type IntentSignals = {
   healthConstraint?: string;
   healthEvidence?: string;
   healthImportance?: number;
+  languageConstraint?: string;
+  languageEvidence?: string;
+  languageImportance?: number;
+  genericConstraints?: Array<{
+    text: string;
+    evidence: string;
+    kind?: GenericConstraintKind;
+    hard?: boolean;
+    severity?: "medium" | "high" | "critical";
+    importance?: number;
+  }>;
   scenicPreference?: string;
   scenicPreferenceEvidence?: string;
   scenicPreferenceHard?: boolean;
@@ -1014,8 +1031,39 @@ function mergeImportanceMap(
 
 export function pickHealthClause(userText: string): string | undefined {
   const parts = sentenceParts(userText);
-  const hit = parts.find((x) => RISK_HEALTH_RE.test(x));
+  const hit = parts.find((x) => MEDICAL_HEALTH_RE.test(x));
   return hit || undefined;
+}
+
+export function pickLanguageConstraintClause(userText: string): string | undefined {
+  const parts = sentenceParts(userText);
+  const hit = parts.find((x) => LANGUAGE_CONSTRAINT_RE.test(x));
+  return hit || undefined;
+}
+
+function isLanguageOnlyConstraint(text: string | undefined): boolean {
+  const s = cleanStatement(text || "", 120);
+  if (!s) return false;
+  return LANGUAGE_CONSTRAINT_RE.test(s) && !MEDICAL_HEALTH_RE.test(s);
+}
+
+function mergeGenericConstraints(
+  a?: IntentSignals["genericConstraints"],
+  b?: IntentSignals["genericConstraints"]
+): IntentSignals["genericConstraints"] | undefined {
+  const pool = dedupeClassifiedConstraints([...(a || []), ...(b || [])].map((x) => ({
+    text: cleanStatement(x?.text || "", 120),
+    evidence: cleanStatement(x?.evidence || x?.text || "", 80),
+    kind: x?.kind || "other",
+    hard: !!x?.hard,
+    severity: x?.severity,
+    importance: clampImportance(x?.importance, x?.hard ? 0.84 : 0.72),
+  })));
+  const out = pool
+    .filter((x) => !!x.text)
+    .sort((x, y) => (Number(y.importance) || 0) - (Number(x.importance) || 0))
+    .slice(0, 6);
+  return out.length ? out : undefined;
 }
 
 export function extractCriticalPresentationRequirement(text: string): { days: number; reason: string; evidence: string; city?: string } | null {
@@ -1223,6 +1271,53 @@ export function extractIntentSignals(userText: string, opts?: { historyMode?: bo
     out.healthConstraint = healthClause;
     out.healthEvidence = healthClause;
   }
+  const languageClause = pickLanguageConstraintClause(text);
+  if (languageClause) {
+    out.languageConstraint = languageClause;
+    out.languageEvidence = languageClause;
+  }
+
+  const genericConstraints: NonNullable<IntentSignals["genericConstraints"]> = [];
+  for (const part of sentenceParts(text)) {
+    const s = cleanStatement(part, 120);
+    if (!s) continue;
+    if (/^(预算(?:上限)?|总行程时长|行程时长|城市时长|停留时长|同行人数|目的地)[:：]/.test(s)) continue;
+    const likelyConstraintCue =
+      HARD_CONSTRAINT_RE.test(s) ||
+      HARD_REQUIRE_RE.test(s) ||
+      /签证|护照|入境|治安|安全|轮椅|无障碍|转机|换乘|托运|语言障碍|不会英语|翻译|visa|passport|safety|logistics/i.test(
+        s
+      );
+    if (!likelyConstraintCue) continue;
+    const c = classifyConstraintText({
+      text: s,
+      evidence: s,
+    });
+    if (!c) continue;
+    if (c.family === "health" && !out.healthConstraint) {
+      out.healthConstraint = c.text;
+      out.healthEvidence = c.evidence;
+      out.healthImportance = c.importance;
+      continue;
+    }
+    if (c.family === "language" && !out.languageConstraint) {
+      out.languageConstraint = c.text;
+      out.languageEvidence = c.evidence;
+      out.languageImportance = c.importance;
+      continue;
+    }
+    if (c.family === "generic") {
+      genericConstraints.push({
+        text: c.text,
+        evidence: c.evidence,
+        kind: c.kind,
+        hard: c.hard,
+        severity: c.severity,
+        importance: c.importance,
+      });
+    }
+  }
+  out.genericConstraints = mergeGenericConstraints(undefined, genericConstraints);
 
   const prefClause = sentenceParts(text).map(normalizePreferenceStatement).find(Boolean);
   if (prefClause) {
@@ -1449,15 +1544,47 @@ function mergeSignalsWithLatest(history: IntentSignals, latest: IntentSignals): 
     );
   }
   if (latest.healthConstraint) {
-    out.healthConstraint = latest.healthConstraint;
-    out.healthEvidence = latest.healthEvidence || out.healthEvidence;
+    const latestHealth = cleanStatement(latest.healthConstraint, 120);
+    if (isLanguageOnlyConstraint(latestHealth)) {
+      out.languageConstraint = latestHealth;
+      out.languageEvidence = latest.healthEvidence || latest.healthConstraint || out.languageEvidence;
+      out.languageImportance = clampImportance(
+        latest.healthImportance,
+        latest.languageImportance || out.languageImportance || 0.82
+      );
+    } else {
+      out.healthConstraint = latestHealth;
+      out.healthEvidence = latest.healthEvidence || out.healthEvidence;
+    }
   }
-  if (latest.healthImportance != null) {
+  if (latest.healthImportance != null && !isLanguageOnlyConstraint(latest.healthConstraint)) {
     out.healthImportance = clampImportance(
       latest.healthImportance,
       out.healthImportance || 0.96
     );
   }
+  if (latest.languageConstraint) {
+    out.languageConstraint = cleanStatement(latest.languageConstraint, 120);
+    out.languageEvidence = latest.languageEvidence || out.languageEvidence;
+  }
+  if (latest.languageImportance != null) {
+    out.languageImportance = clampImportance(
+      latest.languageImportance,
+      out.languageImportance || 0.82
+    );
+  }
+  if (out.healthConstraint && isLanguageOnlyConstraint(out.healthConstraint)) {
+    out.languageConstraint = out.languageConstraint || out.healthConstraint;
+    out.languageEvidence = out.languageEvidence || out.healthEvidence || out.healthConstraint;
+    out.languageImportance = clampImportance(
+      out.languageImportance,
+      out.healthImportance || 0.82
+    );
+    out.healthConstraint = undefined;
+    out.healthEvidence = undefined;
+    out.healthImportance = undefined;
+  }
+  out.genericConstraints = mergeGenericConstraints(out.genericConstraints, latest.genericConstraints);
   if (latest.scenicPreference) {
     out.scenicPreference = latest.scenicPreference;
     out.scenicPreferenceEvidence = latest.scenicPreferenceEvidence || out.scenicPreferenceEvidence;

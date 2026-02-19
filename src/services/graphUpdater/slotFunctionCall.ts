@@ -5,6 +5,8 @@ import {
   isLikelyDestinationCandidate,
   normalizeDestination,
 } from "./intentSignals.js";
+import { LANGUAGE_CONSTRAINT_RE, MEDICAL_HEALTH_RE } from "./constants.js";
+import { classifyConstraintText, dedupeClassifiedConstraints } from "./constraintClassifier.js";
 
 type SlotExtractionResult = {
   intent_summary?: string;
@@ -67,6 +69,20 @@ type SlotExtractionResult = {
     text?: string;
     evidence?: string;
     severity?: "medium" | "high" | "critical";
+    importance?: number;
+    confidence?: number;
+  }>;
+  language_constraints?: Array<{
+    text?: string;
+    evidence?: string;
+    severity?: "medium" | "high" | "critical";
+    importance?: number;
+    confidence?: number;
+  }>;
+  constraints?: Array<{
+    text?: string;
+    evidence?: string;
+    hard?: boolean;
     importance?: number;
     confidence?: number;
   }>;
@@ -360,23 +376,133 @@ function slotsToSignals(slots: SlotExtractionResult): IntentSignals {
     }
   }
 
-  if (Array.isArray(slots.health_constraints) && slots.health_constraints.length) {
-    const best = slots.health_constraints
+  const rawConstraints: Array<{
+    text: string;
+    evidence: string;
+    hard?: boolean;
+    importance?: number;
+    score: number;
+  }> = [];
+  const pushRawConstraint = (params: {
+    text?: string;
+    evidence?: string;
+    hard?: boolean;
+    importance?: number;
+    confidence?: number;
+    severity?: "medium" | "high" | "critical";
+  }) => {
+    const text = cleanStatement(params.text || "", 96);
+    if (!text) return;
+    const evidence = cleanStatement(params.evidence || params.text || "", 60);
+    const imp = clampImportance(params.importance, params.hard ? 0.84 : 0.76);
+    const score =
+      (params.severity === "critical" ? 0.25 : params.severity === "high" ? 0.16 : params.severity === "medium" ? 0.08 : 0) +
+      imp * 0.55 +
+      clamp01(params.confidence, 0.82) * 0.2 +
+      (params.hard ? 0.1 : 0);
+    rawConstraints.push({
+      text,
+      evidence,
+      hard: !!params.hard,
+      importance: imp,
+      score,
+    });
+  };
+
+  for (const x of slots.health_constraints || []) {
+    pushRawConstraint({
+      text: x?.text,
+      evidence: x?.evidence,
+      hard: true,
+      importance: x?.importance,
+      confidence: x?.confidence,
+      severity: x?.severity,
+    });
+  }
+  for (const x of slots.language_constraints || []) {
+    pushRawConstraint({
+      text: x?.text,
+      evidence: x?.evidence,
+      hard: !!x?.severity && x.severity !== "medium",
+      importance: x?.importance,
+      confidence: x?.confidence,
+      severity: x?.severity,
+    });
+  }
+  for (const x of slots.constraints || []) {
+    pushRawConstraint({
+      text: x?.text,
+      evidence: x?.evidence,
+      hard: !!x?.hard,
+      importance: x?.importance,
+      confidence: x?.confidence,
+      severity: undefined,
+    });
+  }
+
+  const classified = rawConstraints
+    .map((x) => {
+      const c = classifyConstraintText({
+        text: x.text,
+        evidence: x.evidence,
+        hardHint: x.hard,
+        importance: x.importance,
+      });
+      if (!c) return null;
+      return { raw: x, c };
+    })
+    .filter((x): x is NonNullable<typeof x> => !!x);
+
+  const healthBest = classified
+    .filter((x) => x.c.family === "health")
+    .sort((a, b) => b.raw.score - a.raw.score)[0];
+  if (healthBest) {
+    out.healthConstraint = healthBest.c.text;
+    out.healthEvidence = healthBest.c.evidence;
+    out.healthImportance = healthBest.c.importance;
+  }
+
+  const languageBest = classified
+    .filter((x) => x.c.family === "language")
+    .sort((a, b) => b.raw.score - a.raw.score)[0];
+  if (languageBest) {
+    out.languageConstraint = languageBest.c.text;
+    out.languageEvidence = languageBest.c.evidence;
+    out.languageImportance = languageBest.c.importance;
+  }
+
+  const genericClassified = dedupeClassifiedConstraints(
+    classified
+      .filter((x) => x.c.family === "generic")
+      .sort((a, b) => b.raw.score - a.raw.score)
       .map((x) => ({
-        text: cleanStatement(x?.text || "", 96),
-        evidence: cleanStatement(x?.evidence || x?.text || "", 60),
-        imp: clampImportance(x?.importance, x?.severity === "critical" ? 0.97 : 0.9),
-        score:
-          (x?.severity === "critical" ? 0.25 : x?.severity === "high" ? 0.16 : 0) +
-          clampImportance(x?.importance, 0.88) * 0.55 +
-          clamp01(x?.confidence, 0.86) * 0.2,
+        text: x.c.text,
+        evidence: x.c.evidence,
+        kind: x.c.kind,
+        hard: x.c.hard,
+        severity: x.c.severity,
+        importance: x.c.importance,
       }))
-      .filter((x) => !!x.text)
-      .sort((a, b) => b.score - a.score)[0];
-    if (best) {
-      out.healthConstraint = best.text;
-      out.healthEvidence = best.evidence;
-      out.healthImportance = best.imp;
+  );
+  if (genericClassified.length) {
+    out.genericConstraints = genericClassified.slice(0, 6);
+  }
+
+  // Backward-compatible safety net for older model outputs.
+  if (!out.healthConstraint && Array.isArray(slots.health_constraints)) {
+    const fallbackHealth = slots.health_constraints.find((x) => MEDICAL_HEALTH_RE.test(String(x?.text || "")));
+    if (fallbackHealth?.text) {
+      out.healthConstraint = cleanStatement(fallbackHealth.text, 96);
+      out.healthEvidence = cleanStatement(fallbackHealth.evidence || fallbackHealth.text, 60);
+      out.healthImportance = clampImportance(fallbackHealth.importance, 0.95);
+    }
+  }
+  if (!out.languageConstraint && Array.isArray(slots.language_constraints)) {
+    const fallbackLang = slots.language_constraints.find((x) => LANGUAGE_CONSTRAINT_RE.test(String(x?.text || "")));
+    if (fallbackLang?.text) {
+      out.languageConstraint = cleanStatement(fallbackLang.text, 96);
+      out.languageEvidence = cleanStatement(fallbackLang.evidence || fallbackLang.text, 60);
+      out.languageImportance = clampImportance(fallbackLang.importance, 0.82);
     }
   }
 
@@ -419,10 +545,10 @@ const SLOT_SYSTEM_PROMPT = `你是结构化槽位抽取器。只调用给定函�
 
 要求：
 1) 只从用户输入中抽取，不复述助手建议。
-2) 如用户在后续消息更新预算/时长/目的地，使用最新约束。
-3) “留一天做事/发表论文/见亲戚”归入 critical_days，不得覆盖 total_duration。
-4) destinations 只能是地名，禁止“顺带/其他时间/这座城之外”等描述词。
-5) 若提到 B 地点是 A 城市中的场馆/景点/街区（例如“去A城，在B看球”），B 放入 sub_locations，并尽量给出 parent_city=A；不要把 B 当 destinations。
+2) 后续消息出现更新时，以最新约束覆盖旧约束。
+3) “留一天做事/发表论文/见人”归入 critical_days，不得覆盖 total_duration。
+4) destinations 仅放地名；场馆/景点/街区尽量放入 sub_locations，并附 parent_city。
+5) 约束可放 health_constraints / language_constraints / constraints（通用约束）。
 6) 不确定就留空，不要编造。`;
 
 const SLOT_PARAMETERS = {
@@ -539,6 +665,34 @@ const SLOT_PARAMETERS = {
         },
       },
     },
+    language_constraints: {
+      type: "array",
+      items: {
+        type: "object",
+        additionalProperties: false,
+        properties: {
+          text: { type: "string" },
+          evidence: { type: "string" },
+          severity: { type: "string", enum: ["medium", "high", "critical"] },
+          importance: { type: "number" },
+          confidence: { type: "number" },
+        },
+      },
+    },
+    constraints: {
+      type: "array",
+      items: {
+        type: "object",
+        additionalProperties: false,
+        properties: {
+          text: { type: "string" },
+          evidence: { type: "string" },
+          hard: { type: "boolean" },
+          importance: { type: "number" },
+          confidence: { type: "number" },
+        },
+      },
+    },
     scenic_preference: {
       type: "object",
       additionalProperties: false,
@@ -636,6 +790,8 @@ export async function extractIntentSignalsByFunctionCall(params: {
     !!signals.budgetCny ||
     !!signals.peopleCount ||
     !!signals.healthConstraint ||
+    !!signals.languageConstraint ||
+    (signals.genericConstraints?.length || 0) > 0 ||
     !!signals.criticalPresentation ||
     !!signals.scenicPreference ||
     !!signals.lodgingPreference ||

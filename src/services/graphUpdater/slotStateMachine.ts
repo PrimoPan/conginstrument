@@ -32,6 +32,7 @@ type DurationState = {
   totalDays?: number;
   totalEvidence?: string;
   cityDurations: Array<{ city: string; days: number; kind: "travel" | "meeting"; evidence: string; importance: number }>;
+  emitCityDurationSlots: Set<string>;
 };
 
 function buildDurationState(signals: IntentSignals): DurationState {
@@ -76,7 +77,27 @@ function buildDurationState(signals: IntentSignals): DurationState {
 
   if (totalDays != null && totalDays <= 0) totalDays = undefined;
   if (totalDays != null && totalDays > 365) totalDays = 365;
-  return { totalDays, totalEvidence, cityDurations };
+
+  const emitCityDurationSlots = new Set(cityDurations.map((x) => slug(x.city)));
+  if (cityDurations.length === 1 && totalDays != null) {
+    const only = cityDurations[0];
+    if (only.kind === "travel" && only.days === totalDays) {
+      emitCityDurationSlots.delete(slug(only.city));
+    }
+  }
+
+  return { totalDays, totalEvidence, cityDurations, emitCityDurationSlots };
+}
+
+function compactIntentDuration(intent: string, totalDays?: number): string {
+  const s = cleanStatement(intent || "", 96);
+  if (!s || !totalDays) return s;
+  const out = s
+    .replace(new RegExp(`${totalDays}\\s*天`, "g"), "")
+    .replace(/(旅游|旅行|出行|度假|玩)\s*(旅游|旅行|出行|度假|玩)/g, "$1")
+    .replace(/[，,\s]{2,}/g, " ")
+    .replace(/^[，,\s]+|[，,\s]+$/g, "");
+  return out || s;
 }
 
 function buildGoalNode(params: {
@@ -85,7 +106,8 @@ function buildGoalNode(params: {
   totalDays?: number;
   now: string;
 }): SlotNodeSpec {
-  const intent = buildTravelIntentStatement(params.signals, params.userText) || cleanStatement(params.userText, 88);
+  const rawIntent = buildTravelIntentStatement(params.signals, params.userText) || cleanStatement(params.userText, 88);
+  const intent = compactIntentDuration(rawIntent, params.totalDays);
   const successCriteria: string[] = [];
   if (params.signals.destinations?.length) {
     successCriteria.push(`覆盖目的地：${params.signals.destinations.join("、")}`);
@@ -124,6 +146,14 @@ function pushEdge(edges: SlotEdgeSpec[], fromSlot: string, toSlot: string, type:
   const exists = edges.some((e) => `${e.fromSlot}|${e.toSlot}|${e.type}` === key);
   if (exists) return;
   edges.push({ fromSlot, toSlot, type, confidence: clamp01(confidence, 0.78) });
+}
+
+function genericConstraintPrefix(kind?: string): string {
+  if (kind === "legal") return "法律约束";
+  if (kind === "safety") return "安全约束";
+  if (kind === "mobility") return "出行约束";
+  if (kind === "logistics") return "行程约束";
+  return "关键约束";
 }
 
 export function buildSlotStateMachine(params: {
@@ -200,6 +230,7 @@ export function buildSlotStateMachine(params: {
 
   for (const seg of durationState.cityDurations) {
     const cityKey = slug(seg.city);
+    if (!durationState.emitCityDurationSlots.has(cityKey)) continue;
     const slotKey = `slot:duration_city:${cityKey}`;
     nodes.push({
       slotKey,
@@ -338,6 +369,62 @@ export function buildSlotStateMachine(params: {
       rebuttalPoints: ["若取消该约束，行程风险明显上升"],
     });
     pushEdge(edges, "slot:health", "slot:goal", "constraint", 0.96);
+  }
+
+  if (params.signals.languageConstraint) {
+    const imp = clamp01(params.signals.languageImportance, 0.82);
+    nodes.push({
+      slotKey: "slot:language",
+      type: "constraint",
+      layer: "requirement",
+      strength: "hard",
+      statement: `语言约束: ${params.signals.languageConstraint}`,
+      confidence: 0.9,
+      importance: imp,
+      tags: ["language", "communication"],
+      evidenceIds: [params.signals.languageEvidence || params.signals.languageConstraint].filter(Boolean),
+      sourceMsgIds: ["latest_user"],
+      key: "slot:language",
+      motifType: "hypothesis",
+      claim: params.signals.languageConstraint,
+      evidence: motifEvidence(params.signals.languageEvidence || params.signals.languageConstraint),
+      linkedIntentIds: ["slot:goal"],
+      revisionHistory: [{ at: now, action: "updated", by: "system", reason: "slot_state_machine" }],
+      priority: imp,
+      rebuttalPoints: ["若不处理语言沟通，执行效率与安全性会下降"],
+    });
+    pushEdge(edges, "slot:language", "slot:goal", "constraint", 0.9);
+  }
+
+  for (const gc of (params.signals.genericConstraints || []).slice(0, 6)) {
+    const text = cleanStatement(gc.text || "", 120);
+    if (!text) continue;
+    const prefix = genericConstraintPrefix(gc.kind);
+    const slotKey = `slot:constraint:${slug(gc.kind || "other")}:${slug(text)}`;
+    const hard = !!gc.hard;
+    const severity = gc.severity || (hard ? "high" : "medium");
+    const imp = clamp01(gc.importance, hard ? 0.84 : 0.74);
+    nodes.push({
+      slotKey,
+      type: "constraint",
+      layer: severity === "critical" || severity === "high" ? "risk" : "requirement",
+      strength: hard ? "hard" : "soft",
+      severity,
+      statement: `${prefix}: ${text}`,
+      confidence: hard ? 0.9 : 0.8,
+      importance: imp,
+      tags: ["generic_constraint", gc.kind || "other"],
+      evidenceIds: [gc.evidence || gc.text].filter(Boolean),
+      sourceMsgIds: ["latest_user"],
+      key: slotKey,
+      motifType: "hypothesis",
+      claim: text,
+      evidence: motifEvidence(gc.evidence || gc.text),
+      linkedIntentIds: ["slot:goal"],
+      revisionHistory: [{ at: now, action: "updated", by: "system", reason: "slot_state_machine" }],
+      priority: imp,
+    });
+    pushEdge(edges, slotKey, "slot:goal", hard ? "constraint" : "determine", hard ? 0.9 : 0.8);
   }
 
   if (params.signals.criticalPresentation) {

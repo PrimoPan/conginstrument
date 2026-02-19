@@ -172,6 +172,7 @@ function slotFamily(slot: string | null | undefined): string {
   if (slot.startsWith("slot:destination:")) return "destination";
   if (slot.startsWith("slot:duration_city:")) return "duration_city";
   if (slot.startsWith("slot:meeting_critical:")) return "meeting_critical";
+  if (slot.startsWith("slot:constraint:")) return "generic_constraint";
   if (slot === "slot:duration_total") return "duration_total";
   if (slot === "slot:duration_meeting") return "duration_meeting";
   if (slot === "slot:people") return "people";
@@ -179,6 +180,7 @@ function slotFamily(slot: string | null | undefined): string {
   if (slot === "slot:lodging") return "lodging";
   if (slot === "slot:scenic_preference") return "scenic_preference";
   if (slot === "slot:health") return "health";
+  if (slot === "slot:language") return "language";
   if (slot === "slot:goal") return "goal";
   return slot;
 }
@@ -327,6 +329,12 @@ function slotKeyOfNode(node: ConceptNode): string | null {
       /(五星|四星|三星).{0,6}(酒店)/.test(s))
   ) {
     return "slot:lodging";
+  }
+  if (node.type === "constraint" && /^语言约束[:：]\s*.+$/.test(s)) return "slot:language";
+  if (node.type === "constraint" && /^(关键约束|法律约束|安全约束|出行约束|行程约束)[:：]\s*.+$/.test(s)) {
+    const m = s.match(/^(?:关键约束|法律约束|安全约束|出行约束|行程约束)[:：]\s*(.+)$/);
+    const detail = normalizePlaceToken((m?.[1] || "constraint").slice(0, 28));
+    return `slot:constraint:${detail || "default"}`;
   }
   if (node.type === "constraint" && HEALTH_RE.test(s)) return "slot:health";
   return null;
