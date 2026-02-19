@@ -32,13 +32,15 @@ For each patch update, the backend runs:
 
 1. patch sanitization + normalization
 2. singleton slot compaction (deduplicate same slot nodes)
-3. root-goal selection and root unification
-4. structured skeleton edge construction (primary/secondary/health slots)
-5. A*-style anchor search for non-slot nodes
-6. root fan-in control (sparsification)
-7. Tarjan SCC cycle breaking
-8. approximate transitive reduction
-9. connectivity repair to keep all nodes connected to root
+3. geo normalization (MCP bridge optional, Nominatim fallback)
+4. signal sanitizer pass (destination/sub-location canonicalization + dedup + duration reconciliation)
+5. root-goal selection and root unification
+6. structured skeleton edge construction (primary/secondary/health slots)
+7. A*-style anchor search for non-slot nodes
+8. root fan-in control (sparsification)
+9. Tarjan SCC cycle breaking
+10. approximate transitive reduction
+11. connectivity repair to keep all nodes connected to root
 
 ## 3) Slot Compaction (same-slot dedup)
 
@@ -246,4 +248,3 @@ In practice, graph sizes in this project are small-to-medium, so latency remains
 - slot schema is still partially travel-biased in extraction layer
 
 These are acceptable for current interactive planning, and leave room for future learned weighting or GNN-based scoring.
-

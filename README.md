@@ -60,6 +60,16 @@ curl http://localhost:3001/healthz
 | `SESSION_TTL_DAYS` | 否 | `7` | session 过期天数 |
 | `CI_STREAM_MODE` | 否 | `pseudo` | `pseudo`（伪流）/`upstream`（上游真流） |
 | `CI_GRAPH_MODEL` | 否 | 与 `MODEL` 相同 | 建图模型 |
+| `CI_GRAPH_USE_FUNCTION_SLOTS` | 否 | `1` | 是否启用 function call 结构化槽位抽取 |
+| `CI_GRAPH_PATCH_LLM_WITH_SLOTS` | 否 | `0` | 兼容旧版参数；当前 V2 槽位流水线默认不走自由 patch LLM |
+| `CI_GEO_VALIDATE` | 否 | `1` | 是否启用地理校验层（Nominatim） |
+| `CI_GEO_ENDPOINT` | 否 | `https://nominatim.openstreetmap.org` | 地理解析服务地址 |
+| `CI_GEO_TIMEOUT_MS` | 否 | `2600` | 每次地理查询超时（毫秒） |
+| `CI_GEO_MAX_LOOKUPS` | 否 | `12` | 每轮最多地理查询次数 |
+| `CI_GEO_CACHE_TTL_MS` | 否 | `43200000` | 地理缓存 TTL（毫秒） |
+| `CI_MCP_GEO_URL` | 否 | 空 | 可选 MCP 地理工具桥接地址（优先于 Nominatim） |
+| `CI_MCP_GEO_TIMEOUT_MS` | 否 | `1800` | MCP 地理调用超时（毫秒） |
+| `CI_MCP_GEO_TOKEN` | 否 | 空 | MCP 地理桥接鉴权 Token（可选） |
 | `CI_ALLOW_DELETE` | 否 | `0` | 是否允许 remove_node/remove_edge |
 | `CI_DEBUG_LLM` | 否 | `0` | LLM 与 patch 调试日志 |
 
@@ -92,6 +102,7 @@ Base URL 示例：`http://localhost:3001`
 | `GET` | `/api/conversations` | 是 | 会话列表 |
 | `POST` | `/api/conversations` | 是 | 新建会话 |
 | `GET` | `/api/conversations/:id` | 是 | 会话详情（含图） |
+| `PUT` | `/api/conversations/:id/graph` | 是 | 保存前端编辑后的整图快照（可选触发“基于新图”的建议） |
 | `GET` | `/api/conversations/:id/turns?limit=30` | 是 | 历史轮次 |
 | `POST` | `/api/conversations/:id/turn` | 是 | 非流式单轮 |
 | `POST` | `/api/conversations/:id/turn/stream` | 是 | SSE 流式单轮 |
@@ -223,7 +234,55 @@ Base URL 示例：`http://localhost:3001`
 ]
 ```
 
-#### 7.7 `POST /api/conversations/:id/turn`（非流式）
+#### 7.7 `PUT /api/conversations/:id/graph`（保存前端修改图，可选生成建议）
+
+请求：
+
+```json
+{
+  "graph": {
+    "id": "65f1...",
+    "version": 6,
+    "nodes": [],
+    "edges": []
+  },
+  "requestAdvice": true,
+  "advicePrompt": "用户已手动调整意图图，请基于最新图给出下一步建议"
+}
+```
+
+行为：
+
+1. 服务端用 `normalizeGraphSnapshot` 对前端整图做轻量规范化（字段清洗、ID 修复、悬挂边过滤、重复边去重）。
+2. 不做自动拓扑重排，尽量保留用户手工编辑结构。
+3. 持久化到 `conversations.graph`，下一轮对话建图会直接基于这份图继续。
+4. 若 `requestAdvice=true`，服务端会把“最新图 + 最近对话 + advicePrompt（或默认提示）”送入聊天模型，返回建议文本。
+
+响应：
+
+```json
+{
+  "conversationId": "65f1...",
+  "graph": {
+    "id": "65f1...",
+    "version": 7,
+    "nodes": [],
+    "edges": []
+  },
+  "updatedAt": "2026-02-16T00:00:00.000Z",
+  "assistantText": "基于你手工修正后的意图图，建议先锁定关键约束再排城市节奏...",
+  "adviceError": ""
+}
+```
+
+错误：
+
+- `400 {"error":"invalid conversation id"}`
+- `400 {"error":"graph required"}`
+- `400 {"error":"graph.nodes and graph.edges must be arrays"}`
+- `404 {"error":"conversation not found"}`
+
+#### 7.8 `POST /api/conversations/:id/turn`（非流式）
 
 请求：
 
@@ -255,7 +314,7 @@ Base URL 示例：`http://localhost:3001`
 - `400 {"error":"userText required"}`
 - `404 {"error":"conversation not found"}`
 
-#### 7.8 `POST /api/conversations/:id/turn/stream`（SSE）
+#### 7.9 `POST /api/conversations/:id/turn/stream`（SSE）
 
 请求：
 
@@ -303,6 +362,7 @@ data: {"assistantText":"...","graphPatch":{"ops":[]},"graph":{"id":"65f1...","ve
 - `ConceptNode.type`：`goal | constraint | preference | belief | fact | question`
 - `ConceptNode.layer`：`intent | requirement | preference | risk`
 - `ConceptNode.severity`：`low | medium | high | critical`
+- `ConceptNode.motifType`：`belief | hypothesis | expectation | cognitive_step`
 - `ConceptEdge.type`：`enable | constraint | determine | conflicts_with`
 - `GraphPatch.ops`：`add_node | update_node | remove_node | add_edge | remove_edge`
 
@@ -311,19 +371,42 @@ data: {"assistantText":"...","graphPatch":{"ops":[]},"graph":{"id":"65f1...","ve
 1. `applyPatchWithGuards` 会做字段归一化、白名单校验、ID 重写。
 2. 默认禁删（除非 `CI_ALLOW_DELETE=1`）。
 3. 单值槽位会做自动压缩（例如预算/人数/目的地/时长，保留更优节点）。
-4. `layer` 可由 LLM 显式提供；若缺失，后端会根据节点语义自动推断：
+4. `layer` 可由系统显式提供；若缺失，后端会根据节点语义自动推断：
    `goal -> intent`，硬约束/结构化事实 -> `requirement`，偏好语义 -> `preference`，高风险/健康/安全语义 -> `risk`。
+5. 时长槽位采用“城市分段优先合并”：
+   - 对话中若出现 `城市A n天 + 城市B m天`，后端会优先合成为 `总行程时长 = n+m`。
+   - `前两天/后一天` 这类相对时间不会直接覆盖总时长槽位。
+   - 历史中的脏目的地（如“顺带”）会在 merge 阶段被清洗，避免污染后续图结构。
+6. 子地点归属采用 function-call 槽位：
+   - 把“场馆/景点/街区”提取为 `sub_locations`，并尽量给出 `parent_city`。
+   - 子地点不作为一级目的地，建图时会挂到对应城市（如城市节点/城市时长节点）下。
+7. 手工改图保存与自动建图分离：
+   - 对话 turn（自动建图）走 `applyPatchWithGuards`（包含拓扑修复/去重策略）。
+   - 前端整图保存走 `normalizeGraphSnapshot`（仅做合法化，不重排用户图结构）。
+8. PRD 元数据字段已入模（先存储，前端暂不复杂展示）：
+   - `claim/structure/evidence/linkedIntentIds/rebuttalPoints/revisionHistory`
+   - `priority/successCriteria`
+9. 地理校验层（Global-ready）：
+   - 合并后的槽位会进入 `geoResolver` 做地理规范化。
+   - 若配置 `CI_MCP_GEO_URL`，优先走 MCP 地理工具桥接；失败时自动回退 Nominatim。
+   - 自动判断“子地点 -> 父城市”关系（如冷门地点/场馆），避免把子地点误当一级目的地。
+   - 查询失败时自动降级为本地规则，不阻断对话与建图。
 
 ---
 
-### 9. 建图更新流水线（graph path）
+### 9. 建图更新流水线（V2：槽位状态机 -> 图编译器）
 
 1. `generateTurn` / `generateTurnStreaming` 先生成助手文本。
-2. `generateGraphPatch` 生成图增量 patch。
-3. `sanitizeGraphPatchStrict` 做严格清洗（防漂移字段、非法 op）。
-4. `postProcessPatch` + 启发式规则补齐原子节点与连边。
-5. `applyPatchWithGuards` 应用 patch 并输出新图。
-6. 持久化 `turns` 与 `conversations.graph`。
+2. `extractIntentSignalsWithRecency` + `slotFunctionCall` 抽取结构化槽位（并做冲突融合；语言约束与健康约束分流）。
+3. `geoResolver` 做地理规范化（目的地/城市时长/子地点父城归属，支持 MCP 桥接）。
+4. `signalSanitizer` 做二次清洗（地名归一化、子地点回收、重复目的地去重、时长冲突收敛）。
+5. `constraintClassifier` 做硬约束语义归类（health/language/legal/safety/mobility/logistics），减少 prompt 写死规则依赖。
+6. `slotStateMachine` 产出“标准化槽位状态”（slot winners）。
+7. `slotGraphCompiler` 把槽位状态编译为 `GraphPatch`（add/update/edge + stale 降级）。
+8. `sanitizeGraphPatchStrict` 严格清洗 patch。
+9. `applyPatchWithGuards` 应用 patch 并输出新图（含压缩、拓扑修复）。
+10. 持久化 `turns` 与 `conversations.graph`。
+11. 若调用 `PUT /api/conversations/:id/graph` 保存前端改图，后续 turn 会使用这份更新图作为最新真值。
 
 ---
 
@@ -355,6 +438,9 @@ conginstrument/
 ├─ package.json
 ├─ package-lock.json
 ├─ README.md
+├─ skills/
+│  └─ intent-graph-regression/
+│     └─ SKILL.md
 └─ src/
    ├─ index.ts
    ├─ server/
@@ -379,7 +465,13 @@ conginstrument/
       │  ├─ constants.ts
       │  ├─ text.ts
       │  ├─ intentSignals.ts
-      │  ├─ nodeNormalization.ts
+      │  ├─ geoResolver.ts
+      │  ├─ mcpGeoBridge.ts
+      │  ├─ signalSanitizer.ts
+      │  ├─ slotTypes.ts
+      │  ├─ slotStateMachine.ts
+      │  ├─ slotGraphCompiler.ts
+      │  ├─ slotFunctionCall.ts
       │  └─ common.ts
       ├─ patchGuard.ts
       └─ textSanitizer.ts
@@ -390,6 +482,7 @@ conginstrument/
 | 文件 | 作用 |
 | --- | --- |
 | `README.md` | 后端说明文档（本文件） |
+| `skills/intent-graph-regression/SKILL.md` | 团队协作回归技能模板（重复节点/时长冲突/父子地点归属排查） |
 | `package.json` | 依赖与脚本（`dev:api`） |
 | `package-lock.json` | npm 锁定依赖版本 |
 
@@ -408,11 +501,18 @@ conginstrument/
 | `src/core/nodeLayer.ts` | 节点四层分类（Intent/Requirement/Preference/Risk）的推断与归一化 |
 | `src/services/llmClient.ts` | OpenAI SDK 客户端实例 |
 | `src/services/chatResponder.ts` | 助手文本生成（非流式/伪流/真流） |
-| `src/services/graphUpdater.ts` | 图 patch 主流程（LLM 调用、启发式融合、后处理） |
+| `src/services/graphUpdater.ts` | 图 patch 主流程（槽位抽取、状态机融合、图编译） |
 | `src/services/graphUpdater/constants.ts` | 建图正则与槽位识别常量 |
 | `src/services/graphUpdater/text.ts` | 文本清洗、证据合并、去重工具 |
-| `src/services/graphUpdater/intentSignals.ts` | 用户意图信号抽取（目的地/时长/预算/人数/关键日） |
-| `src/services/graphUpdater/nodeNormalization.ts` | 节点归一化与原子校验（防噪声、保结构） |
+| `src/services/graphUpdater/intentSignals.ts` | 用户意图信号抽取（目的地/时长/预算/人数/关键日/语言约束/健康约束），含跨轮时长合并与相对时间过滤 |
+| `src/services/graphUpdater/geoResolver.ts` | 地理校验层（MCP 可选 + Nominatim 回退），做目的地规范化与子地点父城归属修复 |
+| `src/services/graphUpdater/mcpGeoBridge.ts` | MCP 地理桥接（可选），解析地点层级关系并回传统一结构 |
+| `src/services/graphUpdater/signalSanitizer.ts` | 信号二次清洗（重复节点防抖、子地点回收、时长/城市归一化） |
+| `src/services/graphUpdater/constraintClassifier.ts` | 约束语义分类器（health/language/legal/safety/mobility/logistics） |
+| `src/services/graphUpdater/slotTypes.ts` | 槽位状态机与图编译器共享类型 |
+| `src/services/graphUpdater/slotStateMachine.ts` | 槽位状态机（slot winners、总时长合并、单城市时长去重、关键约束稳态） |
+| `src/services/graphUpdater/slotGraphCompiler.ts` | 图编译器（slot state -> GraphPatch，含 stale 节点降级） |
+| `src/services/graphUpdater/slotFunctionCall.ts` | function call 槽位抽取（结构化输出，含子地点归属）与信号映射 |
 | `src/services/graphUpdater/common.ts` | patch 提取与临时 id 工具函数 |
 | `src/services/patchGuard.ts` | LLM patch 清洗与规范化（强约束） |
 | `src/services/textSanitizer.ts` | 把 Markdown/LaTeX 风格文本降级为纯文本 |
@@ -479,6 +579,9 @@ See the Chinese section above for the full table. Key vars include:
 - `OPENAI_API_KEY`, `OPENAI_BASE_URL`, `MODEL`
 - `SESSION_TTL_DAYS`
 - `CI_STREAM_MODE`, `CI_GRAPH_MODEL`, `CI_ALLOW_DELETE`, `CI_DEBUG_LLM`
+- `CI_GRAPH_USE_FUNCTION_SLOTS`, `CI_GRAPH_PATCH_LLM_WITH_SLOTS`
+- `CI_GEO_VALIDATE`, `CI_GEO_ENDPOINT`, `CI_GEO_TIMEOUT_MS`, `CI_GEO_MAX_LOOKUPS`, `CI_GEO_CACHE_TTL_MS`
+- `CI_MCP_GEO_URL`, `CI_MCP_GEO_TIMEOUT_MS`, `CI_MCP_GEO_TOKEN`
 
 ---
 
@@ -489,6 +592,7 @@ See the Chinese section above for the full table. Key vars include:
 - `GET /api/conversations`
 - `POST /api/conversations`
 - `GET /api/conversations/:id`
+- `PUT /api/conversations/:id/graph` (supports `requestAdvice` + `advicePrompt`)
 - `GET /api/conversations/:id/turns?limit=30`
 - `POST /api/conversations/:id/turn`
 - `POST /api/conversations/:id/turn/stream` (SSE)
@@ -522,8 +626,14 @@ Patch application pipeline:
 
 1. sanitize patch
 2. apply guards
-3. compact singleton slots (budget/duration/people/destination/health/preference)
+3. compact singleton slots (budget/duration/people/destination/health/language/preference)
 4. bump graph version when structural changes happen
+
+Manual full-graph save path:
+
+1. `PUT /graph` uses `normalizeGraphSnapshot` (light validation only).
+2. It preserves user-edited topology instead of auto-rebalancing.
+3. Optional advice generation can return `assistantText` in the same response.
 
 ---
 
@@ -537,6 +647,7 @@ src/db/mongo.ts              # Mongo collections + indexes
 src/middleware/auth.ts       # auth middleware
 src/routes/auth.ts           # login route
 src/routes/conversations.ts  # conversation + turn + SSE routes
+skills/intent-graph-regression/SKILL.md # team regression skill template
 src/core/graph.ts            # graph types and guarded patch apply
 src/core/nodeLayer.ts        # 4-layer node taxonomy inference and normalization
 src/services/llmClient.ts    # OpenAI client
@@ -545,7 +656,14 @@ src/services/graphUpdater.ts # graph patch orchestrator
 src/services/graphUpdater/constants.ts         # graph regex/constants
 src/services/graphUpdater/text.ts              # text/evidence helpers
 src/services/graphUpdater/intentSignals.ts     # intent signal extraction
-src/services/graphUpdater/nodeNormalization.ts # node normalization + validation
+src/services/graphUpdater/geoResolver.ts       # geo normalization + parent-city repair (MCP optional, OSM fallback)
+src/services/graphUpdater/mcpGeoBridge.ts      # optional MCP geo bridge
+src/services/graphUpdater/signalSanitizer.ts   # dedup/cleanup pass for slots
+src/services/graphUpdater/constraintClassifier.ts # constraint semantic classifier
+src/services/graphUpdater/slotTypes.ts         # slot state/compiler shared schema
+src/services/graphUpdater/slotStateMachine.ts  # slot-state machine (winner selection)
+src/services/graphUpdater/slotGraphCompiler.ts # slot-state -> graph patch compiler
+src/services/graphUpdater/slotFunctionCall.ts  # function-call slot extraction
 src/services/graphUpdater/common.ts            # patch parsing/temp id helpers
 src/services/patchGuard.ts   # strict patch sanitizer
 src/services/textSanitizer.ts# markdown-to-plain sanitizer

@@ -7,11 +7,17 @@ import {
   HARD_DAY_ACTION_RE,
   HARD_DAY_FORCE_RE,
   HARD_REQUIRE_RE,
+  LANGUAGE_CONSTRAINT_RE,
+  MEDICAL_HEALTH_RE,
   NATURE_TOPIC_RE,
   PLACE_STOPWORD_RE,
   PREFERENCE_MARKER_RE,
-  RISK_HEALTH_RE,
 } from "./constants.js";
+import {
+  classifyConstraintText,
+  dedupeClassifiedConstraints,
+  type GenericConstraintKind,
+} from "./constraintClassifier.js";
 import { cleanStatement, sentenceParts } from "./text.js";
 
 type BudgetMatch = { value: number; evidence: string; index: number };
@@ -42,20 +48,34 @@ type DateRangeCandidate = {
 export type IntentSignals = {
   peopleCount?: number;
   peopleEvidence?: string;
+  peopleImportance?: number;
   destination?: string;
   destinationEvidence?: string;
   destinations?: string[];
   destinationEvidences?: string[];
+  destinationImportance?: number;
+  destinationImportanceByCity?: Record<string, number>;
   durationDays?: number;
   durationEvidence?: string;
   durationStrength?: number;
+  durationImportance?: number;
   hasTemporalAnchor?: boolean;
   hasDurationUpdateCue?: boolean;
+  hasExplicitTotalCue?: boolean;
   cityDurations?: Array<{
     city: string;
     days: number;
     evidence: string;
     kind: "travel" | "meeting";
+  }>;
+  cityDurationImportanceByCity?: Record<string, number>;
+  subLocations?: Array<{
+    name: string;
+    parentCity?: string;
+    evidence: string;
+    kind?: "poi" | "venue" | "district" | "landmark" | "area" | "other";
+    hard?: boolean;
+    importance?: number;
   }>;
   criticalPresentation?: {
     days: number;
@@ -63,15 +83,35 @@ export type IntentSignals = {
     evidence: string;
     city?: string;
   };
+  criticalImportance?: number;
   durationUnknown?: boolean;
   durationUnknownEvidence?: string;
   budgetCny?: number;
   budgetEvidence?: string;
+  budgetImportance?: number;
   healthConstraint?: string;
   healthEvidence?: string;
+  healthImportance?: number;
+  languageConstraint?: string;
+  languageEvidence?: string;
+  languageImportance?: number;
+  genericConstraints?: Array<{
+    text: string;
+    evidence: string;
+    kind?: GenericConstraintKind;
+    hard?: boolean;
+    severity?: "medium" | "high" | "critical";
+    importance?: number;
+  }>;
   scenicPreference?: string;
   scenicPreferenceEvidence?: string;
   scenicPreferenceHard?: boolean;
+  scenicPreferenceImportance?: number;
+  lodgingPreference?: string;
+  lodgingPreferenceEvidence?: string;
+  lodgingPreferenceHard?: boolean;
+  lodgingPreferenceImportance?: number;
+  goalImportance?: number;
 };
 
 export function parseCnInt(raw: string): number | null {
@@ -104,6 +144,149 @@ export function parseCnInt(raw: string): number | null {
 
   if (map[s] != null) return map[s];
   return null;
+}
+
+function escapeRegExp(input: string): string {
+  return String(input || "").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function normalizeSubLocationName(raw: string): string {
+  let s = cleanStatement(raw, 40);
+  s = s.replace(/^(在|于|到|去|前往|飞到|抵达)\s*/i, "");
+  s = s.replace(/(看球|观赛|比赛|参观|游览|打卡|逛|散步|汇报|演讲|发表|讲论文|参加|参会|开会)$/i, "");
+  return s.trim();
+}
+
+function mergeSubLocations(
+  a?: IntentSignals["subLocations"],
+  b?: IntentSignals["subLocations"]
+): IntentSignals["subLocations"] | undefined {
+  const map = new Map<string, NonNullable<IntentSignals["subLocations"]>[number]>();
+  for (const x of [...(a || []), ...(b || [])]) {
+    const name = normalizeSubLocationName(x?.name || "");
+    if (!name) continue;
+    const parentCity = x?.parentCity ? normalizeDestination(x.parentCity) : undefined;
+    const key = `${name.toLowerCase()}|${(parentCity || "").toLowerCase()}`;
+    const cur = map.get(key);
+    const cand = {
+      name,
+      parentCity: parentCity && isLikelyDestinationCandidate(parentCity) ? parentCity : undefined,
+      evidence: cleanStatement(x?.evidence || name, 60),
+      kind: x?.kind,
+      hard: !!x?.hard,
+      importance: x?.importance,
+    };
+    if (!cur) {
+      map.set(key, cand);
+      continue;
+    }
+    map.set(key, {
+      ...cur,
+      evidence: cleanStatement(`${cur.evidence}; ${cand.evidence}`, 60),
+      hard: cur.hard || cand.hard,
+      importance: Math.max(Number(cur.importance) || 0, Number(cand.importance) || 0) || undefined,
+      kind: cur.kind || cand.kind,
+      parentCity: cur.parentCity || cand.parentCity,
+    });
+  }
+  return map.size ? Array.from(map.values()).slice(0, 12) : undefined;
+}
+
+function remapBySubLocationParent(
+  city: string,
+  subLocations?: IntentSignals["subLocations"]
+): string {
+  const c = normalizeDestination(city || "");
+  if (!c) return c;
+  if (!subLocations?.length) return c;
+  const hit = subLocations.find(
+    (x) =>
+      normalizeDestination(x.name || "") === c &&
+      x.parentCity &&
+      isLikelyDestinationCandidate(x.parentCity)
+  );
+  return hit?.parentCity ? normalizeDestination(hit.parentCity) : c;
+}
+
+function filterDestinationsBySubLocations(
+  destinations?: string[],
+  subLocations?: IntentSignals["subLocations"]
+): string[] | undefined {
+  if (!destinations?.length) return undefined;
+  if (!subLocations?.length) return destinations;
+  const childWithParent = new Set(
+    subLocations
+      .filter((x) => x.parentCity)
+      .map((x) => normalizeDestination(x.name || ""))
+      .filter(Boolean)
+  );
+  const parentCities = subLocations
+    .map((x) => (x.parentCity ? normalizeDestination(x.parentCity) : ""))
+    .filter((x) => x && isLikelyDestinationCandidate(x));
+
+  const out = destinations
+    .map((x) => normalizeDestination(x))
+    .filter((x) => x && isLikelyDestinationCandidate(x) && !childWithParent.has(x));
+  for (const p of parentCities) {
+    if (!out.includes(p)) out.push(p);
+  }
+  return out.length ? out.slice(0, 8) : undefined;
+}
+
+function extractSubLocationsFromText(
+  text: string,
+  destinationHints?: string[]
+): IntentSignals["subLocations"] {
+  const out: NonNullable<IntentSignals["subLocations"]> = [];
+  const t = String(text || "");
+  if (!t) return undefined;
+
+  const knownCities = (destinationHints || [])
+    .map((x) => normalizeDestination(x))
+    .filter((x) => x && isLikelyDestinationCandidate(x));
+
+  const cityMentions: Array<{ city: string; index: number }> = [];
+  if (knownCities.length) {
+    for (const city of knownCities) {
+      const cityEsc = escapeRegExp(city);
+      const re = new RegExp(cityEsc, "gi");
+      for (const m of t.matchAll(re)) {
+        cityMentions.push({ city, index: Number(m.index) || 0 });
+      }
+    }
+    cityMentions.sort((a, b) => a.index - b.index);
+  }
+
+  const activityPoiRe =
+    /(?:到|去|在|于|抵达)\s*([A-Za-z\u4e00-\u9fff]{2,24}?)(?=看球|观赛|比赛|参观|游览|看展|打卡|拍照|购物|吃饭|就餐|汇报|演讲|发表|讲论文|参加|参会|开会)/gi;
+  for (const m of t.matchAll(activityPoiRe)) {
+    const rawName = String(m[1] || "");
+    const name = normalizeSubLocationName(rawName);
+    if (!name) continue;
+
+    const idx = Number(m.index) || 0;
+    const nameAsCity = normalizeDestination(name);
+    if (knownCities.includes(nameAsCity)) continue;
+    let parentCity: string | undefined;
+    for (let i = cityMentions.length - 1; i >= 0; i -= 1) {
+      const c = cityMentions[i];
+      if (normalizeDestination(c.city) === nameAsCity) continue;
+      if (c.index <= idx && idx - c.index <= 64) {
+        parentCity = c.city;
+        break;
+      }
+    }
+    out.push({
+      name,
+      parentCity,
+      evidence: cleanStatement(m[0] || name, 60),
+      kind: "venue",
+      hard: false,
+      importance: 0.62,
+    });
+  }
+
+  return mergeSubLocations(undefined, out);
 }
 
 function pickLatestBudgetMatch(
@@ -303,7 +486,10 @@ function extractDurationCandidates(text: string): DurationCandidate[] {
     const isTotal = /(总共|一共|总计|全程|整个(?:行程|旅行)?|整体|行程时长|trip length|overall|total|in total)/i.test(ctx);
     const isMeeting = /(学术会议|会议|开会|chi|conference|workshop|forum|summit|参会)/i.test(ctx);
     const isCriticalEvent = hasHardDayReservationSignal(ctx);
-    const isSegment = /(米兰|巴塞罗那|停留|逛|游|玩|旅行|旅游|度假|行程|city|stay|香港|机场|飞到|前往)/i.test(ctx);
+    const isSegment =
+      /(停留|经过|先去|再去|之后去|前往|飞到|抵达|转机|行程段|逛|游|玩|旅行|旅游|度假|city|stay|flight|arrive|depart|before|after)/i.test(
+        ctx
+      );
 
     let kind: DurationCandidate["kind"] = "unknown";
     let strength = 0.55;
@@ -471,8 +657,10 @@ export function normalizeDestination(raw: string): string {
   let s = cleanStatement(raw, 24);
   s = s.replace(/^(在|于|到|去|从|飞到|前往|抵达)\s*/i, "");
   s = s.replace(/^(我想|想|想去|想到|想逛|逛一逛|逛逛|逛|游览|游玩|探索|体验|顺带|顺便|顺路|顺道)\s*/i, "");
+  s = s.replace(/^(的|在|于)\s*/i, "");
   s = s.replace(/(这座城市|这座城|这座|城市|城区|城)$/i, "");
   s = s.replace(/(之外|之内|以内|以内地区)$/i, "");
+  s = s.replace(/(?:前|后)$/i, "");
   // 迭代剥离尾部噪声，避免“巴塞罗那参加CHI”“米兰玩”这类污染目的地槽位。
   const tailNoiseRe =
     /(参加|参会|开会|会议|chi|conference|workshop|summit|论坛|峰会|玩|逛|旅游|旅行|游玩|出行|度假|计划|安排)$/i;
@@ -482,8 +670,10 @@ export function normalizeDestination(raw: string): string {
     changed = next !== s;
     s = next.trim();
   }
+  s = s.replace(/^的+/g, "").replace(/的+$/g, "");
   s = s.replace(/省/g, "").replace(/市/g, "");
   s = s.replace(COUNTRY_PREFIX_RE, "");
+  s = s.replace(/^的+/g, "");
   s = s.replace(/(旅游|旅行|游玩|出行|度假|参会|开会|会议|行程|计划|玩|逛)$/i, "");
   s = s.trim();
   return s;
@@ -493,11 +683,15 @@ export function isLikelyDestinationCandidate(x: string): boolean {
   const s = normalizeDestination(x);
   if (!s) return false;
   if (s.length < 2 || s.length > 16) return false;
+  if (/^的/.test(s)) return false;
+  if (/^(所以|因此|然后|另外|此外|这|那|此次|本次)/.test(s)) return false;
   if (!/^[A-Za-z\u4e00-\u9fff]+$/.test(s)) return false;
   if (DESTINATION_NOISE_RE.test(s)) return false;
   if (PLACE_STOPWORD_RE.test(s)) return false;
   if (/[A-Za-z]/.test(s) && /[\u4e00-\u9fff]/.test(s)) return false;
   if (/^[A-Za-z]+$/.test(s) && s.length <= 2) return false;
+  if (/(其中|其中有|其余|其他时候|海地区|该地区)/.test(s)) return false;
+  if (s.endsWith("地区") && s.length <= 4) return false;
   if (/(参加|参会|开会|会议|玩|旅游|旅行|度假|计划|安排)$/i.test(s)) return false;
   if (
     /心脏|母亲|父亲|家人|预算|人数|行程|计划|注意|高强度|旅行时|旅游时|需要|限制|不能|安排|在此之前|此前|之前|之后|然后|再从|我会|我要|参会|参加|开会|会议|飞到|出发|机场|航班|汇报|论文|报告|顺带|顺便|顺路|顺道/i.test(
@@ -511,6 +705,10 @@ export function isLikelyDestinationCandidate(x: string): boolean {
 
 function extractDestinationList(text: string): Array<{ city: string; evidence: string; index: number }> {
   const out: Array<{ city: string; evidence: string; index: number }> = [];
+  const scanText = text.replace(
+    /在此之前|在此之后|此前|此后|之前|之后|然后|再从|再去|再到|(前|后)\s*[0-9一二三四五六七八九十两]{1,2}\s*天/g,
+    (m) => "，".repeat(m.length)
+  );
   const push = (raw: string, evidence: string, index: number) => {
     const city = normalizeDestination(raw);
     if (!isLikelyDestinationCandidate(city)) return;
@@ -523,31 +721,32 @@ function extractDestinationList(text: string): Array<{ city: string; evidence: s
 
   const routeRe =
     /从\s*([A-Za-z\u4e00-\u9fff]{2,20})[^\n。；;，,]{0,10}?(?:飞|出发|前往|去|到)?[^\n。；;，,]{0,3}?到\s*([A-Za-z\u4e00-\u9fff]{2,20})/gi;
-  for (const m of text.matchAll(routeRe)) {
+  for (const m of scanText.matchAll(routeRe)) {
     if (!m?.[2]) continue;
     push(m[2], m[0] || m[2], Number(m.index) || 0);
   }
 
-  const goRe = /(?:去|到|前往|飞到|抵达)\s*([A-Za-z\u4e00-\u9fff]{2,14}?)(?=参加|参会|开会|会议|玩|旅游|旅行|度假|逛|游|[，。,；;！!？?\s]|$)/gi;
-  for (const m of text.matchAll(goRe)) {
+  const goRe =
+    /(?:去|到|前往|飞到|抵达)\s*([A-Za-z\u4e00-\u9fff]{2,14}?)(?=[0-9一二三四五六七八九十两]{1,3}\s*天|之前|之后|参加|参会|开会|会议|玩|旅游|旅行|度假|逛|游|[，。,；;！!？?\s]|$)/gi;
+  for (const m of scanText.matchAll(goRe)) {
     if (!m?.[1]) continue;
     push(m[1], m[1], Number(m.index) || 0);
   }
 
   const visitRe = /(?:逛|游览|游玩|探索|体验)\s*(?:一逛|一下|一圈|一遍)?\s*([A-Za-z\u4e00-\u9fff]{2,14})(?:这座城市|这座城|城市|城)?/gi;
-  for (const m of text.matchAll(visitRe)) {
+  for (const m of scanText.matchAll(visitRe)) {
     if (!m?.[1]) continue;
     push(m[1], m[1], Number(m.index) || 0);
   }
 
   const atMeetingRe = /(?:在|于)\s*([A-Za-z\u4e00-\u9fff]{2,20})\s*(?:参加|参会|开会|办会|召开)/gi;
-  for (const m of text.matchAll(atMeetingRe)) {
+  for (const m of scanText.matchAll(atMeetingRe)) {
     if (!m?.[1]) continue;
     push(m[1], m[1], Number(m.index) || 0);
   }
 
   const pairRe = /(?:去|到|在)?\s*([^\s，。,；;！!？?\d]{2,16})\s*(?:和|与|及|、|,|，)\s*([^\s，。,；;！!？?\d]{2,16})(?:旅游|旅行|出行|玩|度假|开会|会议|chi|conference|$)/gi;
-  for (const m of text.matchAll(pairRe)) {
+  for (const m of scanText.matchAll(pairRe)) {
     if (!m?.[1] || !m?.[2]) continue;
     const idx = Number(m.index) || 0;
     push(m[1], m[1], idx);
@@ -568,15 +767,39 @@ function extractDestinationList(text: string): Array<{ city: string; evidence: s
 
 function extractCityDurationSegments(text: string): Array<{ city: string; days: number; evidence: string; kind: "travel" | "meeting"; index: number }> {
   const out: Array<{ city: string; days: number; evidence: string; kind: "travel" | "meeting"; index: number }> = [];
+  const scanText = text.replace(
+    /在此之前|在此之后|此前|此后|之前|之后|然后|再从|再去|再到|(前|后)\s*[0-9一二三四五六七八九十两]{1,2}\s*天/g,
+    (m) => "，".repeat(m.length)
+  );
+  const hasRelativeDayOffset = (snippet: string, city: string) => {
+    const s = cleanStatement(snippet, 120);
+    if (!s || !city) return false;
+    const cityEsc = escapeRegExp(city);
+    const directRel = new RegExp(
+      `(?:在|于|到|去|飞到|抵达)?\\s*${cityEsc}\\s*(?:前|后)\\s*[0-9一二三四五六七八九十两]{1,2}\\s*天`,
+      "i"
+    );
+    if (directRel.test(s)) return true;
+    if (
+      /(在去|去|到|飞到|抵达).{0,16}(之前|之前会|之前先|之前再|前面|此前)/.test(s) &&
+      /(前|后)\s*[0-9一二三四五六七八九十两]{1,2}\s*天/.test(s)
+    ) {
+      return true;
+    }
+    return false;
+  };
+
   const travelHintRe =
-    /(?:在|于|到|去|飞到|抵达)\s*([A-Za-z\u4e00-\u9fff]{2,16})\s*(?:玩|逛|停留|待|旅行|旅游|参会|开会|参加)?\s*([0-9一二三四五六七八九十两]{1,3})\s*天/gi;
-  for (const m of text.matchAll(travelHintRe)) {
+    /(?:在|于|到|去|飞到|抵达)\s*([A-Za-z\u4e00-\u9fff]{2,16}?)(?=(?:玩|逛|停留|待|旅行|旅游|参会|开会|参加|[，。,；;！!？?\s]))\s*(?:玩|逛|停留|待|旅行|旅游|参会|开会|参加)?\s*([0-9一二三四五六七八九十两]{1,3})\s*天/gi;
+  for (const m of scanText.matchAll(travelHintRe)) {
     const city = normalizeDestination(m?.[1] || "");
     const days = parseCnInt(m?.[2] || "");
     if (!city || !days || days <= 0 || days > 60) continue;
     if (!isLikelyDestinationCandidate(city)) continue;
+    if (/^(所以|因此|然后|另外|此外|这|那|此次|本次)/.test(city)) continue;
     const idx = Number(m.index) || 0;
     const snippet = cleanStatement(m[0] || `${city}${days}天`, 80);
+    if (hasRelativeDayOffset(snippet, city)) continue;
     if (hasHardDayReservationSignal(snippet) && days <= 2) continue;
     const kind: "travel" | "meeting" =
       /(会议|开会|chi|conference|workshop|论坛|参会)/i.test(snippet) ? "meeting" : "travel";
@@ -590,18 +813,20 @@ function extractCityDurationSegments(text: string): Array<{ city: string; days: 
   }
 
   const re = /(?:在|于|到|去)?([^\s，。,；;！!？?\d]{2,14})[^\n。；;，,]{0,10}?([0-9一二三四五六七八九十两]{1,3})\s*天/g;
-  for (const m of text.matchAll(re)) {
+  for (const m of scanText.matchAll(re)) {
     const rawCity = m?.[1] || "";
     const rawDays = m?.[2] || "";
     const city = normalizeDestination(rawCity);
     const days = parseCnInt(rawDays);
     if (!city || !days || days <= 0 || days > 60) continue;
     if (!isLikelyDestinationCandidate(city)) continue;
+    if (/^(所以|因此|然后|另外|此外|这|那|此次|本次)/.test(city)) continue;
     if (DESTINATION_NOISE_RE.test(city) || PLACE_STOPWORD_RE.test(city)) continue;
 
     const idx = Number(m.index) || 0;
-    const right = Math.min(text.length, idx + String(m[0] || "").length + 26);
-    const ctx = cleanStatement(text.slice(idx, right), 80);
+    const right = Math.min(scanText.length, idx + String(m[0] || "").length + 26);
+    const ctx = cleanStatement(scanText.slice(idx, right), 80);
+    if (hasRelativeDayOffset(ctx, city)) continue;
     if (hasHardDayReservationSignal(ctx) && days <= 2) continue;
     const kind: "travel" | "meeting" =
       /(会议|开会|chi|conference|workshop|论坛)/i.test(ctx) ? "meeting" : "travel";
@@ -616,17 +841,18 @@ function extractCityDurationSegments(text: string): Array<{ city: string; days: 
   }
 
   const rangeRe =
-    /([0-9]{1,2})月([0-9]{1,2})日?\s*[-~到至]\s*([0-9]{1,2})日?[^\n。；;]{0,28}?(?:去|到|在|飞到)\s*([A-Za-z\u4e00-\u9fff]{2,20})[^\n。；;]{0,20}?(参加|参会|开会|会议|chi|conference|workshop|玩|旅游|旅行|度假)?/gi;
-  for (const m of text.matchAll(rangeRe)) {
-    const month = Number(m[1]);
+    /([0-9]{1,2})月([0-9]{1,2})日?\s*[-~到至]\s*(?:([0-9]{1,2})月)?([0-9]{1,2})日?[^\n。；;]{0,28}?(?:去|到|在|飞到)\s*([A-Za-z\u4e00-\u9fff]{2,20}?)(?=参加|参会|开会|会议|玩|旅游|旅行|度假|[，。,；;！!？?\s]|$)[^\n。；;]{0,20}?(参加|参会|开会|会议|chi|conference|workshop|玩|旅游|旅行|度假)?/gi;
+  for (const m of scanText.matchAll(rangeRe)) {
+    const monthA = Number(m[1]);
     const startDay = Number(m[2]);
-    const endDay = Number(m[3]);
-    const city = normalizeDestination(m[4] || "");
-    if (!Number.isFinite(month) || !Number.isFinite(startDay) || !Number.isFinite(endDay)) continue;
+    const monthB = Number(m[3]) || monthA;
+    const endDay = Number(m[4]);
+    const city = normalizeDestination(m[5] || "");
+    if (!Number.isFinite(monthA) || !Number.isFinite(startDay) || !Number.isFinite(monthB) || !Number.isFinite(endDay)) continue;
     if (!city || !isLikelyDestinationCandidate(city)) continue;
-    const days = calcRangeDays(month, startDay, month, endDay);
+    const days = calcRangeDays(monthA, startDay, monthB, endDay);
     if (days <= 0 || days > 31) continue;
-    const action = String(m[5] || "");
+    const action = String(m[6] || "");
     const kind: "travel" | "meeting" =
       /(参加|参会|开会|会议|chi|conference|workshop)/i.test(action) ? "meeting" : "travel";
     out.push({
@@ -638,10 +864,58 @@ function extractCityDurationSegments(text: string): Array<{ city: string; days: 
     });
   }
 
+  const cityMentions = Array.from(
+    scanText.matchAll(
+      /(?:在|于|去|到|飞到|抵达)\s*([A-Za-z\u4e00-\u9fff]{2,14}?)(?=玩|逛|停留|待|旅行|旅游|参会|开会|参加|[，。,；;！!？?\s（(]|$)/gi
+    )
+  )
+    .map((m) => {
+      const city = normalizeDestination(m?.[1] || "");
+      const idx = Number(m.index) || 0;
+      if (!city || !isLikelyDestinationCandidate(city)) return null;
+      return { city, index: idx };
+    })
+    .filter((x): x is { city: string; index: number } => !!x);
+  if (cityMentions.length) {
+    const fallbackDuration = extractDurationCandidates(scanText)
+      .filter((x) => x.days > 0 && x.days <= 30 && (x.kind === "segment" || x.kind === "meeting" || x.kind === "unknown"))
+      .sort((a, b) => a.index - b.index);
+    for (const d of fallbackDuration) {
+      const ctx = cleanStatement(
+        scanText.slice(Math.max(0, d.index - 28), Math.min(scanText.length, d.index + 34)),
+        100
+      );
+      if (hasHardDayReservationSignal(ctx) && d.days <= 2) continue;
+      let nearest: { city: string; index: number } | null = null;
+      let bestDist = Number.POSITIVE_INFINITY;
+      for (const c of cityMentions) {
+        const dist = d.index - c.index;
+        if (dist < 0 || dist > 42) continue;
+        if (dist < bestDist) {
+          bestDist = dist;
+          nearest = c;
+        }
+      }
+      if (!nearest) continue;
+      if (hasRelativeDayOffset(ctx, nearest.city)) continue;
+      out.push({
+        city: nearest.city,
+        days: d.days,
+        evidence: cleanStatement(`${nearest.city}${d.days}天`, 50),
+        kind: d.kind === "meeting" ? "meeting" : "travel",
+        index: d.index,
+      });
+    }
+  }
+
   const bestByCity = new Map<string, { city: string; days: number; evidence: string; kind: "travel" | "meeting"; index: number }>();
   for (const x of out) {
     const cur = bestByCity.get(x.city);
-    if (!cur || x.days > cur.days || x.kind === "meeting") bestByCity.set(x.city, x);
+    const shouldReplace =
+      !cur ||
+      x.days > cur.days ||
+      (x.days === cur.days && x.kind === "meeting" && cur.kind !== "meeting");
+    if (shouldReplace) bestByCity.set(x.city, x);
   }
   return Array.from(bestByCity.values()).sort((a, b) => a.index - b.index).slice(0, 6);
 }
@@ -705,10 +979,91 @@ export function normalizePreferenceStatement(raw: string) {
   };
 }
 
+export function normalizeLodgingPreferenceStatement(raw: string) {
+  const s = cleanStatement(raw, 160);
+  if (!s) return null;
+  const hasLodging =
+    /酒店|民宿|住宿|房型|星级|房费|住在|入住|住全程|全程住|酒店标准/i.test(s);
+  if (!hasLodging) return null;
+  const hard = HARD_REQUIRE_RE.test(s) || HARD_CONSTRAINT_RE.test(s);
+
+  if (/(五星|5星|豪华|高端)/i.test(s)) {
+    return {
+      statement: "住宿偏好：全程高星级酒店优先",
+      hard,
+      evidence: s,
+    };
+  }
+  if (/(经济型|省钱|便宜|青年旅舍|青旅)/i.test(s)) {
+    return {
+      statement: "住宿偏好：优先经济型住宿",
+      hard,
+      evidence: s,
+    };
+  }
+  return {
+    statement: "住宿偏好：需满足指定住宿标准",
+    hard,
+    evidence: s,
+  };
+}
+
+function clampImportance(x: any, fallback = 0.72) {
+  const n = Number(x);
+  if (!Number.isFinite(n)) return fallback;
+  return Math.max(0.35, Math.min(0.98, n));
+}
+
+function mergeImportanceMap(
+  a?: Record<string, number>,
+  b?: Record<string, number>
+): Record<string, number> | undefined {
+  const out: Record<string, number> = {};
+  for (const src of [a, b]) {
+    if (!src) continue;
+    for (const [k, v] of Object.entries(src)) {
+      if (!k) continue;
+      out[k] = Math.max(out[k] || 0, clampImportance(v, 0.72));
+    }
+  }
+  return Object.keys(out).length ? out : undefined;
+}
+
 export function pickHealthClause(userText: string): string | undefined {
   const parts = sentenceParts(userText);
-  const hit = parts.find((x) => RISK_HEALTH_RE.test(x));
+  const hit = parts.find((x) => MEDICAL_HEALTH_RE.test(x));
   return hit || undefined;
+}
+
+export function pickLanguageConstraintClause(userText: string): string | undefined {
+  const parts = sentenceParts(userText);
+  const hit = parts.find((x) => LANGUAGE_CONSTRAINT_RE.test(x));
+  return hit || undefined;
+}
+
+function isLanguageOnlyConstraint(text: string | undefined): boolean {
+  const s = cleanStatement(text || "", 120);
+  if (!s) return false;
+  return LANGUAGE_CONSTRAINT_RE.test(s) && !MEDICAL_HEALTH_RE.test(s);
+}
+
+function mergeGenericConstraints(
+  a?: IntentSignals["genericConstraints"],
+  b?: IntentSignals["genericConstraints"]
+): IntentSignals["genericConstraints"] | undefined {
+  const pool = dedupeClassifiedConstraints([...(a || []), ...(b || [])].map((x) => ({
+    text: cleanStatement(x?.text || "", 120),
+    evidence: cleanStatement(x?.evidence || x?.text || "", 80),
+    kind: x?.kind || "other",
+    hard: !!x?.hard,
+    severity: x?.severity,
+    importance: clampImportance(x?.importance, x?.hard ? 0.84 : 0.72),
+  })));
+  const out = pool
+    .filter((x) => !!x.text)
+    .sort((x, y) => (Number(y.importance) || 0) - (Number(x.importance) || 0))
+    .slice(0, 6);
+  return out.length ? out : undefined;
 }
 
 export function extractCriticalPresentationRequirement(text: string): { days: number; reason: string; evidence: string; city?: string } | null {
@@ -764,6 +1119,9 @@ export function extractIntentSignals(userText: string, opts?: { historyMode?: bo
   const out: IntentSignals = {};
   out.hasTemporalAnchor = /([0-9]{1,2})月([0-9]{1,2})日?(?:\s*[-~到至]\s*([0-9]{1,2})日?)?/.test(text);
   out.hasDurationUpdateCue = /改成|改为|更新|调整|变为|变成|改到|上调|下调|放宽|改成了|改成到|从.*改到/i.test(text);
+  out.hasExplicitTotalCue = /(总共|一共|全程|总计|整体|整个(?:行程|旅行)?|总行程|行程时长|trip length|overall|total|in total)/i.test(
+    text
+  );
 
   const peopleM =
     text.match(/(?:一家|全家|我们|同行)[^\d一二三四五六七八九十两]{0,4}([0-9一二三四五六七八九十两]{1,3})\s*(?:口|人)/) ||
@@ -784,7 +1142,9 @@ export function extractIntentSignals(userText: string, opts?: { historyMode?: bo
     out.destinationEvidence = destinationList[0].evidence;
   } else {
     const destM =
-      text.match(/(?:去|到|在)\s*([^\s，。,；;！!？?\d]{2,16}?)(?:玩|旅游|旅行|度假|出行|住|待|逛|，|。|,|$)/) ||
+      text.match(
+        /(?:去|到|在)\s*([^\s，。,；;！!？?\d]{2,16}?)(?:玩|旅游|旅行|度假|出行|住|待|逛|[0-9一二三四五六七八九十两]{1,3}\s*天|，|。|,|$)/
+      ) ||
       text.match(/目的地(?:是|为)?\s*([^\s，。,；;！!？?\d]{2,16})/);
     if (destM?.[1]) {
       const d = normalizeDestination(destM[1]);
@@ -794,6 +1154,16 @@ export function extractIntentSignals(userText: string, opts?: { historyMode?: bo
         out.destinations = [d];
         out.destinationEvidences = [out.destinationEvidence];
       }
+    }
+  }
+
+  const textSubLocations = extractSubLocationsFromText(text, out.destinations || []);
+  if (textSubLocations?.length) {
+    out.subLocations = textSubLocations;
+    out.destinations = filterDestinationsBySubLocations(out.destinations, out.subLocations);
+    if (out.destinations?.length) {
+      out.destination = out.destinations[0];
+      if (!out.destinationEvidence) out.destinationEvidence = out.destinationEvidences?.[0] || out.destinations[0];
     }
   }
 
@@ -807,7 +1177,7 @@ export function extractIntentSignals(userText: string, opts?: { historyMode?: bo
   const citySegments = extractCityDurationSegments(text);
   if (citySegments.length) {
     out.cityDurations = citySegments.map((x) => ({
-      city: x.city,
+      city: remapBySubLocationParent(x.city, out.subLocations),
       days: x.days,
       evidence: x.evidence,
       kind: x.kind,
@@ -815,8 +1185,9 @@ export function extractIntentSignals(userText: string, opts?: { historyMode?: bo
     for (const seg of citySegments) {
       if (!out.destinations) out.destinations = [];
       if (!out.destinationEvidences) out.destinationEvidences = [];
-      if (!out.destinations.includes(seg.city)) {
-        out.destinations.push(seg.city);
+      const mappedCity = remapBySubLocationParent(seg.city, out.subLocations);
+      if (!out.destinations.includes(mappedCity)) {
+        out.destinations.push(mappedCity);
         out.destinationEvidences.push(seg.evidence);
       }
     }
@@ -824,8 +1195,7 @@ export function extractIntentSignals(userText: string, opts?: { historyMode?: bo
     const sumDays = citySegments.reduce((acc, x) => acc + x.days, 0);
     const distinctCities = new Set(citySegments.map((x) => x.city)).size;
     const hasTravelSegment = citySegments.some((x) => x.kind === "travel");
-    const hasExplicitTotalCue = /(总共|一共|全程|总计|整体|整个(?:行程|旅行)?|总行程|行程时长)/.test(text);
-    const shouldPromoteAsTotal = hasExplicitTotalCue || (distinctCities >= 2 && hasTravelSegment);
+    const shouldPromoteAsTotal = !!out.hasExplicitTotalCue || (distinctCities >= 2 && hasTravelSegment);
     if (sumDays > 0 && shouldPromoteAsTotal) {
       const segmentStrength = citySegments.some((x) => x.kind === "meeting") ? 0.9 : 0.8;
       const shouldTakeSegments =
@@ -846,6 +1216,44 @@ export function extractIntentSignals(userText: string, opts?: { historyMode?: bo
     out.criticalPresentation = criticalPresentation;
   }
 
+  if (
+    (!out.cityDurations || out.cityDurations.length === 0) &&
+    out.durationDays &&
+    out.destination &&
+    isLikelyDestinationCandidate(out.destination) &&
+    !out.criticalPresentation &&
+    !hasHardDayReservationSignal(text)
+  ) {
+    const destinations = (out.destinations || []).filter((x) => isLikelyDestinationCandidate(x));
+    const hasSingleDestination = destinations.length <= 1;
+    if (hasSingleDestination) {
+      out.cityDurations = [
+        {
+          city: remapBySubLocationParent(out.destination, out.subLocations),
+          days: out.durationDays,
+          evidence: out.durationEvidence || `${out.destination}${out.durationDays}天`,
+          kind: /(会议|开会|chi|conference|workshop|论坛|参会)/i.test(text) ? "meeting" : "travel",
+        },
+      ];
+      if (!out.destinations?.includes(out.destination)) {
+        out.destinations = [...(out.destinations || []), out.destination];
+      }
+      if (!out.destinationEvidences?.length) {
+        out.destinationEvidences = [out.destinationEvidence || out.durationEvidence || out.destination];
+      }
+    }
+  }
+
+  if (out.subLocations?.length) {
+    out.destinations = filterDestinationsBySubLocations(out.destinations, out.subLocations);
+    if (out.cityDurations?.length) {
+      out.cityDurations = out.cityDurations
+        .map((x) => ({ ...x, city: remapBySubLocationParent(x.city, out.subLocations) }))
+        .filter((x) => !!x.city && isLikelyDestinationCandidate(x.city));
+    }
+    if (out.destinations?.length) out.destination = out.destinations[0];
+  }
+
   if (!out.durationDays && /几天|多少天|天数待定|时长待定/i.test(text)) {
     out.durationUnknown = true;
     const du = text.match(/几天|多少天|天数待定|时长待定/i);
@@ -863,12 +1271,68 @@ export function extractIntentSignals(userText: string, opts?: { historyMode?: bo
     out.healthConstraint = healthClause;
     out.healthEvidence = healthClause;
   }
+  const languageClause = pickLanguageConstraintClause(text);
+  if (languageClause) {
+    out.languageConstraint = languageClause;
+    out.languageEvidence = languageClause;
+  }
+
+  const genericConstraints: NonNullable<IntentSignals["genericConstraints"]> = [];
+  for (const part of sentenceParts(text)) {
+    const s = cleanStatement(part, 120);
+    if (!s) continue;
+    if (/^(预算(?:上限)?|总行程时长|行程时长|城市时长|停留时长|同行人数|目的地)[:：]/.test(s)) continue;
+    const likelyConstraintCue =
+      HARD_CONSTRAINT_RE.test(s) ||
+      HARD_REQUIRE_RE.test(s) ||
+      /签证|护照|入境|治安|安全|轮椅|无障碍|转机|换乘|托运|语言障碍|不会英语|翻译|visa|passport|safety|logistics/i.test(
+        s
+      );
+    if (!likelyConstraintCue) continue;
+    const c = classifyConstraintText({
+      text: s,
+      evidence: s,
+    });
+    if (!c) continue;
+    if (c.family === "health" && !out.healthConstraint) {
+      out.healthConstraint = c.text;
+      out.healthEvidence = c.evidence;
+      out.healthImportance = c.importance;
+      continue;
+    }
+    if (c.family === "language" && !out.languageConstraint) {
+      out.languageConstraint = c.text;
+      out.languageEvidence = c.evidence;
+      out.languageImportance = c.importance;
+      continue;
+    }
+    if (c.family === "generic") {
+      genericConstraints.push({
+        text: c.text,
+        evidence: c.evidence,
+        kind: c.kind,
+        hard: c.hard,
+        severity: c.severity,
+        importance: c.importance,
+      });
+    }
+  }
+  out.genericConstraints = mergeGenericConstraints(undefined, genericConstraints);
 
   const prefClause = sentenceParts(text).map(normalizePreferenceStatement).find(Boolean);
   if (prefClause) {
     out.scenicPreference = prefClause.statement;
     out.scenicPreferenceHard = prefClause.hard;
     out.scenicPreferenceEvidence = prefClause.evidence;
+    out.scenicPreferenceImportance = prefClause.hard ? 0.8 : 0.68;
+  }
+
+  const lodgingClause = sentenceParts(text).map(normalizeLodgingPreferenceStatement).find(Boolean);
+  if (lodgingClause) {
+    out.lodgingPreference = lodgingClause.statement;
+    out.lodgingPreferenceHard = lodgingClause.hard;
+    out.lodgingPreferenceEvidence = lodgingClause.evidence;
+    out.lodgingPreferenceImportance = lodgingClause.hard ? 0.82 : 0.66;
   }
 
   return out;
@@ -876,13 +1340,16 @@ export function extractIntentSignals(userText: string, opts?: { historyMode?: bo
 
 function mergeSignalsWithLatest(history: IntentSignals, latest: IntentSignals): IntentSignals {
   const out: IntentSignals = { ...history };
+  out.hasTemporalAnchor = !!history.hasTemporalAnchor;
+  out.hasDurationUpdateCue = !!history.hasDurationUpdateCue;
+  out.hasExplicitTotalCue = !!history.hasExplicitTotalCue;
 
   const mergeDestinations = (a?: string[], b?: string[]) => {
     const seen = new Set<string>();
     const result: string[] = [];
     for (const x of [...(a || []), ...(b || [])]) {
       const city = normalizeDestination(String(x || ""));
-      if (!city || seen.has(city)) continue;
+      if (!city || !isLikelyDestinationCandidate(city) || seen.has(city)) continue;
       seen.add(city);
       result.push(city);
     }
@@ -895,7 +1362,8 @@ function mergeSignalsWithLatest(history: IntentSignals, latest: IntentSignals): 
   ) => {
     const map = new Map<string, { city: string; days: number; evidence: string; kind: "travel" | "meeting" }>();
     for (const seg of [...(a || []), ...(b || [])]) {
-      const city = normalizeDestination(seg?.city || "");
+      const rawCity = normalizeDestination(seg?.city || "");
+      const city = remapBySubLocationParent(rawCity, mergeSubLocations(out.subLocations, latest.subLocations));
       const days = Number(seg?.days) || 0;
       if (!city || days <= 0 || days > 60) continue;
       if (!isLikelyDestinationCandidate(city)) continue;
@@ -907,27 +1375,61 @@ function mergeSignalsWithLatest(history: IntentSignals, latest: IntentSignals): 
         evidence: cleanStatement(seg?.evidence || `${city}${days}天`, 40),
         kind,
       };
-      if (!cur || cand.days > cur.days || cand.kind === "meeting") map.set(city, cand);
+      const shouldReplace =
+        !cur ||
+        cand.days > cur.days ||
+        (cand.days === cur.days && cand.kind === "meeting" && cur.kind !== "meeting");
+      if (shouldReplace) map.set(city, cand);
     }
     return map.size ? Array.from(map.values()).slice(0, 6) : undefined;
   };
+
+  out.destinations = mergeDestinations(out.destinations, undefined);
+  if (out.destination) {
+    const d = normalizeDestination(out.destination);
+    out.destination = d && isLikelyDestinationCandidate(d) ? d : undefined;
+  }
+  out.cityDurations = mergeCityDurations(undefined, out.cityDurations);
+  if (!out.destination && out.destinations?.length) out.destination = out.destinations[0];
+  out.subLocations = mergeSubLocations(out.subLocations, undefined);
 
   if (latest.peopleCount != null) {
     out.peopleCount = latest.peopleCount;
     out.peopleEvidence = latest.peopleEvidence || out.peopleEvidence;
   }
+  if (latest.peopleImportance != null) {
+    out.peopleImportance = clampImportance(latest.peopleImportance, out.peopleImportance || 0.72);
+  }
+
   out.destinations = mergeDestinations(out.destinations, latest.destinations);
   if (out.destinations?.length) {
     out.destination = out.destinations[0];
   }
-  if (latest.destination) {
-    out.destination = latest.destination;
-    out.destinationEvidence = latest.destinationEvidence || out.destinationEvidence;
-    out.destinations = mergeDestinations(out.destinations, [latest.destination]);
+  out.destinationImportanceByCity = mergeImportanceMap(
+    out.destinationImportanceByCity,
+    latest.destinationImportanceByCity
+  );
+  if (latest.destinationImportance != null) {
+    out.destinationImportance = clampImportance(
+      latest.destinationImportance,
+      out.destinationImportance || 0.8
+    );
   }
+  if (latest.destination) {
+    const normalizedLatestDestination = normalizeDestination(latest.destination);
+    if (normalizedLatestDestination && isLikelyDestinationCandidate(normalizedLatestDestination)) {
+      out.destination = normalizedLatestDestination;
+      out.destinationEvidence = latest.destinationEvidence || out.destinationEvidence;
+      out.destinations = mergeDestinations(out.destinations, [normalizedLatestDestination]);
+    }
+  }
+  out.subLocations = mergeSubLocations(out.subLocations, latest.subLocations);
+  out.hasTemporalAnchor = !!latest.hasTemporalAnchor || !!out.hasTemporalAnchor;
+  out.hasDurationUpdateCue = !!latest.hasDurationUpdateCue || !!out.hasDurationUpdateCue;
+  out.hasExplicitTotalCue = !!latest.hasExplicitTotalCue || !!out.hasExplicitTotalCue;
   const latestHasSnapshotDuration =
     latest.durationDays != null &&
-    (!!latest.hasTemporalAnchor || !!latest.hasDurationUpdateCue || (latest.cityDurations?.length || 0) > 0);
+    (!!latest.hasDurationUpdateCue || (!!latest.hasTemporalAnchor && !!latest.hasExplicitTotalCue));
 
   if (latest.cityDurations?.length) {
     out.cityDurations = latestHasSnapshotDuration
@@ -936,20 +1438,48 @@ function mergeSignalsWithLatest(history: IntentSignals, latest: IntentSignals): 
   } else {
     out.cityDurations = mergeCityDurations(out.cityDurations, latest.cityDurations);
   }
+  if (out.cityDurations?.length) {
+    out.cityDurations = out.cityDurations
+      .map((x) => ({ ...x, city: remapBySubLocationParent(x.city, out.subLocations) }))
+      .filter((x) => !!x.city && isLikelyDestinationCandidate(x.city));
+  }
+  out.destinations = filterDestinationsBySubLocations(
+    mergeDestinations(out.destinations, undefined),
+    out.subLocations
+  );
+  if (out.destinations?.length) out.destination = out.destinations[0];
+  out.cityDurationImportanceByCity = mergeImportanceMap(
+    out.cityDurationImportanceByCity,
+    latest.cityDurationImportanceByCity
+  );
 
   if (latest.criticalPresentation) {
     out.criticalPresentation = latest.criticalPresentation;
+  }
+  if (latest.criticalImportance != null) {
+    out.criticalImportance = clampImportance(
+      latest.criticalImportance,
+      out.criticalImportance || 0.96
+    );
   }
 
   if (latest.durationDays != null) {
     const latestStrength = Number(latest.durationStrength) || 0.55;
     const historyStrength = Number(out.durationStrength) || 0;
+    const mergedSegSum = (out.cityDurations || []).reduce((acc, x) => acc + (Number(x.days) || 0), 0);
+    const mergedSegDistinct = new Set((out.cityDurations || []).map((x) => normalizeDestination(x.city))).size;
+    const shouldProtectSegmentTotal =
+      !latest.hasDurationUpdateCue &&
+      mergedSegDistinct >= 2 &&
+      mergedSegSum > 0 &&
+      latest.durationDays < mergedSegSum;
     const tinyCriticalOnly =
       !!latest.criticalPresentation &&
       latest.durationDays <= 2 &&
       !latest.hasTemporalAnchor &&
       !latest.hasDurationUpdateCue;
     const shouldUseLatest =
+      !shouldProtectSegmentTotal &&
       !tinyCriticalOnly &&
       (out.durationDays == null ||
         latestHasSnapshotDuration ||
@@ -963,6 +1493,12 @@ function mergeSignalsWithLatest(history: IntentSignals, latest: IntentSignals): 
       out.durationStrength = latestStrength;
       out.durationUnknown = false;
       out.durationUnknownEvidence = undefined;
+      if (latest.durationImportance != null) {
+        out.durationImportance = clampImportance(
+          latest.durationImportance,
+          out.durationImportance || 0.78
+        );
+      }
     }
   } else if (latest.durationUnknown) {
     out.durationUnknown = true;
@@ -974,11 +1510,12 @@ function mergeSignalsWithLatest(history: IntentSignals, latest: IntentSignals): 
     const distinctCities = new Set(out.cityDurations.map((x) => x.city)).size;
     const hasTravelSegment = out.cityDurations.some((x) => x.kind === "travel");
     const canPromoteBySegments = distinctCities >= 2 && hasTravelSegment;
-    const segStrength = out.cityDurations.some((x) => x.kind === "meeting") ? 0.9 : 0.82;
+    const segStrength = out.cityDurations.some((x) => x.kind === "meeting") ? 0.9 : 0.84;
     const shouldTakeSeg =
       canPromoteBySegments &&
       segSum > 0 &&
       (!out.durationDays ||
+        latestHasSnapshotDuration ||
         segSum > out.durationDays ||
         segStrength >= (Number(out.durationStrength) || 0) + 0.08 ||
         ((Number(out.durationStrength) || 0) <= 0.78 && Math.abs(segSum - (out.durationDays || 0)) <= 2));
@@ -1000,14 +1537,79 @@ function mergeSignalsWithLatest(history: IntentSignals, latest: IntentSignals): 
     out.budgetCny = latest.budgetCny;
     out.budgetEvidence = latest.budgetEvidence || out.budgetEvidence;
   }
-  if (latest.healthConstraint) {
-    out.healthConstraint = latest.healthConstraint;
-    out.healthEvidence = latest.healthEvidence || out.healthEvidence;
+  if (latest.budgetImportance != null) {
+    out.budgetImportance = clampImportance(
+      latest.budgetImportance,
+      out.budgetImportance || 0.86
+    );
   }
+  if (latest.healthConstraint) {
+    const latestHealth = cleanStatement(latest.healthConstraint, 120);
+    if (isLanguageOnlyConstraint(latestHealth)) {
+      out.languageConstraint = latestHealth;
+      out.languageEvidence = latest.healthEvidence || latest.healthConstraint || out.languageEvidence;
+      out.languageImportance = clampImportance(
+        latest.healthImportance,
+        latest.languageImportance || out.languageImportance || 0.82
+      );
+    } else {
+      out.healthConstraint = latestHealth;
+      out.healthEvidence = latest.healthEvidence || out.healthEvidence;
+    }
+  }
+  if (latest.healthImportance != null && !isLanguageOnlyConstraint(latest.healthConstraint)) {
+    out.healthImportance = clampImportance(
+      latest.healthImportance,
+      out.healthImportance || 0.96
+    );
+  }
+  if (latest.languageConstraint) {
+    out.languageConstraint = cleanStatement(latest.languageConstraint, 120);
+    out.languageEvidence = latest.languageEvidence || out.languageEvidence;
+  }
+  if (latest.languageImportance != null) {
+    out.languageImportance = clampImportance(
+      latest.languageImportance,
+      out.languageImportance || 0.82
+    );
+  }
+  if (out.healthConstraint && isLanguageOnlyConstraint(out.healthConstraint)) {
+    out.languageConstraint = out.languageConstraint || out.healthConstraint;
+    out.languageEvidence = out.languageEvidence || out.healthEvidence || out.healthConstraint;
+    out.languageImportance = clampImportance(
+      out.languageImportance,
+      out.healthImportance || 0.82
+    );
+    out.healthConstraint = undefined;
+    out.healthEvidence = undefined;
+    out.healthImportance = undefined;
+  }
+  out.genericConstraints = mergeGenericConstraints(out.genericConstraints, latest.genericConstraints);
   if (latest.scenicPreference) {
     out.scenicPreference = latest.scenicPreference;
     out.scenicPreferenceEvidence = latest.scenicPreferenceEvidence || out.scenicPreferenceEvidence;
     out.scenicPreferenceHard = latest.scenicPreferenceHard;
+  }
+  if (latest.scenicPreferenceImportance != null) {
+    out.scenicPreferenceImportance = clampImportance(
+      latest.scenicPreferenceImportance,
+      out.scenicPreferenceImportance || 0.68
+    );
+  }
+  if (latest.lodgingPreference) {
+    out.lodgingPreference = latest.lodgingPreference;
+    out.lodgingPreferenceEvidence =
+      latest.lodgingPreferenceEvidence || out.lodgingPreferenceEvidence;
+    out.lodgingPreferenceHard = latest.lodgingPreferenceHard;
+  }
+  if (latest.lodgingPreferenceImportance != null) {
+    out.lodgingPreferenceImportance = clampImportance(
+      latest.lodgingPreferenceImportance,
+      out.lodgingPreferenceImportance || 0.66
+    );
+  }
+  if (latest.goalImportance != null) {
+    out.goalImportance = clampImportance(latest.goalImportance, out.goalImportance || 0.82);
   }
 
   return out;
@@ -1017,4 +1619,8 @@ export function extractIntentSignalsWithRecency(historyText: string, latestUserT
   const fromHistory = extractIntentSignals(historyText, { historyMode: true });
   const fromLatest = extractIntentSignals(latestUserText);
   return mergeSignalsWithLatest(fromHistory, fromLatest);
+}
+
+export function mergeIntentSignals(base: IntentSignals, incoming: IntentSignals): IntentSignals {
+  return mergeSignalsWithLatest(base, incoming);
 }

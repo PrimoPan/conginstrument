@@ -9,6 +9,27 @@ export type Status = "proposed" | "confirmed" | "rejected" | "disputed";
 
 // ✅ 新增：风险等级（给前端映射颜色用）
 export type Severity = "low" | "medium" | "high" | "critical";
+export type MotifType = "belief" | "hypothesis" | "expectation" | "cognitive_step";
+
+export type MotifStructure = {
+  premises?: string[];
+  inference?: string;
+  conclusion?: string;
+};
+
+export type MotifEvidence = {
+  id?: string;
+  quote: string;
+  source?: string;
+  link?: string;
+};
+
+export type RevisionRecord = {
+  at: string;
+  action: "created" | "updated" | "replaced" | "merged";
+  reason?: string;
+  by?: "user" | "assistant" | "system";
+};
 
 export type ConceptNode = {
   id: string;
@@ -30,6 +51,17 @@ export type ConceptNode = {
   value?: any;
   evidenceIds?: string[];
   sourceMsgIds?: string[];
+
+  // PRD: motif/intent metadata
+  motifType?: MotifType;
+  claim?: string;
+  structure?: MotifStructure;
+  evidence?: MotifEvidence[];
+  linkedIntentIds?: string[];
+  rebuttalPoints?: string[];
+  revisionHistory?: RevisionRecord[];
+  priority?: number;
+  successCriteria?: string[];
 };
 
 export type EdgeType = "enable" | "constraint" | "determine" | "conflicts_with";
@@ -65,6 +97,7 @@ const ALLOW_DELETE = process.env.CI_ALLOW_DELETE === "1";
 const ALLOWED_STATUS = new Set<Status>(["proposed", "confirmed", "rejected", "disputed"]);
 const ALLOWED_STRENGTH = new Set<Strength>(["hard", "soft"]);
 const ALLOWED_SEVERITY = new Set<Severity>(["low", "medium", "high", "critical"]);
+const ALLOWED_MOTIF_TYPES = new Set<MotifType>(["belief", "hypothesis", "expectation", "cognitive_step"]);
 const ALLOWED_NODE_TYPES = new Set<ConceptType>([
   "goal",
   "constraint",
@@ -78,7 +111,8 @@ const HEALTH_RE =
   /心脏|心肺|冠心|心血管|高血压|糖尿病|哮喘|慢性病|手术|过敏|孕|老人|老年|儿童|行动不便|不能爬山|不能久走|危险|安全|急救|摔倒|health|medical|heart|cardiac|safety|risk/i;
 const BUDGET_HINT_RE = /预算|花费|费用|开销|贵|便宜|酒店|住宿|房费|星级/i;
 const DURATION_HINT_RE = /时长|几天|多少天|周|日程|行程|节奏/i;
-const DESTINATION_HINT_RE = /目的地|城市|路线|交通|高铁|飞机|景点|昆明|大理|丽江|香格里拉|云南|江苏|盐城/i;
+const DESTINATION_HINT_RE =
+  /目的地|城市|国家|地区|路线|交通|高铁|飞机|机场|景点|出发|到达|行程段|flight|train|airport|city|destination/i;
 const PEOPLE_HINT_RE = /同行|一家|家人|父亲|母亲|老人|儿童|三口|两人|人数/i;
 const PREFERENCE_HINT_RE = /偏好|喜欢|不喜欢|感兴趣|人文|自然|文化|历史/i;
 const GENERIC_RESOURCE_HINT_RE = /预算|经费|成本|资源|工时|算力|内存|gpu|人天|cost|budget|resource|cpu|memory/i;
@@ -86,7 +120,7 @@ const GENERIC_TIMELINE_HINT_RE = /截止|deadline|里程碑|周期|排期|冲刺
 const GENERIC_STAKEHOLDER_HINT_RE = /用户|客户|老板|团队|同事|角色|stakeholder|owner|reviewer|审批/i;
 const GENERIC_RISK_HINT_RE = /风险|故障|安全|合规|隐私|法律|阻塞|依赖|上线事故|risk|security|privacy|compliance/i;
 const DESTINATION_BAD_TOKEN_RE =
-  /我|你|他|她|我们|时间|之外|之前|之后|必须|到场|安排|计划|pre|chi|会议|汇报|报告|论文|一天|两天|三天|四天|五天|顺带|顺便|顺路|顺道/i;
+  /我|你|他|她|我们|时间|之外|之前|之后|必须|到场|安排|计划|pre|chi|会议|汇报|报告|论文|一天|两天|三天|四天|五天|顺带|顺便|顺路|顺道|其中|其中有|其余|其他时候|海地区|该地区|看球|观赛|比赛|演讲|发表|打卡|参观|游览|所以这|因此|另外|此外/i;
 
 type TopologyTuning = {
   lambdaSparsity: number;
@@ -102,11 +136,43 @@ function normalizePlaceToken(raw: string): string {
     .toLowerCase();
 }
 
+function canonicalizeStructuredPlace(raw: string): string {
+  let s = cleanText(raw);
+  if (!s) return "";
+  s = s
+    .replace(/^(在|于|去|到|前往|飞到|抵达)\s*/i, "")
+    .replace(/(前|后)\s*[0-9一二三四五六七八九十两]{0,2}\s*天?$/i, "")
+    .replace(/^的+/, "")
+    .replace(/的+$/g, "")
+    .trim();
+
+  const sameRepeat = s.match(/^(.{2,20})的\1$/);
+  if (sameRepeat?.[1]) s = cleanText(sameRepeat[1]);
+
+  const dePair = s.match(/^(.{1,20})的(.{2,24})$/);
+  if (dePair?.[1] && dePair?.[2]) {
+    const left = cleanText(dePair[1]);
+    const right = cleanText(dePair[2]);
+    if (
+      right &&
+      (left === right ||
+        /(中国|美国|英国|法国|德国|意大利|西班牙|葡萄牙|荷兰|比利时|瑞士|奥地利|日本|韩国|新加坡|泰国|马来西亚|印度尼西亚|澳大利亚|加拿大|新西兰|阿联酋|欧洲|亚洲|非洲|北美|南美|中东)/i.test(
+          left
+        ))
+    ) {
+      s = right;
+    }
+  }
+
+  return s.replace(/^的+/, "").replace(/的+$/g, "").trim();
+}
+
 function slotFamily(slot: string | null | undefined): string {
   if (!slot) return "none";
   if (slot.startsWith("slot:destination:")) return "destination";
   if (slot.startsWith("slot:duration_city:")) return "duration_city";
   if (slot.startsWith("slot:meeting_critical:")) return "meeting_critical";
+  if (slot.startsWith("slot:constraint:")) return "generic_constraint";
   if (slot === "slot:duration_total") return "duration_total";
   if (slot === "slot:duration_meeting") return "duration_meeting";
   if (slot === "slot:people") return "people";
@@ -114,6 +180,7 @@ function slotFamily(slot: string | null | undefined): string {
   if (slot === "slot:lodging") return "lodging";
   if (slot === "slot:scenic_preference") return "scenic_preference";
   if (slot === "slot:health") return "health";
+  if (slot === "slot:language") return "language";
   if (slot === "slot:goal") return "goal";
   return slot;
 }
@@ -146,6 +213,76 @@ function normalizeSeverity(x: any): Severity | undefined {
   return undefined;
 }
 
+function normalizeStringArray(input: any, max = 12): string[] | undefined {
+  if (!Array.isArray(input)) return undefined;
+  const out = input.map((x) => cleanText(x)).filter(Boolean).slice(0, max);
+  return out.length ? out : undefined;
+}
+
+function normalizeMotifType(x: any): MotifType | undefined {
+  const s = cleanText(x).toLowerCase();
+  if (!s) return undefined;
+  if (ALLOWED_MOTIF_TYPES.has(s as MotifType)) return s as MotifType;
+  return undefined;
+}
+
+function normalizeMotifStructure(input: any): MotifStructure | undefined {
+  if (!input || typeof input !== "object") return undefined;
+  const premises = normalizeStringArray((input as any).premises, 8);
+  const inference = cleanText((input as any).inference);
+  const conclusion = cleanText((input as any).conclusion);
+  const out: MotifStructure = {};
+  if (premises) out.premises = premises;
+  if (inference) out.inference = inference;
+  if (conclusion) out.conclusion = conclusion;
+  return Object.keys(out).length ? out : undefined;
+}
+
+function normalizeMotifEvidence(input: any): MotifEvidence[] | undefined {
+  if (!Array.isArray(input)) return undefined;
+  const out: MotifEvidence[] = [];
+  for (const row of input) {
+    if (!row || typeof row !== "object") continue;
+    const quote = cleanText((row as any).quote);
+    if (!quote) continue;
+    const item: MotifEvidence = { quote };
+    const id = cleanText((row as any).id);
+    const source = cleanText((row as any).source);
+    const link = cleanText((row as any).link);
+    if (id) item.id = id;
+    if (source) item.source = source;
+    if (link) item.link = link;
+    out.push(item);
+    if (out.length >= 8) break;
+  }
+  return out.length ? out : undefined;
+}
+
+function normalizeRevisionHistory(input: any): RevisionRecord[] | undefined {
+  if (!Array.isArray(input)) return undefined;
+  const out: RevisionRecord[] = [];
+  const allowedAction = new Set<RevisionRecord["action"]>(["created", "updated", "replaced", "merged"]);
+  const allowedBy = new Set<RevisionRecord["by"]>(["user", "assistant", "system"]);
+
+  for (const row of input) {
+    if (!row || typeof row !== "object") continue;
+    const at = cleanText((row as any).at);
+    const actionRaw = cleanText((row as any).action).toLowerCase();
+    if (!at || !allowedAction.has(actionRaw as RevisionRecord["action"])) continue;
+    const item: RevisionRecord = {
+      at,
+      action: actionRaw as RevisionRecord["action"],
+    };
+    const reason = cleanText((row as any).reason);
+    const byRaw = cleanText((row as any).by).toLowerCase();
+    if (reason) item.reason = reason;
+    if (allowedBy.has(byRaw as RevisionRecord["by"])) item.by = byRaw as RevisionRecord["by"];
+    out.push(item);
+    if (out.length >= 10) break;
+  }
+  return out.length ? out : undefined;
+}
+
 function slotKeyOfNode(node: ConceptNode): string | null {
   const s = cleanText(node.statement);
   if (!s) return null;
@@ -161,9 +298,11 @@ function slotKeyOfNode(node: ConceptNode): string | null {
   }
   if ((node.type === "fact" || node.type === "constraint") && /^(?:城市时长|停留时长)[:：]\s*.+\s+[0-9]{1,3}\s*天$/.test(s)) {
     const m = s.match(/^(?:城市时长|停留时长)[:：]\s*(.+?)\s+([0-9]{1,3})\s*天$/);
-    const rawCity = cleanText(m?.[1] || "");
+    const rawCity = canonicalizeStructuredPlace(m?.[1] || "");
     if (!rawCity) return null;
     if (DESTINATION_BAD_TOKEN_RE.test(rawCity)) return null;
+    if (/^的/.test(rawCity)) return null;
+    if (/(前|后)$/.test(rawCity)) return null;
     if (/[A-Za-z]/.test(rawCity) && /[\u4e00-\u9fff]/.test(rawCity)) return null;
     const city = normalizePlaceToken(rawCity);
     if (city) return `slot:duration_city:${city}`;
@@ -172,9 +311,11 @@ function slotKeyOfNode(node: ConceptNode): string | null {
   if (node.type === "fact" && /^同行人数[:：]\s*[0-9]{1,3}\s*人$/.test(s)) return "slot:people";
   if (node.type === "fact" && /^目的地[:：]\s*.+$/.test(s)) {
     const m = s.match(/^目的地[:：]\s*(.+)$/);
-    const rawCity = cleanText(m?.[1] || "");
+    const rawCity = canonicalizeStructuredPlace(m?.[1] || "");
     if (!rawCity) return null;
     if (DESTINATION_BAD_TOKEN_RE.test(rawCity)) return null;
+    if (/^的/.test(rawCity)) return null;
+    if (/(前|后)$/.test(rawCity)) return null;
     if (/[A-Za-z]/.test(rawCity) && /[\u4e00-\u9fff]/.test(rawCity)) return null;
     const city = normalizePlaceToken(rawCity);
     if (city) return `slot:destination:${city}`;
@@ -188,6 +329,12 @@ function slotKeyOfNode(node: ConceptNode): string | null {
       /(五星|四星|三星).{0,6}(酒店)/.test(s))
   ) {
     return "slot:lodging";
+  }
+  if (node.type === "constraint" && /^语言约束[:：]\s*.+$/.test(s)) return "slot:language";
+  if (node.type === "constraint" && /^(关键约束|法律约束|安全约束|出行约束|行程约束)[:：]\s*.+$/.test(s)) {
+    const m = s.match(/^(?:关键约束|法律约束|安全约束|出行约束|行程约束)[:：]\s*(.+)$/);
+    const detail = normalizePlaceToken((m?.[1] || "constraint").slice(0, 28));
+    return `slot:constraint:${detail || "default"}`;
   }
   if (node.type === "constraint" && HEALTH_RE.test(s)) return "slot:health";
   return null;
@@ -311,6 +458,42 @@ function compactSingletonSlots(
     }
   }
 
+  return changed;
+}
+
+function pruneInvalidStructuredNodes(
+  nodesById: Map<string, ConceptNode>,
+  edgesById: Map<string, ConceptEdge>
+): boolean {
+  let changed = false;
+  for (const [nid, node] of nodesById.entries()) {
+    const s = cleanText(node.statement);
+    if (!s) continue;
+
+    let invalid = false;
+    const dest = s.match(/^目的地[:：]\s*(.+)$/);
+    if (dest?.[1]) {
+      const city = cleanText(dest[1]);
+      if (!city || DESTINATION_BAD_TOKEN_RE.test(city) || /^的/.test(city)) invalid = true;
+      if (/地区$/.test(city) && city.length <= 4) invalid = true;
+      if (/(前|后)$/.test(city)) invalid = true;
+    }
+
+    const cityDur = s.match(/^(?:城市时长|停留时长)[:：]\s*(.+?)\s+[0-9]{1,3}\s*天$/);
+    if (cityDur?.[1]) {
+      const city = cleanText(cityDur[1]);
+      if (!city || DESTINATION_BAD_TOKEN_RE.test(city) || /^的/.test(city)) invalid = true;
+      if (/地区$/.test(city) && city.length <= 4) invalid = true;
+      if (/(前|后)$/.test(city)) invalid = true;
+    }
+
+    if (!invalid) continue;
+    nodesById.delete(nid);
+    changed = true;
+    for (const [eid, e] of edgesById.entries()) {
+      if (e.from === nid || e.to === nid) edgesById.delete(eid);
+    }
+  }
   return changed;
 }
 
@@ -1199,6 +1382,17 @@ function normalizeNodeForInsert(n: ConceptNode): ConceptNode | null {
   const severity = normalizeSeverity((n as any).severity);
   const importance = n.importance != null ? clamp01(n.importance, 0.5) : undefined;
   const tags = normalizeTags((n as any).tags);
+  const motifType = normalizeMotifType((n as any).motifType);
+  const claim = cleanText((n as any).claim);
+  const structure = normalizeMotifStructure((n as any).structure);
+  const evidence = normalizeMotifEvidence((n as any).evidence);
+  const linkedIntentIds = normalizeStringArray((n as any).linkedIntentIds, 8);
+  const rebuttalPoints = normalizeStringArray((n as any).rebuttalPoints, 8);
+  const revisionHistory = normalizeRevisionHistory((n as any).revisionHistory);
+  const priority = n.priority != null ? clamp01(n.priority, 0.65) : undefined;
+  const successCriteria = normalizeStringArray((n as any).successCriteria, 8);
+  const evidenceIds = normalizeStringArray((n as any).evidenceIds, 12);
+  const sourceMsgIds = normalizeStringArray((n as any).sourceMsgIds, 12);
   const layer =
     normalizeNodeLayer((n as any).layer) ||
     inferNodeLayer({
@@ -1223,6 +1417,19 @@ function normalizeNodeForInsert(n: ConceptNode): ConceptNode | null {
     severity,
     importance,
     tags,
+    key: n.key != null ? cleanText(n.key) : undefined,
+    value: n.value,
+    evidenceIds,
+    sourceMsgIds,
+    motifType,
+    claim: claim || undefined,
+    structure,
+    evidence,
+    linkedIntentIds,
+    rebuttalPoints,
+    revisionHistory,
+    priority,
+    successCriteria,
   };
 }
 
@@ -1243,6 +1450,85 @@ function normalizeEdgeForInsert(e: ConceptEdge): ConceptEdge | null {
     type: type as EdgeType,
     confidence: clamp01(e.confidence, 0.6),
     phi: e.phi != null ? cleanText(e.phi) : undefined,
+  };
+}
+
+/**
+ * 用于“前端整图编辑后保存”场景：
+ * - 仅做字段合法化、ID 修复、悬挂边过滤、重复边去重
+ * - 不做槽位压缩/拓扑重平衡，尽量保留用户手工结构
+ */
+export function normalizeGraphSnapshot(input: any, base?: { id?: string; version?: number }): CDG {
+  const rawNodes = Array.isArray(input?.nodes) ? input.nodes : [];
+  const rawEdges = Array.isArray(input?.edges) ? input.edges : [];
+
+  const nodes: ConceptNode[] = [];
+  const nodeIdRemap = new Map<string, string>();
+  const usedNodeIds = new Set<string>();
+
+  for (const rawNode of rawNodes) {
+    if (!rawNode || typeof rawNode !== "object") continue;
+
+    const originalId = cleanText((rawNode as any).id);
+    let candidateId = originalId || `n_${randomUUID()}`;
+    if (usedNodeIds.has(candidateId)) candidateId = `n_${randomUUID()}`;
+
+    const normalized = normalizeNodeForInsert({
+      ...(rawNode as any),
+      id: candidateId,
+    } as ConceptNode);
+    if (!normalized) continue;
+
+    let finalId = normalized.id;
+    if (usedNodeIds.has(finalId)) {
+      finalId = `n_${randomUUID()}`;
+      normalized.id = finalId;
+    }
+
+    usedNodeIds.add(finalId);
+    if (originalId && originalId !== finalId) nodeIdRemap.set(originalId, finalId);
+    nodes.push(normalized);
+  }
+
+  const validNodeIds = new Set(nodes.map((n) => n.id));
+  const edges: ConceptEdge[] = [];
+  const usedEdgeIds = new Set<string>();
+  const edgeSigSet = new Set<string>();
+
+  for (const rawEdge of rawEdges) {
+    if (!rawEdge || typeof rawEdge !== "object") continue;
+
+    const rawFrom = cleanText((rawEdge as any).from);
+    const rawTo = cleanText((rawEdge as any).to);
+    const from = nodeIdRemap.get(rawFrom) || rawFrom;
+    const to = nodeIdRemap.get(rawTo) || rawTo;
+    if (!validNodeIds.has(from) || !validNodeIds.has(to)) continue;
+
+    const rawId = cleanText((rawEdge as any).id);
+    let edgeId = rawId || `e_${randomUUID()}`;
+    if (usedEdgeIds.has(edgeId)) edgeId = `e_${randomUUID()}`;
+
+    const normalized = normalizeEdgeForInsert({
+      ...(rawEdge as any),
+      id: edgeId,
+      from,
+      to,
+    } as ConceptEdge);
+    if (!normalized) continue;
+
+    const sig = edgeSignature(normalized.from, normalized.to, normalized.type);
+    if (edgeSigSet.has(sig)) continue;
+
+    edgeSigSet.add(sig);
+    usedEdgeIds.add(normalized.id);
+    edges.push(normalized);
+  }
+
+  return {
+    id: cleanText(base?.id || input?.id || ""),
+    version: Number(base?.version || input?.version || 0),
+    nodes,
+    edges,
   };
 }
 
@@ -1288,8 +1574,22 @@ function normalizeNodePatch(patch: Partial<ConceptNode>): Partial<ConceptNode> {
   // 预留字段（如果你未来想让 LLM 更新结构化信息）
   if (patch.key != null) out.key = cleanText(patch.key);
   if (patch.value !== undefined) out.value = patch.value;
-  if (patch.evidenceIds != null && Array.isArray(patch.evidenceIds)) out.evidenceIds = patch.evidenceIds.map(String).slice(0, 12);
-  if (patch.sourceMsgIds != null && Array.isArray(patch.sourceMsgIds)) out.sourceMsgIds = patch.sourceMsgIds.map(String).slice(0, 12);
+  if (patch.evidenceIds != null) out.evidenceIds = normalizeStringArray(patch.evidenceIds, 12);
+  if (patch.sourceMsgIds != null) out.sourceMsgIds = normalizeStringArray(patch.sourceMsgIds, 12);
+
+  if ((patch as any).motifType != null) (out as any).motifType = normalizeMotifType((patch as any).motifType);
+  if ((patch as any).claim != null) (out as any).claim = cleanText((patch as any).claim) || undefined;
+  if ((patch as any).structure != null) (out as any).structure = normalizeMotifStructure((patch as any).structure);
+  if ((patch as any).evidence != null) (out as any).evidence = normalizeMotifEvidence((patch as any).evidence);
+  if ((patch as any).linkedIntentIds != null)
+    (out as any).linkedIntentIds = normalizeStringArray((patch as any).linkedIntentIds, 8);
+  if ((patch as any).rebuttalPoints != null)
+    (out as any).rebuttalPoints = normalizeStringArray((patch as any).rebuttalPoints, 8);
+  if ((patch as any).revisionHistory != null)
+    (out as any).revisionHistory = normalizeRevisionHistory((patch as any).revisionHistory);
+  if ((patch as any).priority != null) (out as any).priority = clamp01((patch as any).priority, 0.65);
+  if ((patch as any).successCriteria != null)
+    (out as any).successCriteria = normalizeStringArray((patch as any).successCriteria, 8);
 
   return out;
 }
@@ -1418,11 +1718,12 @@ export function applyPatchWithGuards(graph: CDG, patch: GraphPatch) {
     }
   }
 
+  const pruneChanged = pruneInvalidStructuredNodes(nodesById, edgesById);
   const compactChanged = compactSingletonSlots(nodesById, edgesById, touchedNodeIds, touchedNodeOrder);
   const topologyChanged = rebalanceIntentTopology(nodesById, edgesById, touchedNodeIds, touchedNodeOrder);
 
   // ✅ 只有真正应用了 op 才 bump 版本（更符合“版本=结构变化”）
-  const versionInc = appliedOps.length > 0 || compactChanged || topologyChanged ? 1 : 0;
+  const versionInc = appliedOps.length > 0 || pruneChanged || compactChanged || topologyChanged ? 1 : 0;
 
   const newGraph: CDG = {
     ...graph,
