@@ -3,6 +3,11 @@ import { openai } from "./llmClient.js";
 import { config } from "../server/config.js";
 import type { CDG } from "../core/graph.js";
 import { stripMarkdownToText } from "./textSanitizer.js";
+import {
+  enforceTargetedQuestion,
+  planUncertaintyQuestion,
+} from "./uncertainty/questionPlanner.js";
+import { summarizeTopMotifs } from "./motif/motifCatalog.js";
 
 const STREAM_MODE = (process.env.CI_STREAM_MODE || "pseudo") as "upstream" | "pseudo";
 const DEBUG = process.env.CI_DEBUG_LLM === "1";
@@ -87,6 +92,7 @@ function buildChatSystemPrompt(extraSystemPrompt?: string) {
 function graphSummaryForChat(graph: CDG): string {
   const nodes = (graph.nodes || []).slice(-60);
   const edges = (graph.edges || []).slice(-40);
+  const motifs = summarizeTopMotifs(graph, 5);
 
   const pick = (type: string, k = 6) =>
     nodes
@@ -125,6 +131,8 @@ function graphSummaryForChat(graph: CDG): string {
     qs.length ? qs.join("\n") : "- none",
     "edges:",
     edgeBrief.length ? edgeBrief.join("\n") : "- none",
+    "motifs:",
+    motifs.length ? motifs.map((x) => `- ${x}`).join("\n") : "- none",
   ].join("\n");
 }
 
@@ -155,10 +163,18 @@ export async function generateAssistantTextNonStreaming(params: {
 }): Promise<string> {
   const safeRecent = normalizeRecentTurns(params.recentTurns);
   const gsum = graphSummaryForChat(params.graph);
+  const uncertaintyPlan = planUncertaintyQuestion({
+    graph: params.graph,
+    recentTurns: safeRecent,
+  });
 
   const systemOne =
     `${buildChatSystemPrompt(params.systemPrompt)}\n\n` +
-    `当前意图图摘要（只供参考，不要复述）：\n${gsum}`;
+    `当前意图图摘要（只供参考，不要复述）：\n${gsum}` +
+    `\n\n不确定性分析（只供你内部使用，不要逐字复述）：${uncertaintyPlan.rationale}` +
+    (uncertaintyPlan.question
+      ? `\n本轮请在回答末尾给出一个定向澄清问题（避免泛问）：${uncertaintyPlan.question}`
+      : "");
 
   const resp = await openai.chat.completions.create({
     model: config.model,
@@ -169,7 +185,10 @@ export async function generateAssistantTextNonStreaming(params: {
 
   const msg = resp.choices?.[0]?.message;
   const raw = readTextContent(msg?.content);
-  const text = stripMarkdownToText(raw);
+  const text = enforceTargetedQuestion(
+    stripMarkdownToText(raw),
+    uncertaintyPlan.question
+  );
 
   dlog("choices=", resp?.choices?.length, "finish=", resp?.choices?.[0]?.finish_reason, "len=", text.length);
 
@@ -190,7 +209,10 @@ export async function generateAssistantTextNonStreaming(params: {
   });
 
   const raw2 = readTextContent(resp2.choices?.[0]?.message?.content);
-  const text2 = stripMarkdownToText(raw2);
+  const text2 = enforceTargetedQuestion(
+    stripMarkdownToText(raw2),
+    uncertaintyPlan.question
+  );
 
   dlog("fallback finish=", resp2?.choices?.[0]?.finish_reason, "len=", text2.length);
 
@@ -214,9 +236,17 @@ export async function streamAssistantText(params: {
   // upstream 真流（你的网关如果不稳，别开）
   const safeRecent = normalizeRecentTurns(params.recentTurns);
   const gsum = graphSummaryForChat(params.graph);
+  const uncertaintyPlan = planUncertaintyQuestion({
+    graph: params.graph,
+    recentTurns: safeRecent,
+  });
   const systemOne =
     `${buildChatSystemPrompt(params.systemPrompt)}\n\n` +
-    `当前意图图摘要（只供参考，不要复述）：\n${gsum}`;
+    `当前意图图摘要（只供参考，不要复述）：\n${gsum}` +
+    `\n\n不确定性分析（只供你内部使用，不要逐字复述）：${uncertaintyPlan.rationale}` +
+    (uncertaintyPlan.question
+      ? `\n本轮请在回答末尾给出一个定向澄清问题（避免泛问）：${uncertaintyPlan.question}`
+      : "");
 
   const upstream = await openai.chat.completions.create(
     {
@@ -241,8 +271,13 @@ export async function streamAssistantText(params: {
     }
   }
 
-  const clean = stripMarkdownToText(full);
-  if (gotAny && clean) return clean;
+  const stripped = stripMarkdownToText(full);
+  const clean = enforceTargetedQuestion(stripped, uncertaintyPlan.question);
+  if (gotAny && clean) {
+    const missing = clean.startsWith(stripped) ? clean.slice(stripped.length) : "";
+    if (missing) params.onToken(missing);
+    return clean;
+  }
 
   // 降级 pseudo
   const full2 = await generateAssistantTextNonStreaming(params);

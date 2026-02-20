@@ -397,12 +397,12 @@ data: {"assistantText":"...","graphPatch":{"ops":[]},"graph":{"id":"65f1...","ve
 ### 9. 建图更新流水线（V2：槽位状态机 -> 图编译器）
 
 1. `generateTurn` / `generateTurnStreaming` 先生成助手文本。
-2. `extractIntentSignalsWithRecency` + `slotFunctionCall` 抽取结构化槽位（并做冲突融合；语言约束与健康约束分流）。
+2. `extractIntentSignalsWithRecency` + `slotFunctionCall` 抽取结构化槽位（并做冲突融合；健康/语言/饮食/宗教统一归入“限制因素”）。
 3. `geoResolver` 做地理规范化（目的地/城市时长/子地点父城归属，支持 MCP 桥接）。
-4. `signalSanitizer` 做二次清洗（地名归一化、子地点回收、重复目的地去重、时长冲突收敛）。
-5. `constraintClassifier` 做硬约束语义归类（health/language/legal/safety/mobility/logistics），减少 prompt 写死规则依赖。
-6. `slotStateMachine` 产出“标准化槽位状态”（slot winners）。
-7. `slotGraphCompiler` 把槽位状态编译为 `GraphPatch`（add/update/edge + stale 降级）。
+4. `signalSanitizer` 做二次清洗（地名归一化、子地点回收、重复目的地去重、噪声地名拦截、时长冲突收敛与离群回归）。
+5. `constraintClassifier` 做硬约束语义归类（health/language/diet/religion/legal/safety/mobility/logistics），减少 prompt 写死规则依赖。
+6. `slotStateMachine` 产出“标准化槽位状态”（slot winners），并统一“限制因素”与冲突提示节点。
+7. `slotGraphCompiler` 把槽位状态编译为 `GraphPatch`（add/update/edge + stale 降级，含 `conflicts_with` 关系）。
 8. `sanitizeGraphPatchStrict` 严格清洗 patch。
 9. `applyPatchWithGuards` 应用 patch 并输出新图（含压缩、拓扑修复）。
 10. 持久化 `turns` 与 `conversations.graph`。
@@ -439,8 +439,15 @@ conginstrument/
 ├─ package-lock.json
 ├─ README.md
 ├─ skills/
-│  └─ intent-graph-regression/
-│     └─ SKILL.md
+│  ├─ intent-graph-regression/
+│  │  ├─ SKILL.md
+│  │  └─ agents/openai.yaml
+│  ├─ uncertainty-question-flow/
+│  │  ├─ SKILL.md
+│  │  └─ agents/openai.yaml
+│  └─ motif-foundation/
+│     ├─ SKILL.md
+│     └─ agents/openai.yaml
 └─ src/
    ├─ index.ts
    ├─ server/
@@ -460,6 +467,8 @@ conginstrument/
       ├─ llmClient.ts
       ├─ llm.ts
       ├─ chatResponder.ts
+      ├─ uncertainty/
+      │  └─ questionPlanner.ts
       ├─ graphUpdater.ts
       ├─ graphUpdater/
       │  ├─ constants.ts
@@ -468,11 +477,16 @@ conginstrument/
       │  ├─ geoResolver.ts
       │  ├─ mcpGeoBridge.ts
       │  ├─ signalSanitizer.ts
+      │  ├─ conflictAnalyzer.ts
       │  ├─ slotTypes.ts
       │  ├─ slotStateMachine.ts
       │  ├─ slotGraphCompiler.ts
       │  ├─ slotFunctionCall.ts
       │  └─ common.ts
+      ├─ motif/
+      │  ├─ types.ts
+      │  ├─ motifGrounding.ts
+      │  └─ motifCatalog.ts
       ├─ patchGuard.ts
       └─ textSanitizer.ts
 ```
@@ -482,7 +496,9 @@ conginstrument/
 | 文件 | 作用 |
 | --- | --- |
 | `README.md` | 后端说明文档（本文件） |
-| `skills/intent-graph-regression/SKILL.md` | 团队协作回归技能模板（重复节点/时长冲突/父子地点归属排查） |
+| `skills/intent-graph-regression/SKILL.md` | 图回归排查技能（重复节点/时长冲突/父子地点归属） |
+| `skills/uncertainty-question-flow/SKILL.md` | 不确定性驱动提问技能（每轮 1 个定向澄清问题） |
+| `skills/motif-foundation/SKILL.md` | motif 地基技能（motifType/claim/revisionHistory/catalog） |
 | `package.json` | 依赖与脚本（`dev:api`） |
 | `package-lock.json` | npm 锁定依赖版本 |
 
@@ -500,20 +516,25 @@ conginstrument/
 | `src/core/graph.ts` | CDG 类型定义 + patch 应用守卫 + 槽位压缩 |
 | `src/core/nodeLayer.ts` | 节点四层分类（Intent/Requirement/Preference/Risk）的推断与归一化 |
 | `src/services/llmClient.ts` | OpenAI SDK 客户端实例 |
-| `src/services/chatResponder.ts` | 助手文本生成（非流式/伪流/真流） |
-| `src/services/graphUpdater.ts` | 图 patch 主流程（槽位抽取、状态机融合、图编译） |
+| `src/services/chatResponder.ts` | 助手文本生成（非流式/伪流/真流）+ 不确定性驱动定向澄清提问 |
+| `src/services/uncertainty/questionPlanner.ts` | 不确定性评分与目标问题生成（budget/duration/destination/critical day/limiting factor） |
+| `src/services/graphUpdater.ts` | 图 patch 主流程（槽位抽取、状态机融合、图编译、motif 地基补全） |
 | `src/services/graphUpdater/constants.ts` | 建图正则与槽位识别常量 |
 | `src/services/graphUpdater/text.ts` | 文本清洗、证据合并、去重工具 |
-| `src/services/graphUpdater/intentSignals.ts` | 用户意图信号抽取（目的地/时长/预算/人数/关键日/语言约束/健康约束），含跨轮时长合并与相对时间过滤 |
+| `src/services/graphUpdater/intentSignals.ts` | 用户意图信号抽取（目的地/时长/预算/人数/关键日/限制因素），含跨轮时长合并与相对时间过滤 |
 | `src/services/graphUpdater/geoResolver.ts` | 地理校验层（MCP 可选 + Nominatim 回退），做目的地规范化与子地点父城归属修复 |
 | `src/services/graphUpdater/mcpGeoBridge.ts` | MCP 地理桥接（可选），解析地点层级关系并回传统一结构 |
-| `src/services/graphUpdater/signalSanitizer.ts` | 信号二次清洗（重复节点防抖、子地点回收、时长/城市归一化） |
-| `src/services/graphUpdater/constraintClassifier.ts` | 约束语义分类器（health/language/legal/safety/mobility/logistics） |
+| `src/services/graphUpdater/signalSanitizer.ts` | 信号二次清洗（重复节点防抖、子地点回收、噪声地名过滤、时长/城市归一化与离群修正） |
+| `src/services/graphUpdater/conflictAnalyzer.ts` | 槽位冲突检测（预算-住宿、时长-目的地密度、限制因素-高强度偏好） |
+| `src/services/graphUpdater/constraintClassifier.ts` | 约束语义分类器（health/language/diet/religion/legal/safety/mobility/logistics） |
 | `src/services/graphUpdater/slotTypes.ts` | 槽位状态机与图编译器共享类型 |
-| `src/services/graphUpdater/slotStateMachine.ts` | 槽位状态机（slot winners、总时长合并、单城市时长去重、关键约束稳态） |
+| `src/services/graphUpdater/slotStateMachine.ts` | 槽位状态机（slot winners、总时长合并、单城市时长去重、限制因素统一建模） |
 | `src/services/graphUpdater/slotGraphCompiler.ts` | 图编译器（slot state -> GraphPatch，含 stale 节点降级） |
 | `src/services/graphUpdater/slotFunctionCall.ts` | function call 槽位抽取（结构化输出，含子地点归属）与信号映射 |
 | `src/services/graphUpdater/common.ts` | patch 提取与临时 id 工具函数 |
+| `src/services/motif/types.ts` | motif 聚合与目录类型定义 |
+| `src/services/motif/motifGrounding.ts` | patch 级 motif 元数据补全（motifType/claim/priority/revisionHistory） |
+| `src/services/motif/motifCatalog.ts` | motif 目录聚合与摘要（为跨任务迁移/可解释性打地基） |
 | `src/services/patchGuard.ts` | LLM patch 清洗与规范化（强约束） |
 | `src/services/textSanitizer.ts` | 把 Markdown/LaTeX 风格文本降级为纯文本 |
 | `src/services/llm.ts` | turn 编排：助手回复 + patch 生成 + 统一返回 |
@@ -625,9 +646,10 @@ Main types are in `src/core/graph.ts`:
 Patch application pipeline:
 
 1. sanitize patch
-2. apply guards
-3. compact singleton slots (budget/duration/people/destination/health/language/preference)
-4. bump graph version when structural changes happen
+2. motif foundation grounding (`motifType/claim/revisionHistory/priority`)
+3. apply guards
+4. compact singleton slots (budget/duration/people/destination/limiting_factor/preference)
+5. bump graph version when structural changes happen
 
 Manual full-graph save path:
 
@@ -647,24 +669,31 @@ src/db/mongo.ts              # Mongo collections + indexes
 src/middleware/auth.ts       # auth middleware
 src/routes/auth.ts           # login route
 src/routes/conversations.ts  # conversation + turn + SSE routes
-skills/intent-graph-regression/SKILL.md # team regression skill template
+skills/intent-graph-regression/SKILL.md  # graph regression skill
+skills/uncertainty-question-flow/SKILL.md# uncertainty-driven questioning skill
+skills/motif-foundation/SKILL.md         # motif foundation skill
 src/core/graph.ts            # graph types and guarded patch apply
 src/core/nodeLayer.ts        # 4-layer node taxonomy inference and normalization
 src/services/llmClient.ts    # OpenAI client
-src/services/chatResponder.ts# assistant text generation
-src/services/graphUpdater.ts # graph patch orchestrator
+src/services/chatResponder.ts# assistant text generation + targeted clarification
+src/services/uncertainty/questionPlanner.ts # uncertainty scoring + targeted question planner
+src/services/graphUpdater.ts # graph patch orchestrator (+ motif grounding)
 src/services/graphUpdater/constants.ts         # graph regex/constants
 src/services/graphUpdater/text.ts              # text/evidence helpers
 src/services/graphUpdater/intentSignals.ts     # intent signal extraction
 src/services/graphUpdater/geoResolver.ts       # geo normalization + parent-city repair (MCP optional, OSM fallback)
 src/services/graphUpdater/mcpGeoBridge.ts      # optional MCP geo bridge
 src/services/graphUpdater/signalSanitizer.ts   # dedup/cleanup pass for slots
+src/services/graphUpdater/conflictAnalyzer.ts  # slot conflict detection
 src/services/graphUpdater/constraintClassifier.ts # constraint semantic classifier
 src/services/graphUpdater/slotTypes.ts         # slot state/compiler shared schema
 src/services/graphUpdater/slotStateMachine.ts  # slot-state machine (winner selection)
 src/services/graphUpdater/slotGraphCompiler.ts # slot-state -> graph patch compiler
 src/services/graphUpdater/slotFunctionCall.ts  # function-call slot extraction
 src/services/graphUpdater/common.ts            # patch parsing/temp id helpers
+src/services/motif/types.ts                    # motif schema types
+src/services/motif/motifGrounding.ts           # patch-time motif metadata grounding
+src/services/motif/motifCatalog.ts             # motif aggregation/catalog
 src/services/patchGuard.ts   # strict patch sanitizer
 src/services/textSanitizer.ts# markdown-to-plain sanitizer
 src/services/llm.ts          # turn orchestration

@@ -1,47 +1,53 @@
-# Intent Graph Regression Skill
+---
+name: intent-graph-regression
+description: Use this skill when multi-turn intent graphs degrade, including duplicate slots, wrong city hierarchy, duration conflicts, or stale nodes not being downgraded.
+---
 
-## Purpose
+# Intent Graph Regression
 
-Use this skill when intent graph quality degrades in multi-turn dialogue.
+Use this skill for backend graph quality regression triage.
 
-Focus checks:
+## Trigger Signals
 
-1. duplicate destination nodes (e.g., `巴塞罗那` vs `巴塞罗那的巴塞罗那`)
-2. sub-location promoted to destination (e.g., `圣西罗` becomes city)
-3. total duration conflicts with city segments
-4. critical-day constraints accidentally overwriting total duration
+- Duplicate destination/city-duration nodes appear after a few turns
+- Sub-location is promoted to destination (e.g., venue becomes city)
+- Total duration conflicts with city-duration segments
+- Old slot value is not replaced/downgraded after user correction
 
 ## Workflow
 
-1. Confirm backend compile:
+1. Run type check for backend:
 
 ```bash
-cd <repo-root>
+cd /Users/primopan/UISTcoginstrument/app/conginstrument
 npx tsc --noEmit --module NodeNext --moduleResolution NodeNext --target ES2022 --skipLibCheck --esModuleInterop $(find src -name '*.ts' -maxdepth 5 | tr '\n' ' ')
 ```
 
-2. Verify slot extraction + cleanup path:
+2. Verify slot extraction and sanitization:
 
-- `slotFunctionCall.ts` (function-call slot output -> signal mapping)
-- `geoResolver.ts` (MCP/OSM geo normalization + parent-city repair)
-- `signalSanitizer.ts` (final dedup/canonicalization)
+- `src/services/graphUpdater/slotFunctionCall.ts`
+- `src/services/graphUpdater/intentSignals.ts`
+- `src/services/graphUpdater/signalSanitizer.ts`
+- `src/services/graphUpdater/geoResolver.ts`
 
-3. Verify graph canonicalization:
+3. Verify compiler and graph canonicalization:
 
-- `graphUpdater.ts` (pipeline order)
-- `core/graph.ts` (`slotKeyOfNode`, singleton compaction, invalid structured-node pruning)
+- `src/services/graphUpdater/slotStateMachine.ts`
+- `src/services/graphUpdater/slotGraphCompiler.ts`
+- `src/core/graph.ts`
 
-4. Regression scenarios (must pass):
+4. Validate core scenarios:
 
-- `去巴塞罗那5天；之前去米兰3天` -> total 8 days, two sibling destinations.
-- `周日到圣西罗看球` while trip includes Milan -> `圣西罗` should be sub-location under Milan.
-- update constraints (`预算10000 -> 15000`) -> old budget node downgraded/replaced.
+- `去巴塞罗那5天；之前去米兰3天` => total should converge to `8天`
+- Venue mention under a city should stay as `sub_location`, not destination
+- Slot update (e.g., budget 10000 -> 15000) should produce winner replacement and stale-node downgrade
 
-## Output standard
+## Output Format
 
-When reporting results, include:
+Report findings as:
 
-1. failing dialogue snippet
-2. expected slot state
-3. actual graph nodes/edges diff
-4. fix location (file + function)
+1. Repro dialogue snippet
+2. Expected slot state
+3. Actual graph diff (nodes + edges)
+4. Fix location (`file + function`)
+

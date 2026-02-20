@@ -1,0 +1,6 @@
+interface:
+  display_name: "Motif Foundation"
+  short_description: "Build motif metadata and catalog foundations"
+  default_prompt: "Use $motif-foundation to add motif grounding fields and motif catalog extraction to the graph pipeline."
+policy:
+  allow_implicit_invocation: true

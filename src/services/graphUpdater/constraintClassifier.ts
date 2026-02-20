@@ -6,7 +6,14 @@ import {
 } from "./constants.js";
 import { cleanStatement } from "./text.js";
 
-export type GenericConstraintKind = "legal" | "safety" | "mobility" | "logistics" | "other";
+export type GenericConstraintKind =
+  | "legal"
+  | "safety"
+  | "mobility"
+  | "logistics"
+  | "diet"
+  | "religion"
+  | "other";
 
 export type ConstraintClassified = {
   family: "health" | "language" | "generic";
@@ -26,6 +33,10 @@ const MOBILITY_RE =
   /行动不便|轮椅|无障碍|不能久走|不能爬|台阶|体力|走不动|搬运行李|mobility|wheelchair|accessibility/i;
 const LOGISTICS_RE =
   /转机|换乘|赶路|托运|交通衔接|时差|航班|火车|机场接送|中转|connection|layover|flight|train|logistics/i;
+const DIET_RE =
+  /饮食|忌口|素食|清真|清真餐|过敏原|海鲜过敏|乳糖不耐|麸质|不吃辣|halal|kosher|vegetarian|vegan|allergy/i;
+const RELIGION_RE =
+  /宗教|礼拜|祷告|清真寺|教堂|寺庙|斋月|安息日|宗教活动|religion|prayer|mosque|church|temple|ramadan|sabbath/i;
 
 function clampImportance(x: any, fallback = 0.72) {
   const n = Number(x);
@@ -49,6 +60,8 @@ function inferGenericKind(text: string): { kind: GenericConstraintKind; severity
     return { kind: "safety", severity: critical ? "critical" : "high" };
   }
   if (MOBILITY_RE.test(text)) return { kind: "mobility", severity: "high" };
+  if (DIET_RE.test(text)) return { kind: "diet", severity: "high" };
+  if (RELIGION_RE.test(text)) return { kind: "religion", severity: "high" };
   if (LOGISTICS_RE.test(text)) return { kind: "logistics", severity: "medium" };
   return { kind: "other", severity: "medium" };
 }
@@ -92,6 +105,8 @@ export function classifyConstraintText(params: {
     safety: 0.9,
     mobility: 0.86,
     logistics: 0.76,
+    diet: 0.84,
+    religion: 0.84,
     other: 0.72,
   };
 

@@ -1,0 +1,6 @@
+interface:
+  display_name: "Intent Graph Regression"
+  short_description: "Diagnose and fix CDG regression issues"
+  default_prompt: "Use $intent-graph-regression to debug duplicated slots, duration conflicts, and wrong location hierarchy in the intent graph."
+policy:
+  allow_implicit_invocation: true

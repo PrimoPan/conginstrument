@@ -1,0 +1,6 @@
+interface:
+  display_name: "Uncertainty Question Flow"
+  short_description: "Tune targeted clarification questioning"
+  default_prompt: "Use $uncertainty-question-flow to tune uncertainty scoring and produce one targeted clarification question per turn."
+policy:
+  allow_implicit_invocation: true

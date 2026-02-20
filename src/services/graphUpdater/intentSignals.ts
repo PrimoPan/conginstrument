@@ -10,6 +10,7 @@ import {
   LANGUAGE_CONSTRAINT_RE,
   MEDICAL_HEALTH_RE,
   NATURE_TOPIC_RE,
+  NON_PLACE_TOKEN_RE,
   PLACE_STOPWORD_RE,
   PREFERENCE_MARKER_RE,
 } from "./constants.js";
@@ -684,17 +685,21 @@ export function isLikelyDestinationCandidate(x: string): boolean {
   if (!s) return false;
   if (s.length < 2 || s.length > 16) return false;
   if (/^的/.test(s)) return false;
+  if (NON_PLACE_TOKEN_RE.test(s)) return false;
+  if (/^(?:[0-9]+|[一二三四五六七八九十两百千]+)$/.test(s)) return false;
   if (/^(所以|因此|然后|另外|此外|这|那|此次|本次)/.test(s)) return false;
   if (!/^[A-Za-z\u4e00-\u9fff]+$/.test(s)) return false;
+  if (/[\u4e00-\u9fffA-Za-z]{1,12}(和|与|及|、|,|，)[\u4e00-\u9fffA-Za-z]{1,12}/.test(s)) return false;
   if (DESTINATION_NOISE_RE.test(s)) return false;
   if (PLACE_STOPWORD_RE.test(s)) return false;
+  if (/(人民币|预算|经费|花费|费用|准备|打算|计划|安排|行程)/i.test(s)) return false;
   if (/[A-Za-z]/.test(s) && /[\u4e00-\u9fff]/.test(s)) return false;
   if (/^[A-Za-z]+$/.test(s) && s.length <= 2) return false;
   if (/(其中|其中有|其余|其他时候|海地区|该地区)/.test(s)) return false;
   if (s.endsWith("地区") && s.length <= 4) return false;
   if (/(参加|参会|开会|会议|玩|旅游|旅行|度假|计划|安排)$/i.test(s)) return false;
   if (
-    /心脏|母亲|父亲|家人|预算|人数|行程|计划|注意|高强度|旅行时|旅游时|需要|限制|不能|安排|在此之前|此前|之前|之后|然后|再从|我会|我要|参会|参加|开会|会议|飞到|出发|机场|航班|汇报|论文|报告|顺带|顺便|顺路|顺道/i.test(
+    /心脏|母亲|父亲|父母|家人|我们一家|一起|预算|人数|行程|计划|注意|高强度|旅行时|旅游时|需要|限制|不能|安排|在此之前|此前|之前|之后|然后|再从|我会|我要|参会|参加|开会|会议|飞到|出发|机场|航班|汇报|论文|报告|顺带|顺便|顺路|顺道/i.test(
       s
     )
   ) {
@@ -745,7 +750,8 @@ function extractDestinationList(text: string): Array<{ city: string; evidence: s
     push(m[1], m[1], Number(m.index) || 0);
   }
 
-  const pairRe = /(?:去|到|在)?\s*([^\s，。,；;！!？?\d]{2,16})\s*(?:和|与|及|、|,|，)\s*([^\s，。,；;！!？?\d]{2,16})(?:旅游|旅行|出行|玩|度假|开会|会议|chi|conference|$)/gi;
+  const pairRe =
+    /(?:去|到|在|前往|飞到|抵达)\s*([^\s，。,；;！!？?\d]{2,16})\s*(?:和|与|及|、|,|，)\s*([^\s，。,；;！!？?\d]{2,16})(?:旅游|旅行|出行|玩|度假|开会|会议|chi|conference|$)/gi;
   for (const m of scanText.matchAll(pairRe)) {
     if (!m?.[1] || !m?.[2]) continue;
     const idx = Number(m.index) || 0;
@@ -812,7 +818,8 @@ function extractCityDurationSegments(text: string): Array<{ city: string; days: 
     });
   }
 
-  const re = /(?:在|于|到|去)?([^\s，。,；;！!？?\d]{2,14})[^\n。；;，,]{0,10}?([0-9一二三四五六七八九十两]{1,3})\s*天/g;
+  const re =
+    /(?:^|[，。,；;！!？?\s])(?:在|于|到|去|飞到|抵达|前往)?\s*([^\s，。,；;！!？?\d]{2,14})(?:\s*(?:停留|待|玩|逛|旅行|旅游|参会|开会|参加))?[^\n。；;，,]{0,6}?([0-9一二三四五六七八九十两]{1,3})\s*天/g;
   for (const m of scanText.matchAll(re)) {
     const rawCity = m?.[1] || "";
     const rawDays = m?.[2] || "";
@@ -1285,7 +1292,7 @@ export function extractIntentSignals(userText: string, opts?: { historyMode?: bo
     const likelyConstraintCue =
       HARD_CONSTRAINT_RE.test(s) ||
       HARD_REQUIRE_RE.test(s) ||
-      /签证|护照|入境|治安|安全|轮椅|无障碍|转机|换乘|托运|语言障碍|不会英语|翻译|visa|passport|safety|logistics/i.test(
+      /签证|护照|入境|治安|安全|轮椅|无障碍|转机|换乘|托运|语言障碍|不会英语|翻译|饮食|忌口|素食|清真|宗教|礼拜|祷告|斋月|安息日|halal|kosher|vegetarian|vegan|religion|prayer|visa|passport|safety|logistics/i.test(
         s
       );
     if (!likelyConstraintCue) continue;

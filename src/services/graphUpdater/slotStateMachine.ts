@@ -1,6 +1,7 @@
 import type { IntentSignals } from "./intentSignals.js";
 import { buildTravelIntentStatement, isLikelyDestinationCandidate, normalizeDestination } from "./intentSignals.js";
 import { cleanStatement } from "./text.js";
+import { analyzeConstraintConflicts, type LimitingFactorInput } from "./conflictAnalyzer.js";
 import type { SlotEdgeSpec, SlotGraphState, SlotNodeSpec } from "./slotTypes.js";
 
 function clamp01(x: any, fallback = 0.72) {
@@ -35,6 +36,27 @@ type DurationState = {
   emitCityDurationSlots: Set<string>;
 };
 
+type DurationCandidate = {
+  days: number;
+  weight: number;
+  evidence: string;
+  source: "explicit_total" | "city_sum" | "max_segment";
+};
+
+function weightedMedian(candidates: DurationCandidate[]): DurationCandidate | null {
+  const list = candidates
+    .filter((x) => Number.isFinite(x.days) && x.days > 0 && Number.isFinite(x.weight) && x.weight > 0)
+    .sort((a, b) => a.days - b.days);
+  if (!list.length) return null;
+  const totalW = list.reduce((acc, x) => acc + x.weight, 0);
+  let acc = 0;
+  for (const item of list) {
+    acc += item.weight;
+    if (acc >= totalW / 2) return item;
+  }
+  return list[list.length - 1];
+}
+
 function buildDurationState(signals: IntentSignals): DurationState {
   const byCity = new Map<string, { city: string; days: number; kind: "travel" | "meeting"; evidence: string; importance: number }>();
   for (const seg of signals.cityDurations || []) {
@@ -63,16 +85,68 @@ function buildDurationState(signals: IntentSignals): DurationState {
   const cityDurations = Array.from(byCity.values());
   const citySum = cityDurations.reduce((acc, x) => acc + x.days, 0);
   const cityCount = cityDurations.length;
+  const travelCityCount = new Set(cityDurations.filter((x) => x.kind === "travel").map((x) => slug(x.city))).size;
+  const hasTravelSegment = cityDurations.some((x) => x.kind === "travel");
   const explicitTotal = Number(signals.durationDays || 0) || undefined;
 
-  let totalDays = explicitTotal;
-  let totalEvidence = cleanStatement(signals.durationEvidence || "", 80);
-  if (cityCount >= 2 && citySum > 0) {
-    totalDays = Math.max(Number(explicitTotal || 0), citySum) || citySum;
-    totalEvidence = cityDurations.map((x) => `${x.city}${x.days}天`).join(" + ");
-  } else if (!totalDays && citySum > 0) {
+  const candidates: DurationCandidate[] = [];
+  if (explicitTotal) {
+    const explicitWeight = clamp01(
+      signals.hasDurationUpdateCue ? 0.98 : signals.hasExplicitTotalCue ? 0.94 : signals.durationStrength,
+      0.78
+    );
+    candidates.push({
+      days: explicitTotal,
+      weight: explicitWeight,
+      evidence: cleanStatement(signals.durationEvidence || `${explicitTotal}天`, 80),
+      source: "explicit_total",
+    });
+  }
+  if (citySum > 0) {
+    const sumWeight =
+      cityCount >= 2
+        ? clamp01(hasTravelSegment ? 0.9 : 0.84, 0.86)
+        : clamp01(hasTravelSegment ? 0.76 : 0.72, 0.74);
+    candidates.push({
+      days: citySum,
+      weight: sumWeight,
+      evidence: cityDurations.map((x) => `${x.city}${x.days}天`).join(" + "),
+      source: "city_sum",
+    });
+  }
+  const maxSeg = cityDurations.slice().sort((a, b) => b.days - a.days)[0];
+  if (maxSeg) {
+    candidates.push({
+      days: maxSeg.days,
+      weight: clamp01(maxSeg.kind === "meeting" ? 0.62 : 0.68, 0.66),
+      evidence: cleanStatement(`${maxSeg.city}${maxSeg.days}天`, 64),
+      source: "max_segment",
+    });
+  }
+
+  const consensus = weightedMedian(candidates);
+  let totalDays = consensus?.days;
+  let totalEvidence = consensus?.evidence;
+
+  // 防止“显式总时长”在无总时长语气下明显偏离城市时长和（例如 14 vs 7）时占优。
+  if (
+    explicitTotal &&
+    citySum > 0 &&
+    !signals.hasExplicitTotalCue &&
+    !signals.hasDurationUpdateCue &&
+    (explicitTotal >= Math.ceil(citySum * 1.6) || explicitTotal <= Math.floor(citySum * 0.45))
+  ) {
     totalDays = citySum;
     totalEvidence = cityDurations.map((x) => `${x.city}${x.days}天`).join(" + ");
+  }
+
+  // 多城市且有旅行段时，优先满足分段总和，避免漏算前后段。
+  if (travelCityCount >= 2 && citySum > 0) {
+    const underEstimate = !totalDays || totalDays < citySum;
+    if (underEstimate || signals.hasDurationUpdateCue) {
+      totalDays = citySum;
+      totalEvidence = cityDurations.map((x) => `${x.city}${x.days}天`).join(" + ");
+    }
   }
 
   if (totalDays != null && totalDays <= 0) totalDays = undefined;
@@ -148,12 +222,132 @@ function pushEdge(edges: SlotEdgeSpec[], fromSlot: string, toSlot: string, type:
   edges.push({ fromSlot, toSlot, type, confidence: clamp01(confidence, 0.78) });
 }
 
-function genericConstraintPrefix(kind?: string): string {
-  if (kind === "legal") return "法律约束";
-  if (kind === "safety") return "安全约束";
-  if (kind === "mobility") return "出行约束";
-  if (kind === "logistics") return "行程约束";
-  return "关键约束";
+type LimitingFactor = {
+  text: string;
+  evidence: string;
+  hard: boolean;
+  severity?: "medium" | "high" | "critical";
+  importance: number;
+  kind: string;
+};
+
+function normalizeLimitingText(raw: string): string {
+  return cleanStatement(raw || "", 140)
+    .toLowerCase()
+    .replace(/[，。,；;！!？?\s]+/g, "")
+    .replace(/^(我|我们|家人|父母|父亲|母亲)+/, "")
+    .replace(/(需要|必须|尽量|注意|请|希望|可以|不能|不要|避免)/g, "");
+}
+
+function collectLimitingFactors(signals: IntentSignals): LimitingFactor[] {
+  const map = new Map<string, LimitingFactor>();
+  const upsert = (raw: {
+    text?: string;
+    evidence?: string;
+    hard?: boolean;
+    severity?: "medium" | "high" | "critical";
+    importance?: number;
+    kind?: string;
+  }) => {
+    const text = cleanStatement(raw.text || "", 120);
+    if (!text) return;
+    const key = text.toLowerCase();
+    const next: LimitingFactor = {
+      text,
+      evidence: cleanStatement(raw.evidence || text, 80),
+      hard: !!raw.hard,
+      severity: raw.severity,
+      importance: clamp01(raw.importance, raw.hard ? 0.84 : 0.74),
+      kind: cleanStatement(raw.kind || "other", 20).toLowerCase() || "other",
+    };
+    const prev = map.get(key);
+    if (!prev) {
+      map.set(key, next);
+      return;
+    }
+    map.set(key, {
+      text,
+      evidence: next.evidence || prev.evidence,
+      hard: prev.hard || next.hard,
+      severity:
+        prev.severity === "critical" || next.severity === "critical"
+          ? "critical"
+          : prev.severity === "high" || next.severity === "high"
+            ? "high"
+            : prev.severity || next.severity,
+      importance: Math.max(prev.importance, next.importance),
+      kind: prev.kind === "other" ? next.kind : prev.kind,
+    });
+  };
+
+  if (signals.healthConstraint) {
+    upsert({
+      text: signals.healthConstraint,
+      evidence: signals.healthEvidence || signals.healthConstraint,
+      hard: true,
+      severity: "critical",
+      importance: signals.healthImportance,
+      kind: "health",
+    });
+  }
+
+  if (signals.languageConstraint) {
+    upsert({
+      text: signals.languageConstraint,
+      evidence: signals.languageEvidence || signals.languageConstraint,
+      hard: true,
+      severity: "high",
+      importance: signals.languageImportance,
+      kind: "language",
+    });
+  }
+
+  for (const gc of signals.genericConstraints || []) {
+    upsert({
+      text: gc.text,
+      evidence: gc.evidence || gc.text,
+      hard: !!gc.hard,
+      severity: gc.severity,
+      importance: gc.importance,
+      kind: gc.kind || "other",
+    });
+  }
+
+  const ranked = Array.from(map.values())
+    .sort((a, b) => {
+      const sevRank = (x?: "medium" | "high" | "critical") =>
+        x === "critical" ? 3 : x === "high" ? 2 : x === "medium" ? 1 : 0;
+      const sevDiff = sevRank(b.severity) - sevRank(a.severity);
+      if (sevDiff !== 0) return sevDiff;
+      const hardDiff = (b.hard ? 1 : 0) - (a.hard ? 1 : 0);
+      if (hardDiff !== 0) return hardDiff;
+      return b.importance - a.importance;
+    })
+    .slice(0, 12);
+
+  // near-duplicate suppression: same kind and high textual overlap keep the strongest one.
+  const deduped: LimitingFactor[] = [];
+  for (const cur of ranked) {
+    const curNorm = normalizeLimitingText(cur.text);
+    const dupIdx = deduped.findIndex((x) => {
+      if (x.kind !== cur.kind) return false;
+      const xNorm = normalizeLimitingText(x.text);
+      if (!xNorm || !curNorm) return false;
+      return xNorm === curNorm || xNorm.includes(curNorm) || curNorm.includes(xNorm);
+    });
+    if (dupIdx < 0) {
+      deduped.push(cur);
+      continue;
+    }
+    const prev = deduped[dupIdx];
+    const pickCur =
+      (cur.severity === "critical" && prev.severity !== "critical") ||
+      (cur.severity === "high" && prev.severity === "medium") ||
+      (cur.hard && !prev.hard) ||
+      cur.importance > prev.importance;
+    if (pickCur) deduped[dupIdx] = cur;
+  }
+  return deduped.slice(0, 8);
 }
 
 export function buildSlotStateMachine(params: {
@@ -175,13 +369,30 @@ export function buildSlotStateMachine(params: {
   });
   nodes.push(goal);
 
-  const destinations = (params.signals.destinations || [])
-    .map((x) => normalizeDestination(x))
-    .filter((x) => x && isLikelyDestinationCandidate(x))
-    .slice(0, 8);
+  const destinationMap = new Map<string, string>();
+  const pushDestination = (raw?: string) => {
+    const city = normalizeDestination(raw || "");
+    if (!city || !isLikelyDestinationCandidate(city)) return;
+    const key = slug(city);
+    if (!key || destinationMap.has(key)) return;
+    destinationMap.set(key, city);
+  };
+  for (const d of params.signals.destinations || []) pushDestination(d);
+  for (const seg of durationState.cityDurations) pushDestination(seg.city);
+  if (params.signals.criticalPresentation?.city) pushDestination(params.signals.criticalPresentation.city);
+  const destinations = Array.from(destinationMap.values()).slice(0, 8);
+
+  const destinationSlotKeys: string[] = [];
+  const limitingFactorSlotKeys: string[] = [];
+  let peopleSlotKey: string | null = null;
+  let budgetSlotKey: string | null = null;
+  let durationTotalSlotKey: string | null = null;
+  let lodgingSlotKey: string | null = null;
+  let scenicSlotKey: string | null = null;
 
   for (const city of destinations) {
     const slotKey = `slot:destination:${slug(city)}`;
+    destinationSlotKeys.push(slotKey);
     const imp = clamp01(params.signals.destinationImportanceByCity?.[city], 0.8);
     nodes.push({
       slotKey,
@@ -205,6 +416,7 @@ export function buildSlotStateMachine(params: {
   }
 
   if (durationState.totalDays) {
+    durationTotalSlotKey = "slot:duration_total";
     nodes.push({
       slotKey: "slot:duration_total",
       type: "constraint",
@@ -251,7 +463,7 @@ export function buildSlotStateMachine(params: {
       priority: seg.importance,
     });
     const parentDestinationKey = `slot:destination:${cityKey}`;
-    if (destinations.some((x) => slug(x) === cityKey)) {
+    if (destinationSlotKeys.includes(parentDestinationKey)) {
       pushEdge(edges, slotKey, parentDestinationKey, "determine", 0.86);
     } else {
       pushEdge(edges, slotKey, "slot:goal", "determine", 0.82);
@@ -313,6 +525,7 @@ export function buildSlotStateMachine(params: {
         revisionHistory: [{ at: now, action: "updated", by: "system", reason: "slot_state_machine" }],
         priority: importance,
       });
+      peopleSlotKey = "slot:people";
       pushEdge(edges, "slot:people", "slot:goal", "determine", 0.84);
     }
   }
@@ -341,90 +554,51 @@ export function buildSlotStateMachine(params: {
         priority: importance,
         successCriteria: [`预算不超${budget}元`],
       });
+      budgetSlotKey = "slot:budget";
       pushEdge(edges, "slot:budget", "slot:goal", "constraint", 0.92);
     }
   }
 
-  if (params.signals.healthConstraint) {
-    const imp = clamp01(params.signals.healthImportance, 0.95);
-    nodes.push({
-      slotKey: "slot:health",
-      type: "constraint",
-      layer: "risk",
-      strength: "hard",
-      severity: "critical",
-      statement: `健康约束: ${params.signals.healthConstraint}`,
-      confidence: 0.95,
-      importance: imp,
-      tags: ["health", "risk"],
-      evidenceIds: [params.signals.healthEvidence || params.signals.healthConstraint].filter(Boolean),
-      sourceMsgIds: ["latest_user"],
-      key: "slot:health",
-      motifType: "hypothesis",
-      claim: params.signals.healthConstraint,
-      evidence: motifEvidence(params.signals.healthEvidence || params.signals.healthConstraint),
-      linkedIntentIds: ["slot:goal"],
-      revisionHistory: [{ at: now, action: "updated", by: "system", reason: "slot_state_machine" }],
-      priority: imp,
-      rebuttalPoints: ["若取消该约束，行程风险明显上升"],
-    });
-    pushEdge(edges, "slot:health", "slot:goal", "constraint", 0.96);
-  }
+  const limitingFactors = collectLimitingFactors(params.signals);
+  for (const factor of limitingFactors) {
+    const kind = factor.kind || "other";
+    const slotKey = `slot:constraint:limiting:${slug(kind)}:${slug(factor.text)}`;
+    const severity = factor.severity || (factor.hard ? "high" : "medium");
+    const imp = clamp01(factor.importance, factor.hard ? 0.84 : 0.74);
+    const rebuttalPoints =
+      kind === "health"
+        ? ["若忽略此限制，行程安全风险显著上升"]
+        : kind === "language"
+          ? ["若忽略此限制，沟通与执行效率会明显下降"]
+          : kind === "diet"
+            ? ["若忽略此限制，饮食可执行性与舒适度会下降"]
+            : kind === "religion"
+              ? ["若忽略此限制，关键活动安排可能与信仰冲突"]
+              : undefined;
 
-  if (params.signals.languageConstraint) {
-    const imp = clamp01(params.signals.languageImportance, 0.82);
-    nodes.push({
-      slotKey: "slot:language",
-      type: "constraint",
-      layer: "requirement",
-      strength: "hard",
-      statement: `语言约束: ${params.signals.languageConstraint}`,
-      confidence: 0.9,
-      importance: imp,
-      tags: ["language", "communication"],
-      evidenceIds: [params.signals.languageEvidence || params.signals.languageConstraint].filter(Boolean),
-      sourceMsgIds: ["latest_user"],
-      key: "slot:language",
-      motifType: "hypothesis",
-      claim: params.signals.languageConstraint,
-      evidence: motifEvidence(params.signals.languageEvidence || params.signals.languageConstraint),
-      linkedIntentIds: ["slot:goal"],
-      revisionHistory: [{ at: now, action: "updated", by: "system", reason: "slot_state_machine" }],
-      priority: imp,
-      rebuttalPoints: ["若不处理语言沟通，执行效率与安全性会下降"],
-    });
-    pushEdge(edges, "slot:language", "slot:goal", "constraint", 0.9);
-  }
-
-  for (const gc of (params.signals.genericConstraints || []).slice(0, 6)) {
-    const text = cleanStatement(gc.text || "", 120);
-    if (!text) continue;
-    const prefix = genericConstraintPrefix(gc.kind);
-    const slotKey = `slot:constraint:${slug(gc.kind || "other")}:${slug(text)}`;
-    const hard = !!gc.hard;
-    const severity = gc.severity || (hard ? "high" : "medium");
-    const imp = clamp01(gc.importance, hard ? 0.84 : 0.74);
     nodes.push({
       slotKey,
       type: "constraint",
       layer: severity === "critical" || severity === "high" ? "risk" : "requirement",
-      strength: hard ? "hard" : "soft",
+      strength: factor.hard ? "hard" : "soft",
       severity,
-      statement: `${prefix}: ${text}`,
-      confidence: hard ? 0.9 : 0.8,
+      statement: `限制因素: ${factor.text}`,
+      confidence: factor.hard ? 0.9 : 0.82,
       importance: imp,
-      tags: ["generic_constraint", gc.kind || "other"],
-      evidenceIds: [gc.evidence || gc.text].filter(Boolean),
+      tags: ["limiting_factor", kind],
+      evidenceIds: [factor.evidence || factor.text].filter(Boolean),
       sourceMsgIds: ["latest_user"],
       key: slotKey,
       motifType: "hypothesis",
-      claim: text,
-      evidence: motifEvidence(gc.evidence || gc.text),
+      claim: factor.text,
+      evidence: motifEvidence(factor.evidence || factor.text),
       linkedIntentIds: ["slot:goal"],
       revisionHistory: [{ at: now, action: "updated", by: "system", reason: "slot_state_machine" }],
       priority: imp,
+      rebuttalPoints,
     });
-    pushEdge(edges, slotKey, "slot:goal", hard ? "constraint" : "determine", hard ? 0.9 : 0.8);
+    limitingFactorSlotKeys.push(slotKey);
+    pushEdge(edges, slotKey, "slot:goal", factor.hard ? "constraint" : "determine", factor.hard ? 0.92 : 0.82);
   }
 
   if (params.signals.criticalPresentation) {
@@ -482,6 +656,7 @@ export function buildSlotStateMachine(params: {
       revisionHistory: [{ at: now, action: "updated", by: "system", reason: "slot_state_machine" }],
       priority: imp,
     });
+    scenicSlotKey = "slot:scenic_preference";
     pushEdge(edges, "slot:scenic_preference", "slot:goal", params.signals.scenicPreferenceHard ? "constraint" : "enable", 0.76);
   }
 
@@ -506,12 +681,75 @@ export function buildSlotStateMachine(params: {
       revisionHistory: [{ at: now, action: "updated", by: "system", reason: "slot_state_machine" }],
       priority: imp,
     });
+    lodgingSlotKey = "slot:lodging";
     pushEdge(edges, "slot:lodging", "slot:goal", params.signals.lodgingPreferenceHard ? "constraint" : "enable", 0.76);
+  }
+
+  const conflictInputs: LimitingFactorInput[] = limitingFactors.map((x) => ({
+    text: x.text,
+    kind: x.kind,
+    hard: x.hard,
+    severity: x.severity,
+    importance: x.importance,
+  }));
+  const conflicts = analyzeConstraintConflicts({
+    budgetCny: params.signals.budgetCny,
+    lodgingPreference: params.signals.lodgingPreference,
+    scenicPreference: params.signals.scenicPreference,
+    peopleCount: params.signals.peopleCount,
+    totalDays: durationState.totalDays,
+    destinations,
+    limitingFactors: conflictInputs,
+  });
+
+  const relatedSlotMap: Record<
+    "budget" | "lodging" | "duration_total" | "destination" | "scenic_preference" | "limiting_factor" | "people",
+    string[]
+  > = {
+    budget: budgetSlotKey ? [budgetSlotKey] : [],
+    lodging: lodgingSlotKey ? [lodgingSlotKey] : [],
+    duration_total: durationTotalSlotKey ? [durationTotalSlotKey] : [],
+    destination: destinationSlotKeys.slice(),
+    scenic_preference: scenicSlotKey ? [scenicSlotKey] : [],
+    limiting_factor: limitingFactorSlotKeys.slice(),
+    people: peopleSlotKey ? [peopleSlotKey] : [],
+  };
+
+  for (const c of conflicts) {
+    const slotKey = `slot:conflict:${slug(c.key)}`;
+    nodes.push({
+      slotKey,
+      type: "constraint",
+      layer: c.severity === "critical" || c.severity === "high" ? "risk" : "requirement",
+      strength: "hard",
+      severity: c.severity,
+      statement: `冲突提示: ${cleanStatement(c.statement, 120)}`,
+      confidence: 0.88,
+      importance: clamp01(c.importance, 0.8),
+      tags: ["conflict", "planner"],
+      evidenceIds: c.evidence.map((x) => cleanStatement(x, 60)).filter(Boolean),
+      sourceMsgIds: ["latest_user"],
+      key: slotKey,
+      motifType: "hypothesis",
+      claim: cleanStatement(c.statement, 120),
+      evidence: c.evidence.length ? c.evidence.map((x) => ({ quote: cleanStatement(x, 80), source: "dialogue" })) : undefined,
+      linkedIntentIds: ["slot:goal"],
+      revisionHistory: [{ at: now, action: "updated", by: "system", reason: "conflict_analyzer" }],
+      priority: clamp01(c.importance, 0.8),
+      rebuttalPoints: ["可通过调整预算/时长/约束优先级来消解冲突"],
+    });
+    pushEdge(edges, slotKey, "slot:goal", "constraint", 0.9);
+
+    for (const related of c.relatedTypes) {
+      for (const targetSlot of relatedSlotMap[related] || []) {
+        pushEdge(edges, slotKey, targetSlot, "conflicts_with", 0.84);
+      }
+    }
   }
 
   return {
     nodes,
     edges,
-    notes: ["slot_state_machine_v1"],
+    notes: ["slot_state_machine_v3_limiting_conflict_aware"],
   };
 }

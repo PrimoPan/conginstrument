@@ -29,6 +29,14 @@ function parseSlotKeyFromStatement(node: ConceptNode): string | null {
   if (/^同行人数[:：]/.test(s)) return "slot:people";
   if (/^健康约束[:：]/.test(s)) return "slot:health";
   if (/^语言约束[:：]/.test(s)) return "slot:language";
+  if (/^限制因素[:：]/.test(s)) {
+    const x = s.split(/[:：]/)[1] || "limiting";
+    return `slot:constraint:limiting:${slug(x)}`;
+  }
+  if (/^冲突提示[:：]/.test(s)) {
+    const x = s.split(/[:：]/)[1] || "conflict";
+    return `slot:conflict:${slug(x)}`;
+  }
   if (/^(关键约束|法律约束|安全约束|出行约束|行程约束)[:：]/.test(s)) {
     const x = s.split(/[:：]/)[1] || "constraint";
     return `slot:constraint:${slug(x)}`;
@@ -148,13 +156,18 @@ export function compileSlotStateToPatch(params: {
     if (desiredSlots.has(slotKey)) continue;
     if (slotKey === "slot:goal") continue;
     if (node.status === "rejected" && (Number(node.importance) || 0) <= 0.35) continue;
+    const nextTags = Array.from(
+      new Set([...(Array.isArray(node.tags) ? node.tags : []), "stale_slot", "auto_cleaned"])
+    ).slice(0, 8);
     ops.push({
       op: "update_node",
       id: node.id,
       patch: {
         status: "rejected",
-        importance: 0.32,
+        importance: 0.24,
         priority: 0.3,
+        confidence: Math.min(0.58, Number(node.confidence) || 0.58),
+        tags: nextTags,
       } as any,
     });
   }

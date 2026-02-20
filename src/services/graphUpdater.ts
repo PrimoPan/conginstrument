@@ -14,6 +14,7 @@ import { compileSlotStateToPatch } from "./graphUpdater/slotGraphCompiler.js";
 import { sanitizeIntentSignals } from "./graphUpdater/signalSanitizer.js";
 import { cleanStatement, mergeTextSegments } from "./graphUpdater/text.js";
 import { makeTempId } from "./graphUpdater/common.js";
+import { enrichPatchWithMotifFoundation } from "./motif/motifGrounding.js";
 
 const DEBUG = process.env.CI_DEBUG_LLM === "1";
 function dlog(...args: any[]) {
@@ -187,7 +188,11 @@ export async function generateGraphPatch(params: {
     state,
   });
 
-  const strictPatch = sanitizeGraphPatchStrict(rawPatch);
+  const motifGroundedPatch = enrichPatchWithMotifFoundation(rawPatch, {
+    reason: "slot_state_machine_pipeline",
+    by: "system",
+  });
+  const strictPatch = sanitizeGraphPatchStrict(motifGroundedPatch);
   if (strictPatch.ops.length > 0) {
     if (DEBUG) {
       const counts: Record<string, number> = {};

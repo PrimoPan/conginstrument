@@ -120,7 +120,7 @@ const GENERIC_TIMELINE_HINT_RE = /截止|deadline|里程碑|周期|排期|冲刺
 const GENERIC_STAKEHOLDER_HINT_RE = /用户|客户|老板|团队|同事|角色|stakeholder|owner|reviewer|审批/i;
 const GENERIC_RISK_HINT_RE = /风险|故障|安全|合规|隐私|法律|阻塞|依赖|上线事故|risk|security|privacy|compliance/i;
 const DESTINATION_BAD_TOKEN_RE =
-  /我|你|他|她|我们|时间|之外|之前|之后|必须|到场|安排|计划|pre|chi|会议|汇报|报告|论文|一天|两天|三天|四天|五天|顺带|顺便|顺路|顺道|其中|其中有|其余|其他时候|海地区|该地区|看球|观赛|比赛|演讲|发表|打卡|参观|游览|所以这|因此|另外|此外/i;
+  /我|你|他|她|我们|时间|之外|之前|之后|必须|到场|安排|计划|准备|打算|预算|经费|花费|费用|人民币|pre|chi|会议|汇报|报告|论文|一天|两天|三天|四天|五天|顺带|顺便|顺路|顺道|其中|其中有|其余|其他时候|海地区|该地区|看球|观赛|比赛|演讲|发表|打卡|参观|游览|所以这|因此|另外|此外|unknown/i;
 
 type TopologyTuning = {
   lambdaSparsity: number;
@@ -172,6 +172,7 @@ function slotFamily(slot: string | null | undefined): string {
   if (slot.startsWith("slot:destination:")) return "destination";
   if (slot.startsWith("slot:duration_city:")) return "duration_city";
   if (slot.startsWith("slot:meeting_critical:")) return "meeting_critical";
+  if (slot.startsWith("slot:conflict:")) return "conflict";
   if (slot.startsWith("slot:constraint:")) return "generic_constraint";
   if (slot === "slot:duration_total") return "duration_total";
   if (slot === "slot:duration_meeting") return "duration_meeting";
@@ -330,6 +331,16 @@ function slotKeyOfNode(node: ConceptNode): string | null {
   ) {
     return "slot:lodging";
   }
+  if (node.type === "constraint" && /^限制因素[:：]\s*.+$/.test(s)) {
+    const m = s.match(/^限制因素[:：]\s*(.+)$/);
+    const detail = normalizePlaceToken((m?.[1] || "limiting").slice(0, 28));
+    return `slot:constraint:limiting:${detail || "default"}`;
+  }
+  if (node.type === "constraint" && /^冲突提示[:：]\s*.+$/.test(s)) {
+    const m = s.match(/^冲突提示[:：]\s*(.+)$/);
+    const detail = normalizePlaceToken((m?.[1] || "conflict").slice(0, 32));
+    return `slot:conflict:${detail || "default"}`;
+  }
   if (node.type === "constraint" && /^语言约束[:：]\s*.+$/.test(s)) return "slot:language";
   if (node.type === "constraint" && /^(关键约束|法律约束|安全约束|出行约束|行程约束)[:：]\s*.+$/.test(s)) {
     const m = s.match(/^(?:关键约束|法律约束|安全约束|出行约束|行程约束)[:：]\s*(.+)$/);
@@ -477,6 +488,8 @@ function pruneInvalidStructuredNodes(
       if (!city || DESTINATION_BAD_TOKEN_RE.test(city) || /^的/.test(city)) invalid = true;
       if (/地区$/.test(city) && city.length <= 4) invalid = true;
       if (/(前|后)$/.test(city)) invalid = true;
+      if (/[\u4e00-\u9fffA-Za-z]{1,12}(和|与|及|、|,|，)[\u4e00-\u9fffA-Za-z]{1,12}/.test(city)) invalid = true;
+      if (city.length >= 7 && /(去|到|在|一起|旅游|旅行|出行|玩|逛)/.test(city)) invalid = true;
     }
 
     const cityDur = s.match(/^(?:城市时长|停留时长)[:：]\s*(.+?)\s+[0-9]{1,3}\s*天$/);
@@ -485,6 +498,8 @@ function pruneInvalidStructuredNodes(
       if (!city || DESTINATION_BAD_TOKEN_RE.test(city) || /^的/.test(city)) invalid = true;
       if (/地区$/.test(city) && city.length <= 4) invalid = true;
       if (/(前|后)$/.test(city)) invalid = true;
+      if (/[\u4e00-\u9fffA-Za-z]{1,12}(和|与|及|、|,|，)[\u4e00-\u9fffA-Za-z]{1,12}/.test(city)) invalid = true;
+      if (city.length >= 7 && /(去|到|在|一起|旅游|旅行|出行|玩|逛)/.test(city)) invalid = true;
     }
 
     if (!invalid) continue;
@@ -494,6 +509,58 @@ function pruneInvalidStructuredNodes(
       if (e.from === nid || e.to === nid) edgesById.delete(eid);
     }
   }
+  return changed;
+}
+
+function pruneNoisyDurationOutliers(
+  nodesById: Map<string, ConceptNode>,
+  edgesById: Map<string, ConceptEdge>
+): boolean {
+  const cityDaysByCity = new Map<string, number>();
+  const totalDurationNodeIds: Array<{ id: string; days: number }> = [];
+
+  for (const [nid, node] of nodesById.entries()) {
+    const s = cleanText(node.statement);
+    if (!s) continue;
+
+    const cityDur = s.match(/^(?:城市时长|停留时长)[:：]\s*(.+?)\s+([0-9]{1,3})\s*天$/);
+    if (cityDur?.[1] && cityDur?.[2]) {
+      const city = cleanText(cityDur[1]).toLowerCase();
+      const days = Number(cityDur[2]) || 0;
+      if (!city || days <= 0 || days > 180) continue;
+      if (DESTINATION_BAD_TOKEN_RE.test(city)) continue;
+      cityDaysByCity.set(city, Math.max(cityDaysByCity.get(city) || 0, days));
+      continue;
+    }
+
+    const totalM = s.match(/^(?:总)?行程时长[:：]\s*([0-9]{1,3})\s*天$/);
+    if (totalM?.[1]) {
+      const days = Number(totalM[1]) || 0;
+      if (days > 0) totalDurationNodeIds.push({ id: nid, days });
+    }
+  }
+
+  if (!cityDaysByCity.size || !totalDurationNodeIds.length) return false;
+
+  const sumCityDays = Array.from(cityDaysByCity.values()).reduce((a, b) => a + b, 0);
+  if (sumCityDays <= 0) return false;
+
+  // 允许适度冗余天数（交通/机动），但明显偏离时清理旧噪声总时长节点
+  const tolerance = Math.max(2, Math.min(5, Math.floor(sumCityDays * 0.35)));
+  let changed = false;
+
+  for (const total of totalDurationNodeIds) {
+    const tooLarge = total.days > sumCityDays + tolerance && total.days >= Math.ceil(sumCityDays * 1.6);
+    const tooSmall = total.days < Math.max(1, Math.floor(sumCityDays * 0.45));
+    if (!tooLarge && !tooSmall) continue;
+
+    nodesById.delete(total.id);
+    changed = true;
+    for (const [eid, e] of edgesById.entries()) {
+      if (e.from === total.id || e.to === total.id) edgesById.delete(eid);
+    }
+  }
+
   return changed;
 }
 
@@ -515,6 +582,7 @@ function slotPriorityScore(slot: string | null | undefined): number {
   if (f === "destination") return 2;
   if (f === "duration_total") return 3;
   if (f === "budget") return 4;
+  if (f === "conflict") return 5;
   if (f === "duration_city" || f === "duration_meeting" || f === "meeting_critical") return 5;
   if (f === "lodging") return 6;
   if (f === "scenic_preference") return 7;
@@ -1719,11 +1787,15 @@ export function applyPatchWithGuards(graph: CDG, patch: GraphPatch) {
   }
 
   const pruneChanged = pruneInvalidStructuredNodes(nodesById, edgesById);
+  const durationOutlierPruneChanged = pruneNoisyDurationOutliers(nodesById, edgesById);
   const compactChanged = compactSingletonSlots(nodesById, edgesById, touchedNodeIds, touchedNodeOrder);
   const topologyChanged = rebalanceIntentTopology(nodesById, edgesById, touchedNodeIds, touchedNodeOrder);
 
   // ✅ 只有真正应用了 op 才 bump 版本（更符合“版本=结构变化”）
-  const versionInc = appliedOps.length > 0 || pruneChanged || compactChanged || topologyChanged ? 1 : 0;
+  const versionInc =
+    appliedOps.length > 0 || pruneChanged || durationOutlierPruneChanged || compactChanged || topologyChanged
+      ? 1
+      : 0;
 
   const newGraph: CDG = {
     ...graph,
