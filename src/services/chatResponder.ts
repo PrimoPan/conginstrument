@@ -7,7 +7,8 @@ import {
   enforceTargetedQuestion,
   planUncertaintyQuestion,
 } from "./uncertainty/questionPlanner.js";
-import { summarizeTopMotifs } from "./motif/motifCatalog.js";
+import { reconcileConceptsWithGraph } from "./concepts.js";
+import { reconcileMotifsWithGraph } from "./motif/conceptMotifs.js";
 
 const STREAM_MODE = (process.env.CI_STREAM_MODE || "pseudo") as "upstream" | "pseudo";
 const DEBUG = process.env.CI_DEBUG_LLM === "1";
@@ -92,7 +93,10 @@ function buildChatSystemPrompt(extraSystemPrompt?: string) {
 function graphSummaryForChat(graph: CDG): string {
   const nodes = (graph.nodes || []).slice(-60);
   const edges = (graph.edges || []).slice(-40);
-  const motifs = summarizeTopMotifs(graph, 5);
+  const concepts = reconcileConceptsWithGraph({ graph, baseConcepts: [] });
+  const motifs = reconcileMotifsWithGraph({ graph, concepts, baseMotifs: [] })
+    .slice(0, 5)
+    .map((m) => `${m.templateKey}:${m.title}(c=${m.confidence.toFixed(2)})`);
 
   const pick = (type: string, k = 6) =>
     nodes

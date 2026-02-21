@@ -255,6 +255,7 @@ Base URL 示例：`http://localhost:3001`
     "edges": []
   },
   "concepts": [],
+  "motifs": [],
   "requestAdvice": true,
   "advicePrompt": "用户已手动调整意图图，请基于最新图给出下一步建议"
 }
@@ -279,6 +280,7 @@ Base URL 示例：`http://localhost:3001`
     "edges": []
   },
   "concepts": [],
+  "motifs": [],
   "updatedAt": "2026-02-16T00:00:00.000Z",
   "assistantText": "基于你手工修正后的意图图，建议先锁定关键约束再排城市节奏...",
   "adviceError": ""
@@ -294,7 +296,7 @@ Base URL 示例：`http://localhost:3001`
 
 #### 7.8 `PUT /api/conversations/:id/concepts`（保存 Concept 模块）
 
-说明：`Concept` 与图节点严格一一对应，`nodeIds` 必须且只能包含 1 个节点 id（后端会按该规则归一化）。
+说明：`Concept` 是独立语义槽位对象，不等于单个节点；`nodeIds` 可包含多个关联节点，`primaryNodeId` 是当前展示锚点。
 
 请求：
 
@@ -307,7 +309,8 @@ Base URL 示例：`http://localhost:3001`
       "title": "核心意图",
       "description": "去云南旅游7天",
       "score": 0.84,
-      "nodeIds": ["n1"],
+      "nodeIds": ["n1", "n8"],
+      "primaryNodeId": "n1",
       "evidenceTerms": ["云南", "7天"],
       "sourceMsgIds": ["latest_user"],
       "locked": false,
@@ -330,6 +333,7 @@ Base URL 示例：`http://localhost:3001`
     "edges": []
   },
   "concepts": [],
+  "motifs": [],
   "updatedAt": "2026-02-16T00:10:00.000Z"
 }
 ```
@@ -357,7 +361,8 @@ Base URL 示例：`http://localhost:3001`
     "nodes": [],
     "edges": []
   },
-  "concepts": []
+  "concepts": [],
+  "motifs": []
 }
 ```
 
@@ -581,7 +586,7 @@ conginstrument/
 | `src/core/nodeLayer.ts` | 节点四层分类（Intent/Requirement/Preference/Risk）的推断与归一化 |
 | `src/services/llmClient.ts` | OpenAI SDK 客户端实例 |
 | `src/services/chatResponder.ts` | 助手文本生成（非流式/伪流/真流）+ 不确定性驱动定向澄清提问 |
-| `src/services/concepts.ts` | Concept 映射/对齐/持久化辅助（严格 1 concept = 1 node） |
+| `src/services/concepts.ts` | Concept 语义槽位映射/对齐/持久化（Concept 独立于节点，可 1:N 绑定 node） |
 | `src/services/weather/advisor.ts` | 外部天气 API 风险检测（目的地+日期命中极端天气时主动提醒） |
 | `src/services/uncertainty/questionPlanner.ts` | 不确定性评分与目标问题生成（budget/duration/destination/critical day/limiting factor） |
 | `src/services/graphUpdater.ts` | 图 patch 主流程（槽位抽取、状态机融合、图编译、motif 地基补全） |
@@ -601,6 +606,7 @@ conginstrument/
 | `src/services/motif/types.ts` | motif 聚合与目录类型定义 |
 | `src/services/motif/motifGrounding.ts` | patch 级 motif 元数据补全（motifType/claim/priority/revisionHistory） |
 | `src/services/motif/motifCatalog.ts` | motif 目录聚合与摘要（为跨任务迁移/可解释性打地基） |
+| `src/services/motif/conceptMotifs.ts` | concept-level motif 构建器（稳定模板 + concept 关系实例 + concept↔motif 回写） |
 | `src/services/patchGuard.ts` | LLM patch 清洗与规范化（强约束） |
 | `src/services/textSanitizer.ts` | 把 Markdown/LaTeX 风格文本降级为纯文本 |
 | `src/services/llm.ts` | turn 编排：助手回复 + patch 生成 + 统一返回 |
@@ -749,7 +755,7 @@ src/core/graph/patchApply.ts # guarded patch apply + snapshot normalization
 src/core/nodeLayer.ts        # 4-layer node taxonomy inference and normalization
 src/services/llmClient.ts    # OpenAI client
 src/services/chatResponder.ts# assistant text generation + targeted clarification
-src/services/concepts.ts     # strict concept-node 1:1 mapping/reconcile helpers
+src/services/concepts.ts     # semantic-slot concept mapping/reconcile (concept independent from nodes, 1:N grounding)
 src/services/weather/advisor.ts # extreme-weather proactive advisory via external APIs
 src/services/uncertainty/questionPlanner.ts # uncertainty scoring + targeted question planner
 src/services/graphUpdater.ts # graph patch orchestrator (+ motif grounding)
@@ -769,6 +775,7 @@ src/services/graphUpdater/common.ts            # patch parsing/temp id helpers
 src/services/motif/types.ts                    # motif schema types
 src/services/motif/motifGrounding.ts           # patch-time motif metadata grounding
 src/services/motif/motifCatalog.ts             # motif aggregation/catalog
+src/services/motif/conceptMotifs.ts            # concept-level motif builder (relation templates)
 src/services/patchGuard.ts   # strict patch sanitizer
 src/services/textSanitizer.ts# markdown-to-plain sanitizer
 src/services/llm.ts          # turn orchestration
