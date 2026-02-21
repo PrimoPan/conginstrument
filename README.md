@@ -110,6 +110,7 @@ Base URL 示例：`http://localhost:3001`
 | `POST` | `/api/conversations` | 是 | 新建会话 |
 | `GET` | `/api/conversations/:id` | 是 | 会话详情（含图） |
 | `PUT` | `/api/conversations/:id/graph` | 是 | 保存前端编辑后的整图快照（可选触发“基于新图”的建议） |
+| `PUT` | `/api/conversations/:id/concepts` | 是 | 保存中间 Concept 模块状态（锁定/暂停/编辑） |
 | `GET` | `/api/conversations/:id/turns?limit=30` | 是 | 历史轮次 |
 | `POST` | `/api/conversations/:id/turn` | 是 | 非流式单轮 |
 | `POST` | `/api/conversations/:id/turn/stream` | 是 | SSE 流式单轮 |
@@ -253,6 +254,7 @@ Base URL 示例：`http://localhost:3001`
     "nodes": [],
     "edges": []
   },
+  "concepts": [],
   "requestAdvice": true,
   "advicePrompt": "用户已手动调整意图图，请基于最新图给出下一步建议"
 }
@@ -276,6 +278,7 @@ Base URL 示例：`http://localhost:3001`
     "nodes": [],
     "edges": []
   },
+  "concepts": [],
   "updatedAt": "2026-02-16T00:00:00.000Z",
   "assistantText": "基于你手工修正后的意图图，建议先锁定关键约束再排城市节奏...",
   "adviceError": ""
@@ -289,7 +292,49 @@ Base URL 示例：`http://localhost:3001`
 - `400 {"error":"graph.nodes and graph.edges must be arrays"}`
 - `404 {"error":"conversation not found"}`
 
-#### 7.8 `POST /api/conversations/:id/turn`（非流式）
+#### 7.8 `PUT /api/conversations/:id/concepts`（保存 Concept 模块）
+
+说明：`Concept` 与图节点严格一一对应，`nodeIds` 必须且只能包含 1 个节点 id（后端会按该规则归一化）。
+
+请求：
+
+```json
+{
+  "concepts": [
+    {
+      "id": "c_intent",
+      "kind": "intent",
+      "title": "核心意图",
+      "description": "去云南旅游7天",
+      "score": 0.84,
+      "nodeIds": ["n1"],
+      "evidenceTerms": ["云南", "7天"],
+      "sourceMsgIds": ["latest_user"],
+      "locked": false,
+      "paused": false,
+      "updatedAt": "2026-02-16T00:10:00.000Z"
+    }
+  ]
+}
+```
+
+响应：
+
+```json
+{
+  "conversationId": "65f1...",
+  "graph": {
+    "id": "65f1...",
+    "version": 8,
+    "nodes": [],
+    "edges": []
+  },
+  "concepts": [],
+  "updatedAt": "2026-02-16T00:10:00.000Z"
+}
+```
+
+#### 7.9 `POST /api/conversations/:id/turn`（非流式）
 
 请求：
 
@@ -311,7 +356,8 @@ Base URL 示例：`http://localhost:3001`
     "version": 5,
     "nodes": [],
     "edges": []
-  }
+  },
+  "concepts": []
 }
 ```
 
@@ -321,7 +367,7 @@ Base URL 示例：`http://localhost:3001`
 - `400 {"error":"userText required"}`
 - `404 {"error":"conversation not found"}`
 
-#### 7.9 `POST /api/conversations/:id/turn/stream`（SSE）
+#### 7.10 `POST /api/conversations/:id/turn/stream`（SSE）
 
 请求：
 
@@ -535,6 +581,7 @@ conginstrument/
 | `src/core/nodeLayer.ts` | 节点四层分类（Intent/Requirement/Preference/Risk）的推断与归一化 |
 | `src/services/llmClient.ts` | OpenAI SDK 客户端实例 |
 | `src/services/chatResponder.ts` | 助手文本生成（非流式/伪流/真流）+ 不确定性驱动定向澄清提问 |
+| `src/services/concepts.ts` | Concept 映射/对齐/持久化辅助（严格 1 concept = 1 node） |
 | `src/services/weather/advisor.ts` | 外部天气 API 风险检测（目的地+日期命中极端天气时主动提醒） |
 | `src/services/uncertainty/questionPlanner.ts` | 不确定性评分与目标问题生成（budget/duration/destination/critical day/limiting factor） |
 | `src/services/graphUpdater.ts` | 图 patch 主流程（槽位抽取、状态机融合、图编译、motif 地基补全） |
@@ -635,6 +682,7 @@ See the Chinese section above for the full table. Key vars include:
 - `POST /api/conversations`
 - `GET /api/conversations/:id`
 - `PUT /api/conversations/:id/graph` (supports `requestAdvice` + `advicePrompt`)
+- `PUT /api/conversations/:id/concepts` (save Concept panel states)
 - `GET /api/conversations/:id/turns?limit=30`
 - `POST /api/conversations/:id/turn`
 - `POST /api/conversations/:id/turn/stream` (SSE)
@@ -701,6 +749,7 @@ src/core/graph/patchApply.ts # guarded patch apply + snapshot normalization
 src/core/nodeLayer.ts        # 4-layer node taxonomy inference and normalization
 src/services/llmClient.ts    # OpenAI client
 src/services/chatResponder.ts# assistant text generation + targeted clarification
+src/services/concepts.ts     # strict concept-node 1:1 mapping/reconcile helpers
 src/services/weather/advisor.ts # extreme-weather proactive advisory via external APIs
 src/services/uncertainty/questionPlanner.ts # uncertainty scoring + targeted question planner
 src/services/graphUpdater.ts # graph patch orchestrator (+ motif grounding)

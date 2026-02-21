@@ -25,6 +25,7 @@ export type ConversationDoc = {
   createdAt: Date;
   updatedAt: Date;
   graph: any; // 先用 any，后面换成你CDG类型
+  concepts?: any[];
 };
 
 export type TurnDoc = {
