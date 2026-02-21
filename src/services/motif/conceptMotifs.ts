@@ -72,6 +72,7 @@ function familyLabel(family: ConceptItem["family"]): string {
   if (family === "meeting_critical") return "关键日程";
   if (family === "limiting_factor") return "限制因素";
   if (family === "scenic_preference") return "偏好";
+  if (family === "activity_preference") return "活动偏好";
   if (family === "generic_constraint") return "约束";
   if (family === "sub_location") return "子地点";
   return "概念";
@@ -345,4 +346,3 @@ export function attachMotifIdsToConcepts(concepts: ConceptItem[], motifs: Concep
     motifIds: uniq(motifIdsByConcept.get(c.id) || [], 48),
   }));
 }
-

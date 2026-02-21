@@ -114,6 +114,10 @@ export type IntentSignals = {
   lodgingPreferenceEvidence?: string;
   lodgingPreferenceHard?: boolean;
   lodgingPreferenceImportance?: number;
+  activityPreference?: string;
+  activityPreferenceEvidence?: string;
+  activityPreferenceHard?: boolean;
+  activityPreferenceImportance?: number;
   goalImportance?: number;
 };
 
@@ -156,7 +160,10 @@ function escapeRegExp(input: string): string {
 function normalizeSubLocationName(raw: string): string {
   let s = cleanStatement(raw, 40);
   s = s.replace(/^(在|于|到|去|前往|飞到|抵达)\s*/i, "");
-  s = s.replace(/(看球|观赛|比赛|参观|游览|打卡|逛|散步|汇报|演讲|发表|讲论文|参加|参会|开会)$/i, "");
+  s = s.replace(
+    /(看(?:一场|一场次|一场比赛)?球|观赛|比赛|参观|游览|打卡|逛|散步|汇报|演讲|发表|讲论文|参加|参会|开会)$/i,
+    ""
+  );
   return s.trim();
 }
 
@@ -229,7 +236,15 @@ function filterDestinationsBySubLocations(
 
   const out = destinations
     .map((x) => normalizeDestination(x))
-    .filter((x) => x && isLikelyDestinationCandidate(x) && !childWithParent.has(x));
+    .filter((x) => {
+      if (!x || !isLikelyDestinationCandidate(x)) return false;
+      if (childWithParent.has(x)) return false;
+      for (const child of childWithParent) {
+        if (!child || child.length < 2) continue;
+        if (x.includes(child)) return false;
+      }
+      return true;
+    });
   for (const p of parentCities) {
     if (!out.includes(p)) out.push(p);
   }
@@ -261,15 +276,21 @@ function extractSubLocationsFromText(
   }
 
   const activityPoiRe =
-    /(?:到|去|在|于|抵达)\s*([A-Za-z\u4e00-\u9fff]{2,24}?)(?=看球|观赛|比赛|参观|游览|看展|打卡|拍照|购物|吃饭|就餐|汇报|演讲|发表|讲论文|参加|参会|开会)/gi;
+    /(?:到|去|在|于|抵达)\s*([A-Za-z\u4e00-\u9fff]{2,24}?)(?=看(?:一场|场|一下|一场比赛)?球|看(?:一场|场|一下)?比赛|观赛|比赛|参观|游览|看展|打卡|拍照|购物|吃饭|就餐|汇报|演讲|发表|讲论文|参加|参会|开会)/gi;
   for (const m of t.matchAll(activityPoiRe)) {
     const rawName = String(m[1] || "");
     const name = normalizeSubLocationName(rawName);
     if (!name) continue;
 
     const idx = Number(m.index) || 0;
+    const ctx = cleanStatement(t.slice(Math.max(0, idx - 24), Math.min(t.length, idx + 44)), 120);
+    const hard = HARD_REQUIRE_RE.test(ctx) || HARD_CONSTRAINT_RE.test(ctx);
+    const venueCtx =
+      /看(?:一场|场|一下|一场比赛)?球|看(?:一场|场|一下)?比赛|观赛|比赛|看展|演唱会|演出|打卡|拍照|购物|吃饭|就餐/i.test(
+        ctx
+      );
     const nameAsCity = normalizeDestination(name);
-    if (knownCities.includes(nameAsCity)) continue;
+    if (knownCities.includes(nameAsCity) && !venueCtx) continue;
     let parentCity: string | undefined;
     for (let i = cityMentions.length - 1; i >= 0; i -= 1) {
       const c = cityMentions[i];
@@ -284,8 +305,8 @@ function extractSubLocationsFromText(
       parentCity,
       evidence: cleanStatement(m[0] || name, 60),
       kind: "venue",
-      hard: false,
-      importance: 0.62,
+      hard,
+      importance: hard ? 0.88 : 0.62,
     });
   }
 
@@ -719,6 +740,14 @@ export function normalizeDestination(raw: string): string {
   s = s.replace(/(这座城市|这座城|这座|城市|城区|城)$/i, "");
   s = s.replace(/(之外|之内|以内|以内地区)$/i, "");
   s = s.replace(/(?:前|后)$/i, "");
+  s = s.replace(
+    /(?:看|观)(?:一场|一下|一次|场)?(?:球|比赛|演唱会|演出|展览|赛事)$/i,
+    ""
+  );
+  s = s.replace(
+    /(?:参加|观看|去看|打卡)(?:一场|一下|一次|场)?(?:比赛|演唱会|演出|展览|赛事)$/i,
+    ""
+  );
   // 迭代剥离尾部噪声，避免“巴塞罗那参加CHI”“米兰玩”这类污染目的地槽位。
   const tailNoiseRe =
     /(参加|参会|开会|会议|chi|conference|workshop|summit|论坛|峰会|玩|逛|旅游|旅行|游玩|出行|度假|计划|安排)$/i;
@@ -755,6 +784,7 @@ export function isLikelyDestinationCandidate(x: string): boolean {
   if (/(其中|其中有|其余|其他时候|海地区|该地区)/.test(s)) return false;
   if (s.endsWith("地区") && s.length <= 4) return false;
   if (/(参加|参会|开会|会议|玩|旅游|旅行|度假|计划|安排)$/i.test(s)) return false;
+  if (/(看|观).{0,4}(球|赛|比赛|演出|展)|球迷|演唱会|音乐会|球票|门票/i.test(s)) return false;
   if (
     /心脏|母亲|父亲|父母|家人|我们一家|一起|预算|人数|行程|计划|注意|高强度|旅行时|旅游时|需要|限制|不能|安排|在此之前|此前|之前|之后|然后|再从|我会|我要|参会|参加|开会|会议|飞到|出发|机场|航班|汇报|论文|报告|顺带|顺便|顺路|顺道/i.test(
       s
@@ -992,11 +1022,34 @@ export function isTravelIntentText(text: string, signals: IntentSignals) {
 export function buildTravelIntentStatement(signals: IntentSignals, userText: string): string | null {
   if (!isTravelIntentText(userText, signals)) return null;
 
-  const destinations = (signals.destinations || []).filter(Boolean);
+  const subLocationNames = new Set(
+    (signals.subLocations || [])
+      .map((x) => normalizeDestination(x.name || ""))
+      .filter(Boolean)
+  );
+  const destinations = (signals.destinations || [])
+    .map((x) => normalizeDestination(x))
+    .filter((x) => {
+      if (!x || !isLikelyDestinationCandidate(x)) return false;
+      if (subLocationNames.has(x)) return false;
+      for (const sub of subLocationNames) {
+        if (!sub || sub.length < 2) continue;
+        if (x.includes(sub)) return false;
+      }
+      return true;
+    });
+  const normalizedPrimary = normalizeDestination(signals.destination || "");
+  const primaryDestination =
+    normalizedPrimary &&
+    isLikelyDestinationCandidate(normalizedPrimary) &&
+    !subLocationNames.has(normalizedPrimary) &&
+    !Array.from(subLocationNames).some((sub) => sub && sub.length >= 2 && normalizedPrimary.includes(sub))
+      ? normalizedPrimary
+      : "";
   const destinationPhrase =
     destinations.length >= 2
       ? `${destinations.slice(0, 3).join("和")}`
-      : signals.destination || destinations[0] || "";
+      : primaryDestination || destinations[0] || "";
 
   if (destinationPhrase && signals.durationDays) {
     return `意图：去${destinationPhrase}旅游${signals.durationDays}天`;
@@ -1072,6 +1125,43 @@ export function normalizeLodgingPreferenceStatement(raw: string) {
   };
 }
 
+function normalizeActivityPreferenceStatement(raw: string) {
+  const s = cleanStatement(raw, 180);
+  if (!s) return null;
+  const hasSports = /球迷|看球|观赛|比赛|球赛|主场|客场|德比|门票|球票|足球|篮球|赛事/i.test(s);
+  const hasEvent = /演唱会|音乐会|演出|展览|看展|live\s*show|concert|match|game/i.test(s);
+  if (!hasSports && !hasEvent) return null;
+  if (
+    !HARD_REQUIRE_RE.test(s) &&
+    !HARD_CONSTRAINT_RE.test(s) &&
+    !/喜欢|偏好|热爱|粉丝|球迷|想看|一定要|必须|务必|绝对/i.test(s)
+  ) {
+    return null;
+  }
+  const hard = HARD_REQUIRE_RE.test(s) || HARD_CONSTRAINT_RE.test(s);
+  const normalizeTeamName = (x: string) =>
+    cleanStatement(x || "", 24)
+      .replace(/^(?:我是|我|一个|一名|个|位)+\s*/i, "")
+      .replace(/^(的|最喜欢|最爱|支持的)\s*/i, "")
+      .replace(/(球队|俱乐部)$/i, "")
+      .trim();
+  const teamRaw =
+    s.match(/([A-Za-z][A-Za-z0-9\s._-]{1,24})\s*(?:球迷|粉丝)/i)?.[1] ||
+    s.match(/([\u4e00-\u9fffA-Za-z]{2,16})\s*(?:球迷|粉丝|主队)/i)?.[1] ||
+    "";
+  const team = normalizeTeamName(teamRaw);
+  const statement = hasSports
+    ? team
+      ? `活动偏好：${cleanStatement(team, 20)}相关赛事优先`
+      : "活动偏好：体育赛事优先"
+    : "活动偏好：演出展览优先";
+  return {
+    statement,
+    hard,
+    evidence: s,
+  };
+}
+
 function clampImportance(x: any, fallback = 0.72) {
   const n = Number(x);
   if (!Number.isFinite(n)) return fallback;
@@ -1109,6 +1199,20 @@ function isLanguageOnlyConstraint(text: string | undefined): boolean {
   const s = cleanStatement(text || "", 120);
   if (!s) return false;
   return LANGUAGE_CONSTRAINT_RE.test(s) && !MEDICAL_HEALTH_RE.test(s);
+}
+
+function isVenueOrExperienceRequirement(text: string): boolean {
+  const s = cleanStatement(text || "", 120);
+  if (!s) return false;
+  const hasExperienceCue =
+    /球迷|看球|观赛|比赛|球赛|主场|客场|门票|球票|圣西罗|stadium|arena|演唱会|音乐会|演出|展览|看展|concert|match|game/i.test(
+      s
+    );
+  const hasRiskCue =
+    MEDICAL_HEALTH_RE.test(s) ||
+    LANGUAGE_CONSTRAINT_RE.test(s) ||
+    /签证|护照|入境|法律|治安|安全|危险|急救|宗教|礼拜|清真|过敏|忌口|饮食/i.test(s);
+  return hasExperienceCue && !hasRiskCue;
 }
 
 function mergeGenericConstraints(
@@ -1359,6 +1463,7 @@ export function extractIntentSignals(userText: string, opts?: { historyMode?: bo
     const s = cleanStatement(part, 120);
     if (!s) continue;
     if (/^(预算(?:上限)?|总行程时长|行程时长|城市时长|停留时长|同行人数|目的地)[:：]/.test(s)) continue;
+    if (isVenueOrExperienceRequirement(s)) continue;
     const likelyConstraintCue =
       HARD_CONSTRAINT_RE.test(s) ||
       HARD_REQUIRE_RE.test(s) ||
@@ -1410,6 +1515,14 @@ export function extractIntentSignals(userText: string, opts?: { historyMode?: bo
     out.lodgingPreferenceHard = lodgingClause.hard;
     out.lodgingPreferenceEvidence = lodgingClause.evidence;
     out.lodgingPreferenceImportance = lodgingClause.hard ? 0.82 : 0.66;
+  }
+
+  const activityClause = sentenceParts(text).map(normalizeActivityPreferenceStatement).find(Boolean);
+  if (activityClause) {
+    out.activityPreference = activityClause.statement;
+    out.activityPreferenceEvidence = activityClause.evidence;
+    out.activityPreferenceHard = activityClause.hard;
+    out.activityPreferenceImportance = activityClause.hard ? 0.84 : 0.7;
   }
 
   return out;
@@ -1478,6 +1591,9 @@ function mergeSignalsWithLatest(history: IntentSignals, latest: IntentSignals): 
     out.peopleImportance = clampImportance(latest.peopleImportance, out.peopleImportance || 0.72);
   }
 
+  const historyDestSnapshot = (out.destinations || [])
+    .map((x) => normalizeDestination(x))
+    .filter((x) => x && isLikelyDestinationCandidate(x));
   out.destinations = mergeDestinations(out.destinations, latest.destinations);
   if (out.destinations?.length) {
     out.destination = out.destinations[0];
@@ -1494,13 +1610,38 @@ function mergeSignalsWithLatest(history: IntentSignals, latest: IntentSignals): 
   }
   if (latest.destination) {
     const normalizedLatestDestination = normalizeDestination(latest.destination);
+    const latestSubNames = new Set(
+      (latest.subLocations || [])
+        .map((x) => normalizeDestination(x.name || ""))
+        .filter(Boolean)
+    );
+    const latestLooksLikeSubLocation =
+      latestSubNames.has(normalizedLatestDestination) ||
+      Array.from(latestSubNames).some(
+        (sub) => sub && sub.length >= 2 && normalizedLatestDestination.includes(sub)
+      );
     if (normalizedLatestDestination && isLikelyDestinationCandidate(normalizedLatestDestination)) {
-      out.destination = normalizedLatestDestination;
-      out.destinationEvidence = latest.destinationEvidence || out.destinationEvidence;
-      out.destinations = mergeDestinations(out.destinations, [normalizedLatestDestination]);
+      if (!latestLooksLikeSubLocation) {
+        out.destination = normalizedLatestDestination;
+        out.destinationEvidence = latest.destinationEvidence || out.destinationEvidence;
+        out.destinations = mergeDestinations(out.destinations, [normalizedLatestDestination]);
+      }
     }
   }
-  out.subLocations = mergeSubLocations(out.subLocations, latest.subLocations);
+  const latestSubs = (latest.subLocations || []).map((x) => ({ ...x }));
+  if (latestSubs.length) {
+    const historyDests = historyDestSnapshot;
+    const uniqueHistory = Array.from(new Set(historyDests));
+    const fallbackParent = uniqueHistory.length === 1 ? uniqueHistory[0] : "";
+    if (fallbackParent) {
+      for (const sub of latestSubs) {
+        if (!sub.parentCity) {
+          sub.parentCity = fallbackParent;
+        }
+      }
+    }
+  }
+  out.subLocations = mergeSubLocations(out.subLocations, latestSubs);
   out.hasTemporalAnchor = !!latest.hasTemporalAnchor || !!out.hasTemporalAnchor;
   out.hasDurationUpdateCue = !!latest.hasDurationUpdateCue || !!out.hasDurationUpdateCue;
   out.hasExplicitTotalCue = !!latest.hasExplicitTotalCue || !!out.hasExplicitTotalCue;
@@ -1696,6 +1837,18 @@ function mergeSignalsWithLatest(history: IntentSignals, latest: IntentSignals): 
     out.lodgingPreferenceImportance = clampImportance(
       latest.lodgingPreferenceImportance,
       out.lodgingPreferenceImportance || 0.66
+    );
+  }
+  if (latest.activityPreference) {
+    out.activityPreference = latest.activityPreference;
+    out.activityPreferenceEvidence =
+      latest.activityPreferenceEvidence || out.activityPreferenceEvidence;
+    out.activityPreferenceHard = latest.activityPreferenceHard;
+  }
+  if (latest.activityPreferenceImportance != null) {
+    out.activityPreferenceImportance = clampImportance(
+      latest.activityPreferenceImportance,
+      out.activityPreferenceImportance || 0.7
     );
   }
   if (latest.goalImportance != null) {

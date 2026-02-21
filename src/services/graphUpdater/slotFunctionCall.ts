@@ -93,6 +93,13 @@ type SlotExtractionResult = {
     importance?: number;
     confidence?: number;
   };
+  activity_preference?: {
+    text?: string;
+    evidence?: string;
+    hard?: boolean;
+    importance?: number;
+    confidence?: number;
+  };
   lodging_preference?: {
     text?: string;
     evidence?: string;
@@ -519,6 +526,19 @@ function slotsToSignals(slots: SlotExtractionResult): IntentSignals {
     );
   }
 
+  if (slots.activity_preference?.text) {
+    out.activityPreference = cleanStatement(slots.activity_preference.text, 64);
+    out.activityPreferenceEvidence = cleanStatement(
+      slots.activity_preference.evidence || slots.activity_preference.text,
+      60
+    );
+    out.activityPreferenceHard = !!slots.activity_preference.hard;
+    out.activityPreferenceImportance = clampImportance(
+      slots.activity_preference.importance,
+      slots.activity_preference.hard ? 0.84 : 0.7
+    );
+  }
+
   if (slots.lodging_preference?.text) {
     out.lodgingPreference = cleanStatement(slots.lodging_preference.text, 64);
     out.lodgingPreferenceEvidence = cleanStatement(
@@ -549,7 +569,8 @@ const SLOT_SYSTEM_PROMPT = `你是结构化槽位抽取器。只调用给定函�
 3) “留一天做事/发表论文/见人”归入 critical_days，不得覆盖 total_duration。
 4) destinations 仅放地名；场馆/景点/街区尽量放入 sub_locations，并附 parent_city。
 5) 约束可放 health_constraints / language_constraints / constraints（通用约束）。
-6) 不确定就留空，不要编造。`;
+6) “球迷/看球/演唱会/看展”等兴趣诉求优先放 activity_preference（以及必要的 sub_locations），不要误放到 constraints。
+7) 不确定就留空，不要编造。`;
 
 const SLOT_PARAMETERS = {
   type: "object",
@@ -694,6 +715,17 @@ const SLOT_PARAMETERS = {
       },
     },
     scenic_preference: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        text: { type: "string" },
+        evidence: { type: "string" },
+        hard: { type: "boolean" },
+        importance: { type: "number" },
+        confidence: { type: "number" },
+      },
+    },
+    activity_preference: {
       type: "object",
       additionalProperties: false,
       properties: {

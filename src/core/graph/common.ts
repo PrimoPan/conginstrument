@@ -85,6 +85,7 @@ function slotFamily(slot: string | null | undefined): string {
   if (slot.startsWith("slot:destination:")) return "destination";
   if (slot.startsWith("slot:duration_city:")) return "duration_city";
   if (slot.startsWith("slot:meeting_critical:")) return "meeting_critical";
+  if (slot.startsWith("slot:sub_location:")) return "sub_location";
   if (slot.startsWith("slot:conflict:")) return "conflict";
   if (slot.startsWith("slot:constraint:")) return "generic_constraint";
   if (slot === "slot:duration_total") return "duration_total";
@@ -93,6 +94,7 @@ function slotFamily(slot: string | null | undefined): string {
   if (slot === "slot:budget") return "budget";
   if (slot === "slot:lodging") return "lodging";
   if (slot === "slot:scenic_preference") return "scenic_preference";
+  if (slot === "slot:activity_preference") return "activity_preference";
   if (slot === "slot:health") return "health";
   if (slot === "slot:language") return "language";
   if (slot === "slot:goal") return "goal";
@@ -198,6 +200,9 @@ function normalizeRevisionHistory(input: any): RevisionRecord[] | undefined {
 }
 
 function slotKeyOfNode(node: ConceptNode): string | null {
+  const explicitKey = cleanText((node as any).key);
+  if (explicitKey.startsWith("slot:")) return explicitKey;
+
   const s = cleanText(node.statement);
   if (!s) return null;
 
@@ -236,6 +241,7 @@ function slotKeyOfNode(node: ConceptNode): string | null {
     return "slot:destination:unknown";
   }
   if ((node.type === "preference" || node.type === "constraint") && /^景点偏好[:：]\s*.+$/.test(s)) return "slot:scenic_preference";
+  if ((node.type === "preference" || node.type === "constraint") && /^活动偏好[:：]\s*.+$/.test(s)) return "slot:activity_preference";
   if (
     (node.type === "preference" || node.type === "constraint") &&
     (/^(住宿偏好|酒店偏好|住宿标准|酒店标准)[:：]/.test(s) ||
@@ -248,6 +254,12 @@ function slotKeyOfNode(node: ConceptNode): string | null {
     const m = s.match(/^限制因素[:：]\s*(.+)$/);
     const detail = normalizePlaceToken((m?.[1] || "limiting").slice(0, 28));
     return `slot:constraint:limiting:${detail || "default"}`;
+  }
+  if ((node.type === "constraint" || node.type === "fact") && /^子地点[:：]\s*.+$/.test(s)) {
+    const m = s.match(/^子地点[:：]\s*(.+?)(?:（(.+?)）)?$/);
+    const name = normalizePlaceToken((m?.[1] || "loc").slice(0, 24)) || "loc";
+    const parent = normalizePlaceToken((m?.[2] || "root").slice(0, 24)) || "root";
+    return `slot:sub_location:${parent}:${name}`;
   }
   if (node.type === "constraint" && /^冲突提示[:：]\s*.+$/.test(s)) {
     const m = s.match(/^冲突提示[:：]\s*(.+)$/);
@@ -499,6 +511,8 @@ function slotPriorityScore(slot: string | null | undefined): number {
   if (f === "duration_city" || f === "duration_meeting" || f === "meeting_critical") return 5;
   if (f === "lodging") return 6;
   if (f === "scenic_preference") return 7;
+  if (f === "activity_preference") return 7;
+  if (f === "sub_location") return 8;
   return 99;
 }
 
@@ -513,8 +527,12 @@ function rootEdgeTypeForNode(node: ConceptNode, slot: string | null): EdgeType {
     if (node.type === "constraint" || node.strength === "hard") return "constraint";
     return "enable";
   }
+  if (f === "activity_preference") {
+    if (node.type === "constraint" || node.strength === "hard") return "constraint";
+    return "enable";
+  }
   if (f === "people" || f === "destination") return "enable";
-  if (f === "duration_city" || f === "duration_meeting") return "determine";
+  if (f === "duration_city" || f === "duration_meeting" || f === "sub_location") return "determine";
   if (node.type === "constraint") return "constraint";
   if (node.type === "question") return "determine";
   return "enable";

@@ -18,6 +18,7 @@ export type ConceptFamily =
   | "budget"
   | "people"
   | "lodging"
+  | "activity_preference"
   | "meeting_critical"
   | "limiting_factor"
   | "scenic_preference"
@@ -110,6 +111,7 @@ function slotFamily(key: string): ConceptFamily {
   if (key === "slot:lodging") return "lodging";
   if (key === "slot:health" || key === "slot:language") return "limiting_factor";
   if (key === "slot:scenic_preference") return "scenic_preference";
+  if (key === "slot:activity_preference") return "activity_preference";
   return "other";
 }
 
@@ -135,6 +137,7 @@ function parseSemanticKeyFromStatement(node: ConceptNode): string {
   if (/^同行人数[:：]/.test(s)) return "slot:people";
   if (/^(住宿偏好|酒店偏好|住宿标准|酒店标准)[:：]/.test(s)) return "slot:lodging";
   if (/^景点偏好[:：]/.test(s)) return "slot:scenic_preference";
+  if (/^活动偏好[:：]/.test(s)) return "slot:activity_preference";
   if (/^(?:会议关键日|关键会议日|论文汇报日|关键日)[:：]/.test(s)) {
     const x = s.split(/[:：]/)[1] || "critical";
     return `slot:meeting_critical:${slug(x) || "critical"}`;
@@ -192,6 +195,7 @@ function canonicalSlotKey(key: string): string {
   if (k === "slot:health") return "slot:constraint:limiting:health:health";
   if (k === "slot:language") return "slot:constraint:limiting:language:language";
   if (k === "slot:scenic_preference") return "slot:scenic_preference";
+  if (k === "slot:activity_preference") return "slot:activity_preference";
 
   return k;
 }
@@ -224,17 +228,19 @@ function conceptKindForNode(n: ConceptNode, family: ConceptFamily): ConceptKind 
     family === "duration_total" ||
     family === "budget" ||
     family === "people" ||
-    family === "lodging"
+    family === "lodging" ||
+    family === "limiting_factor" ||
+    family === "generic_constraint" ||
+    family === "sub_location"
   ) {
     return "requirement";
   }
+  if (family === "scenic_preference" || family === "activity_preference") return "preference";
   if (family === "meeting_critical") return "risk";
 
   if (
-    family === "limiting_factor" ||
-    family === "generic_constraint" ||
     (n as any).layer === "risk" ||
-    /心脏|心肺|慢性病|过敏|宗教|饮食|清真|素食|语言|不会英语|安全|法律|签证|风险|禁忌|hard/i.test(
+    /心脏|心肺|慢性病|过敏|急救|安全|危险|人身|法律|签证|风险|禁忌|critical|high risk/i.test(
       cleanText(n.statement, 180)
     )
   ) {
@@ -574,4 +580,3 @@ export function applyConceptStateToGraph(params: {
     nodes,
   };
 }
-

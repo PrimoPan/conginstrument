@@ -657,10 +657,29 @@ function rebalanceIntentTopology(
 
   for (const [slot, node] of secondarySlotEntries) {
     let anchorId = rootId;
+    if (slotFamily(slot) === "activity_preference") {
+      const bestSubLocation = pickBestSlotNode(slotNodes, "sub_location", node.statement);
+      if (bestSubLocation) anchorId = bestSubLocation.id;
+      else {
+        const bestDestination = pickBestSlotNode(slotNodes, "destination", node.statement);
+        if (bestDestination) anchorId = bestDestination.id;
+      }
+    }
     if (slot === "slot:lodging" && slotNodes.get("slot:budget")) anchorId = slotNodes.get("slot:budget")!.id;
     if (slotFamily(slot) === "scenic_preference") {
       const bestDestination = pickBestSlotNode(slotNodes, "destination", node.statement);
       if (bestDestination) anchorId = bestDestination.id;
+    }
+    if (slotFamily(slot) === "sub_location") {
+      const city = cleanText(slot.replace(/^slot:sub_location:/, "").split(":")[0] || "");
+      const matchDestination = Array.from(slotNodes.entries()).find(
+        ([k]) => slotFamily(k) === "destination" && cleanText(k).includes(city)
+      );
+      if (matchDestination?.[1]?.id) anchorId = matchDestination[1].id;
+      else {
+        const bestDestination = pickBestSlotNode(slotNodes, "destination", node.statement);
+        if (bestDestination) anchorId = bestDestination.id;
+      }
     }
     if (slotFamily(slot) === "duration_city") {
       const city = slot.replace(/^slot:duration_city:/, "");

@@ -239,6 +239,19 @@ function normalizeLimitingText(raw: string): string {
     .replace(/(需要|必须|尽量|注意|请|希望|可以|不能|不要|避免)/g, "");
 }
 
+function isExperienceLikeConstraint(text: string): boolean {
+  const s = cleanStatement(text || "", 120);
+  if (!s) return false;
+  const hasEvent = /球迷|看球|观赛|比赛|球赛|球票|门票|圣西罗|stadium|arena|演唱会|音乐会|演出|展览|看展|concert|match|game/i.test(
+    s
+  );
+  const hasRisk =
+    /心脏|慢性病|过敏|医疗|安全|危险|签证|护照|法律|宗教|礼拜|饮食|清真|不会英语|语言障碍/i.test(
+      s
+    );
+  return hasEvent && !hasRisk;
+}
+
 function collectLimitingFactors(signals: IntentSignals): LimitingFactor[] {
   const map = new Map<string, LimitingFactor>();
   const upsert = (raw: {
@@ -303,6 +316,7 @@ function collectLimitingFactors(signals: IntentSignals): LimitingFactor[] {
   }
 
   for (const gc of signals.genericConstraints || []) {
+    if (isExperienceLikeConstraint(gc.text || "")) continue;
     upsert({
       text: gc.text,
       evidence: gc.evidence || gc.text,
@@ -389,6 +403,7 @@ export function buildSlotStateMachine(params: {
   let durationTotalSlotKey: string | null = null;
   let lodgingSlotKey: string | null = null;
   let scenicSlotKey: string | null = null;
+  let activitySlotKey: string | null = null;
 
   for (const city of destinations) {
     const slotKey = `slot:destination:${slug(city)}`;
@@ -413,6 +428,35 @@ export function buildSlotStateMachine(params: {
       priority: imp,
     });
     pushEdge(edges, slotKey, "slot:goal", "enable", 0.86);
+  }
+
+  if (params.signals.activityPreference) {
+    const statement = cleanStatement(params.signals.activityPreference, 80);
+    if (statement) {
+      const hard = !!params.signals.activityPreferenceHard;
+      const imp = clamp01(params.signals.activityPreferenceImportance, hard ? 0.84 : 0.7);
+      activitySlotKey = "slot:activity_preference";
+      nodes.push({
+        slotKey: activitySlotKey,
+        type: "preference",
+        layer: "preference",
+        strength: hard ? "hard" : "soft",
+        statement: statement.startsWith("活动偏好") ? statement : `活动偏好: ${statement}`,
+        confidence: hard ? 0.84 : 0.76,
+        importance: imp,
+        tags: ["preference", "activity"],
+        evidenceIds: [params.signals.activityPreferenceEvidence || statement].filter(Boolean),
+        sourceMsgIds: ["latest_user"],
+        key: activitySlotKey,
+        motifType: "belief",
+        claim: statement,
+        evidence: motifEvidence(params.signals.activityPreferenceEvidence || statement),
+        linkedIntentIds: ["slot:goal"],
+        revisionHistory: [{ at: now, action: "updated", by: "system", reason: "slot_state_machine" }],
+        priority: imp,
+      });
+      pushEdge(edges, activitySlotKey, "slot:goal", hard ? "constraint" : "enable", 0.78);
+    }
   }
 
   if (durationState.totalDays) {
@@ -474,18 +518,24 @@ export function buildSlotStateMachine(params: {
     const name = cleanStatement(sub.name || "", 40);
     if (!name) continue;
     const parentCity = normalizeDestination(sub.parentCity || "");
-    const parentKey = parentCity && isLikelyDestinationCandidate(parentCity)
-      ? `slot:destination:${slug(parentCity)}`
-      : "slot:goal";
+    const parentKey =
+      parentCity && isLikelyDestinationCandidate(parentCity)
+        ? `slot:destination:${slug(parentCity)}`
+        : destinations.length
+          ? `slot:destination:${slug(destinations[0])}`
+          : "slot:goal";
     const slotKey = `slot:sub_location:${slug(parentCity || "root")}:${slug(name)}`;
     const hard = !!sub.hard;
     const importance = clamp01(sub.importance, hard ? 0.86 : 0.62);
+    const looksLikeVenueNeed = /(看球|观赛|比赛|球场|stadium|arena|演唱会|演出|展览|看展|concert|match|game)/i.test(
+      `${name} ${sub.evidence || ""}`
+    );
     nodes.push({
       slotKey,
       type: hard ? "constraint" : "fact",
-      layer: hard ? "risk" : "requirement",
+      layer: "requirement",
       strength: hard ? "hard" : undefined,
-      severity: hard ? "high" : undefined,
+      severity: undefined,
       statement: parentCity ? `子地点: ${name}（${parentCity}）` : `子地点: ${name}`,
       confidence: hard ? 0.9 : 0.74,
       importance,
@@ -501,6 +551,9 @@ export function buildSlotStateMachine(params: {
       priority: importance,
     });
     pushEdge(edges, slotKey, parentKey, hard ? "constraint" : "determine", hard ? 0.92 : 0.78);
+    if (activitySlotKey && looksLikeVenueNeed) {
+      pushEdge(edges, activitySlotKey, slotKey, "determine", hard ? 0.86 : 0.78);
+    }
   }
 
   if (params.signals.peopleCount) {
@@ -564,6 +617,7 @@ export function buildSlotStateMachine(params: {
     const kind = factor.kind || "other";
     const slotKey = `slot:constraint:limiting:${slug(kind)}:${slug(factor.text)}`;
     const severity = factor.severity || (factor.hard ? "high" : "medium");
+    const riskKind = new Set(["health", "safety", "legal", "mobility"]);
     const imp = clamp01(factor.importance, factor.hard ? 0.84 : 0.74);
     const rebuttalPoints =
       kind === "health"
@@ -579,7 +633,7 @@ export function buildSlotStateMachine(params: {
     nodes.push({
       slotKey,
       type: "constraint",
-      layer: severity === "critical" || severity === "high" ? "risk" : "requirement",
+      layer: riskKind.has(kind) && (severity === "critical" || severity === "high") ? "risk" : "requirement",
       strength: factor.hard ? "hard" : "soft",
       severity,
       statement: `限制因素: ${factor.text}`,

@@ -46,6 +46,7 @@ function parseSlotKeyFromStatement(node: ConceptNode): string | null {
     return `slot:meeting_critical:${slug(x)}`;
   }
   if (/^景点偏好[:：]/.test(s)) return "slot:scenic_preference";
+  if (/^活动偏好[:：]/.test(s)) return "slot:activity_preference";
   if (/^(住宿偏好|酒店偏好|住宿标准|酒店标准)[:：]/.test(s)) return "slot:lodging";
   if (/^子地点[:：]/.test(s)) return `slot:sub_location:${slug(s)}`;
   return null;
