@@ -24,6 +24,12 @@ function dlog(...args: any[]) {
 const GRAPH_MODEL = process.env.CI_GRAPH_MODEL || config.model;
 const USE_FUNCTION_SLOT_EXTRACTION = process.env.CI_GRAPH_USE_FUNCTION_SLOTS !== "0";
 
+function normalizeUtterance(input: any): string {
+  return String(input || "")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
 function pickRootGoalId(graph: CDG): string | null {
   const goals = (graph.nodes || []).filter((n) => n.type === "goal");
   if (!goals.length) return null;
@@ -121,15 +127,26 @@ async function buildSignals(params: {
   recentTurns: Array<{ role: "user" | "assistant"; content: string }>;
   systemPrompt?: string;
 }): Promise<IntentSignals> {
-  const signalText = mergeTextSegments([
-    ...((params.recentTurns || [])
-      .filter((t) => t.role === "user")
-      .map((t) => String(t.content || ""))
-      .slice(-8)),
-    params.userText,
-  ]);
+  const recentTurns = params.recentTurns || [];
+  const recentUserTexts = recentTurns
+    .filter((t) => t.role === "user")
+    .map((t) => String(t.content || ""))
+    .slice(-8);
+  const historyUserTexts = recentUserTexts.slice();
+  const tailTurn = recentTurns[recentTurns.length - 1];
+  if (
+    tailTurn?.role === "user" &&
+    normalizeUtterance(tailTurn.content) &&
+    normalizeUtterance(tailTurn.content) === normalizeUtterance(params.userText) &&
+    historyUserTexts.length
+  ) {
+    historyUserTexts.pop();
+  }
 
-  const textSignals = extractIntentSignalsWithRecency(signalText, params.userText);
+  const historyUserText = mergeTextSegments(historyUserTexts);
+  const signalText = mergeTextSegments([...historyUserTexts, params.userText]);
+
+  const textSignals = extractIntentSignalsWithRecency(historyUserText, params.userText);
   let signals = textSignals;
 
   if (USE_FUNCTION_SLOT_EXTRACTION) {

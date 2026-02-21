@@ -22,6 +22,7 @@ import {
 import { cleanStatement, sentenceParts } from "./text.js";
 
 type BudgetMatch = { value: number; evidence: string; index: number };
+type BudgetDeltaMatch = { delta: number; evidence: string; index: number };
 
 type DurationCandidate = {
   days: number;
@@ -88,6 +89,7 @@ export type IntentSignals = {
   durationUnknown?: boolean;
   durationUnknownEvidence?: string;
   budgetCny?: number;
+  budgetDeltaCny?: number;
   budgetEvidence?: string;
   budgetImportance?: number;
   healthConstraint?: string;
@@ -320,7 +322,7 @@ function pickBudgetFromText(text: string): { value: number; evidence: string } |
   if (!t) return null;
 
   const wanPatterns = [
-    /(?:总预算|预算(?:上限)?|经费|花费|费用)\s*(?:调整为|改成|改到|上调到|提高到|提升到|放宽到|调到|更新为|大概|大约|约|在|为|是|控制在|控制|不超过|不要超过|上限为|上限是|以内|左右|约为|大致|大致在|大概在)?\s*([0-9]+(?:\.[0-9]+)?)\s*万/i,
+    /(?:总预算|预算(?:上限)?|经费|花费|费用)\s*(?:调整为|改成|改到|上调到|提高到|提升到|增加到|降到|降低到|放宽到|调到|更新为|大概|大约|约|在|为|是|控制在|控制|不超过|不要超过|上限为|上限是|以内|左右|约为|大致|大致在|大概在)?\s*([0-9]+(?:\.[0-9]+)?)\s*万/i,
     /([0-9]+(?:\.[0-9]+)?)\s*万(?:元|人民币)?\s*(?:预算|经费|花费|费用)?/i,
   ];
   let best: BudgetMatch | null = null;
@@ -331,7 +333,7 @@ function pickBudgetFromText(text: string): { value: number; evidence: string } |
   }
 
   const yuanPatterns = [
-    /(?:总预算|预算(?:上限)?|经费|花费|费用)\s*(?:调整为|改成|改到|上调到|提高到|提升到|放宽到|调到|更新为|大概|大约|约|在|为|是|控制在|控制|不超过|不要超过|上限为|上限是|以内|左右|约为|大致|大致在|大概在)?\s*([0-9]{3,9})(?:\s*[-~到至]\s*[0-9]{3,9})?\s*(?:元|块|人民币)?/i,
+    /(?:总预算|预算(?:上限)?|经费|花费|费用)\s*(?:调整为|改成|改到|上调到|提高到|提升到|增加到|降到|降低到|放宽到|调到|更新为|大概|大约|约|在|为|是|控制在|控制|不超过|不要超过|上限为|上限是|以内|左右|约为|大致|大致在|大概在)?\s*([0-9]{3,9})(?:\s*[-~到至]\s*[0-9]{3,9})?\s*(?:元|块|人民币)?/i,
     /([0-9]{3,9})\s*(?:元|块|人民币)\s*(?:预算|总预算|经费|花费|费用)?/i,
   ];
   for (const re of yuanPatterns) {
@@ -342,6 +344,61 @@ function pickBudgetFromText(text: string): { value: number; evidence: string } |
 
   if (!best) return null;
   return { value: best.value, evidence: best.evidence };
+}
+
+function pickBudgetDeltaFromText(text: string): { delta: number; evidence: string } | null {
+  const t = String(text || "").replace(/,/g, "");
+  if (!t) return null;
+
+  const defs: Array<{
+    re: RegExp;
+    sign: 1 | -1;
+    parser?: (raw: string) => number;
+  }> = [
+    {
+      re: /(?:再|又|额外|另外|追加|多给|增加了?|加了?|上调了?|提高了?|提升了?)\s*([0-9]+(?:\.[0-9]+)?)\s*万(?:元|人民币)?(?:预算|经费|花费|费用)?/gi,
+      sign: 1,
+      parser: (raw) => Math.round(Number(raw) * 10000),
+    },
+    {
+      re: /(?:再|又|额外|另外|追加|多给|增加了?|加了?|上调了?|提高了?|提升了?)\s*([0-9]{2,9})\s*(?:元|块|人民币)?(?:预算|经费|花费|费用)?/gi,
+      sign: 1,
+    },
+    {
+      re: /(?:减少了?|减了?|减去|下调了?|砍掉|扣减|省下了?)\s*([0-9]+(?:\.[0-9]+)?)\s*万(?:元|人民币)?(?:预算|经费|花费|费用)?/gi,
+      sign: -1,
+      parser: (raw) => Math.round(Number(raw) * 10000),
+    },
+    {
+      re: /(?:减少了?|减了?|减去|下调了?|砍掉|扣减|省下了?)\s*([0-9]{2,9})\s*(?:元|块|人民币)?(?:预算|经费|花费|费用)?/gi,
+      sign: -1,
+    },
+  ];
+
+  let best: BudgetDeltaMatch | null = null;
+  for (const def of defs) {
+    for (const m of t.matchAll(def.re)) {
+      if (!m?.[1]) continue;
+      const raw = m[1];
+      const value = def.parser ? def.parser(raw) : Number(raw);
+      if (!Number.isFinite(value) || value <= 0) continue;
+      const index = Number(m.index) || 0;
+      const cand: BudgetDeltaMatch = {
+        delta: Math.round(value) * def.sign,
+        evidence: cleanStatement(m[0] || raw, 40),
+        index,
+      };
+      if (!best || cand.index >= best.index) best = cand;
+    }
+  }
+  if (!best) return null;
+
+  // 诸如“提高到15000/增加到15000”是绝对预算，不应当作增量。
+  const near = t.slice(Math.max(0, best.index - 12), Math.min(t.length, best.index + 36));
+  if (/(增加到|提高到|提升到|上调到|下调到|调到|改到|改成|调整为|变成|变为|达到|总预算为|预算上限为)/i.test(near)) {
+    return null;
+  }
+  return { delta: best.delta, evidence: best.evidence };
 }
 
 function parseDateMentions(text: string): DateMention[] {
@@ -1267,10 +1324,23 @@ export function extractIntentSignals(userText: string, opts?: { historyMode?: bo
     out.durationUnknownEvidence = du?.[0] || "时长待确认";
   }
 
+  const budgetDelta = pickBudgetDeltaFromText(text);
+  if (budgetDelta) {
+    out.budgetDeltaCny = budgetDelta.delta;
+    out.budgetEvidence = budgetDelta.evidence;
+    out.budgetImportance = clampImportance(0.9, out.budgetImportance || 0.86);
+  }
   const budget = pickBudgetFromText(text);
   if (budget) {
-    out.budgetCny = budget.value;
-    out.budgetEvidence = budget.evidence;
+    const hasOnlyDeltaCue =
+      !!budgetDelta &&
+      !/(总预算|预算上限|一共|总共|合计|总计|现在预算|预算变成|预算为|调整为|改成|改到|调到|提高到|增加到|提升到|上调到|下调到|达到)/i.test(
+        text
+      );
+    if (!hasOnlyDeltaCue) {
+      out.budgetCny = budget.value;
+      out.budgetEvidence = budget.evidence;
+    }
   }
 
   const healthClause = pickHealthClause(text);
@@ -1540,6 +1610,19 @@ function mergeSignalsWithLatest(history: IntentSignals, latest: IntentSignals): 
     if (meetingCity) out.criticalPresentation.city = meetingCity;
   }
 
+  if (latest.budgetDeltaCny != null) {
+    const baseBudget = Number(out.budgetCny);
+    if (Number.isFinite(baseBudget) && baseBudget > 0) {
+      const merged = Math.max(100, Math.round(baseBudget + Number(latest.budgetDeltaCny)));
+      out.budgetCny = merged;
+      out.budgetEvidence =
+        latest.budgetEvidence ||
+        cleanStatement(`${baseBudget}元 + ${latest.budgetDeltaCny > 0 ? "+" : ""}${latest.budgetDeltaCny}元`, 48);
+    } else if (latest.budgetCny != null) {
+      out.budgetCny = latest.budgetCny;
+      out.budgetEvidence = latest.budgetEvidence || out.budgetEvidence;
+    }
+  }
   if (latest.budgetCny != null) {
     out.budgetCny = latest.budgetCny;
     out.budgetEvidence = latest.budgetEvidence || out.budgetEvidence;

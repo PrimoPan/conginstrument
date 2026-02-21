@@ -3,6 +3,7 @@ import type { CDG, GraphPatch } from "../core/graph.js";
 import { streamAssistantText, generateAssistantTextNonStreaming } from "./chatResponder.js";
 import { generateGraphPatch } from "./graphUpdater.js";
 import { buildExtremeWeatherAdvisory } from "./weather/advisor.js";
+import { buildFxRateAdvisory } from "./fx/advisor.js";
 
 const DEBUG = process.env.CI_DEBUG_LLM === "1";
 function dlog(...args: any[]) {
@@ -33,6 +34,16 @@ function appendWeatherAdvisory(baseText: string, advisory: string | null): strin
   return `${text}\n\n${adv}`;
 }
 
+function appendFxAdvisory(baseText: string, advisory: string | null): string {
+  const text = String(baseText || "");
+  const adv = String(advisory || "").trim();
+  if (!adv) return text;
+  if (!text.trim()) return adv;
+  if (text.includes(adv)) return text;
+  if (/实时汇率参考|1CNY|兑换|换算/i.test(text)) return text;
+  return `${text}\n\n${adv}`;
+}
+
 export async function generateTurn(params: {
   graph: CDG;
   userText: string;
@@ -47,6 +58,13 @@ export async function generateTurn(params: {
     recentTurns: safeRecent,
     systemPrompt: params.systemPrompt,
   });
+
+  const fxAdvisory = await buildFxRateAdvisory({
+    graph: params.graph,
+    userText: params.userText,
+    recentTurns: safeRecent,
+  }).catch(() => null);
+  assistant_text = appendFxAdvisory(assistant_text, fxAdvisory);
 
   const weatherAdvisory = await buildExtremeWeatherAdvisory({
     graph: params.graph,
@@ -91,6 +109,18 @@ export async function generateTurnStreaming(params: {
     onToken: params.onToken,
     signal: params.signal,
   });
+
+  const fxAdvisory = await buildFxRateAdvisory({
+    graph: params.graph,
+    userText: params.userText,
+    recentTurns: safeRecent,
+  }).catch(() => null);
+  const fxAppended = appendFxAdvisory(assistant_text, fxAdvisory);
+  if (fxAppended !== assistant_text) {
+    const delta = fxAppended.slice(assistant_text.length);
+    if (delta) params.onToken(delta);
+    assistant_text = fxAppended;
+  }
 
   const weatherAdvisory = await buildExtremeWeatherAdvisory({
     graph: params.graph,
