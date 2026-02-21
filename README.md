@@ -70,6 +70,13 @@ curl http://localhost:3001/healthz
 | `CI_MCP_GEO_URL` | 否 | 空 | 可选 MCP 地理工具桥接地址（优先于 Nominatim） |
 | `CI_MCP_GEO_TIMEOUT_MS` | 否 | `1800` | MCP 地理调用超时（毫秒） |
 | `CI_MCP_GEO_TOKEN` | 否 | 空 | MCP 地理桥接鉴权 Token（可选） |
+| `CI_WEATHER_EXTREME_ALERT` | 否 | `1` | 是否启用“极端天气主动提醒” |
+| `CI_WEATHER_TIMEOUT_MS` | 否 | `3200` | 天气 API 请求超时（毫秒） |
+| `CI_WEATHER_MAX_DAYS` | 否 | `10` | 预报窗口上限（Open-Meteo 最多 16 天） |
+| `CI_WEATHER_GEO_ENDPOINT` | 否 | `https://geocoding-api.open-meteo.com/v1/search` | 天气地理编码 API |
+| `CI_WEATHER_FORECAST_ENDPOINT` | 否 | `https://api.open-meteo.com/v1/forecast` | 天气预报 API |
+| `CORS_ALLOW_ALL` | 否 | `1` | 是否允许全部 Origin（`1`=允许，`0`=仅白名单） |
+| `CORS_ORIGINS` | 否 | 空 | CORS 白名单，逗号分隔，如 `http://localhost:3000,http://your.server:6688` |
 | `CI_ALLOW_DELETE` | 否 | `0` | 是否允许 remove_node/remove_edge |
 | `CI_DEBUG_LLM` | 否 | `0` | LLM 与 patch 调试日志 |
 
@@ -357,7 +364,7 @@ data: {"assistantText":"...","graphPatch":{"ops":[]},"graph":{"id":"65f1...","ve
 
 ### 8. CDG 数据模型
 
-核心类型在：`src/core/graph.ts`
+核心类型在：`src/core/graph/types.ts`（并由 `src/core/graph.ts` 兼容导出）
 
 - `ConceptNode.type`：`goal | constraint | preference | belief | fact | question`
 - `ConceptNode.layer`：`intent | requirement | preference | risk`
@@ -454,6 +461,11 @@ conginstrument/
    │  └─ config.ts
    ├─ core/
    │  ├─ graph.ts
+   │  ├─ graph/
+   │  │  ├─ types.ts
+   │  │  ├─ common.ts
+   │  │  ├─ topology.ts
+   │  │  └─ patchApply.ts
    │  └─ nodeLayer.ts
    ├─ db/
    │  └─ mongo.ts
@@ -467,6 +479,8 @@ conginstrument/
       ├─ llmClient.ts
       ├─ llm.ts
       ├─ chatResponder.ts
+      ├─ weather/
+      │  └─ advisor.ts
       ├─ uncertainty/
       │  └─ questionPlanner.ts
       ├─ graphUpdater.ts
@@ -513,10 +527,15 @@ conginstrument/
 | `src/middleware/auth.ts` | Bearer token 鉴权中间件 |
 | `src/routes/auth.ts` | 登录接口：用户 upsert + session 发放 |
 | `src/routes/conversations.ts` | 会话 CRUD、turn、SSE 流式接口 |
-| `src/core/graph.ts` | CDG 类型定义 + patch 应用守卫 + 槽位压缩 |
+| `src/core/graph.ts` | 图模型门面导出（保持旧路径兼容） |
+| `src/core/graph/types.ts` | CDG/Node/Edge/Patch 核心类型定义 |
+| `src/core/graph/common.ts` | 图归一化与槽位辅助函数（slot key/去重/清洗） |
+| `src/core/graph/topology.ts` | 图论编排（A* 锚定、Tarjan 去环、传递边裁剪、连通修复） |
+| `src/core/graph/patchApply.ts` | patch 应用主线（normalize snapshot + guarded patch apply） |
 | `src/core/nodeLayer.ts` | 节点四层分类（Intent/Requirement/Preference/Risk）的推断与归一化 |
 | `src/services/llmClient.ts` | OpenAI SDK 客户端实例 |
 | `src/services/chatResponder.ts` | 助手文本生成（非流式/伪流/真流）+ 不确定性驱动定向澄清提问 |
+| `src/services/weather/advisor.ts` | 外部天气 API 风险检测（目的地+日期命中极端天气时主动提醒） |
 | `src/services/uncertainty/questionPlanner.ts` | 不确定性评分与目标问题生成（budget/duration/destination/critical day/limiting factor） |
 | `src/services/graphUpdater.ts` | 图 patch 主流程（槽位抽取、状态机融合、图编译、motif 地基补全） |
 | `src/services/graphUpdater/constants.ts` | 建图正则与槽位识别常量 |
@@ -543,7 +562,7 @@ conginstrument/
 
 ### 12. 协作建议
 
-1. 前后端 type 变更时，先改 `src/core/graph.ts`，再同步前端 `src/core/type.ts`。
+1. 前后端 type 变更时，先改 `src/core/graph/types.ts`，再同步前端 `src/core/type.ts`。
 2. 新增/修改接口时，优先更新本 README 的“接口详情”。
 3. 任何影响流式协议的修改，必须同步前端 `client.tsx` 的 SSE 解析逻辑。
 4. 图更新策略改动，建议附至少一个“多轮对话输入 -> 期望图”的回归样例。
@@ -603,6 +622,8 @@ See the Chinese section above for the full table. Key vars include:
 - `CI_GRAPH_USE_FUNCTION_SLOTS`, `CI_GRAPH_PATCH_LLM_WITH_SLOTS`
 - `CI_GEO_VALIDATE`, `CI_GEO_ENDPOINT`, `CI_GEO_TIMEOUT_MS`, `CI_GEO_MAX_LOOKUPS`, `CI_GEO_CACHE_TTL_MS`
 - `CI_MCP_GEO_URL`, `CI_MCP_GEO_TIMEOUT_MS`, `CI_MCP_GEO_TOKEN`
+- `CI_WEATHER_EXTREME_ALERT`, `CI_WEATHER_TIMEOUT_MS`, `CI_WEATHER_MAX_DAYS`, `CI_WEATHER_GEO_ENDPOINT`, `CI_WEATHER_FORECAST_ENDPOINT`
+- `CORS_ALLOW_ALL`, `CORS_ORIGINS`
 
 ---
 
@@ -636,7 +657,7 @@ SSE events:
 
 ### 6. Data model
 
-Main types are in `src/core/graph.ts`:
+Main types are in `src/core/graph/types.ts` (re-exported by `src/core/graph.ts`):
 
 - `CDG`, `ConceptNode`, `ConceptEdge`, `GraphPatch`
 - Node types: `goal | constraint | preference | belief | fact | question`
@@ -672,10 +693,15 @@ src/routes/conversations.ts  # conversation + turn + SSE routes
 skills/intent-graph-regression/SKILL.md  # graph regression skill
 skills/uncertainty-question-flow/SKILL.md# uncertainty-driven questioning skill
 skills/motif-foundation/SKILL.md         # motif foundation skill
-src/core/graph.ts            # graph types and guarded patch apply
+src/core/graph.ts            # graph model facade (re-export)
+src/core/graph/types.ts      # graph types
+src/core/graph/common.ts     # normalization and slot helpers
+src/core/graph/topology.ts   # A*/Tarjan/transitive-reduction topology pipeline
+src/core/graph/patchApply.ts # guarded patch apply + snapshot normalization
 src/core/nodeLayer.ts        # 4-layer node taxonomy inference and normalization
 src/services/llmClient.ts    # OpenAI client
 src/services/chatResponder.ts# assistant text generation + targeted clarification
+src/services/weather/advisor.ts # extreme-weather proactive advisory via external APIs
 src/services/uncertainty/questionPlanner.ts # uncertainty scoring + targeted question planner
 src/services/graphUpdater.ts # graph patch orchestrator (+ motif grounding)
 src/services/graphUpdater/constants.ts         # graph regex/constants
@@ -703,6 +729,6 @@ src/services/llm.ts          # turn orchestration
 
 ### 8. Collaboration notes
 
-- Treat `src/core/graph.ts` as the backend contract source of truth.
+- Treat `src/core/graph/types.ts` as the backend graph contract source of truth (`src/core/graph.ts` keeps compatibility exports).
 - Keep frontend `src/core/type.ts` aligned after every graph schema change.
 - Update README API docs whenever route payloads/events change.

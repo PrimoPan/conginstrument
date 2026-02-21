@@ -2,6 +2,7 @@
 import type { CDG, GraphPatch } from "../core/graph.js";
 import { streamAssistantText, generateAssistantTextNonStreaming } from "./chatResponder.js";
 import { generateGraphPatch } from "./graphUpdater.js";
+import { buildExtremeWeatherAdvisory } from "./weather/advisor.js";
 
 const DEBUG = process.env.CI_DEBUG_LLM === "1";
 function dlog(...args: any[]) {
@@ -22,6 +23,16 @@ function normalizeRecentTurns(
     .map((m) => ({ role: m.role, content: m.content.slice(0, maxEach) }));
 }
 
+function appendWeatherAdvisory(baseText: string, advisory: string | null): string {
+  const text = String(baseText || "");
+  const adv = String(advisory || "").trim();
+  if (!adv) return text;
+  if (!text.trim()) return adv;
+  if (text.includes(adv)) return text;
+  if (/天气风险提醒|极端天气|强降雨|雷暴|高温|低温|强风|大风/i.test(text)) return text;
+  return `${text}\n\n${adv}`;
+}
+
 export async function generateTurn(params: {
   graph: CDG;
   userText: string;
@@ -30,12 +41,19 @@ export async function generateTurn(params: {
 }): Promise<{ assistant_text: string; graph_patch: GraphPatch }> {
   const safeRecent = normalizeRecentTurns(params.recentTurns);
 
-  const assistant_text = await generateAssistantTextNonStreaming({
+  let assistant_text = await generateAssistantTextNonStreaming({
     graph: params.graph,
     userText: params.userText,
     recentTurns: safeRecent,
     systemPrompt: params.systemPrompt,
   });
+
+  const weatherAdvisory = await buildExtremeWeatherAdvisory({
+    graph: params.graph,
+    userText: params.userText,
+    recentTurns: safeRecent,
+  }).catch(() => null);
+  assistant_text = appendWeatherAdvisory(assistant_text, weatherAdvisory);
 
   let graph_patch: GraphPatch;
   try {
@@ -65,7 +83,7 @@ export async function generateTurnStreaming(params: {
 }): Promise<{ assistant_text: string; graph_patch: GraphPatch }> {
   const safeRecent = normalizeRecentTurns(params.recentTurns);
 
-  const assistant_text = await streamAssistantText({
+  let assistant_text = await streamAssistantText({
     graph: params.graph,
     userText: params.userText,
     recentTurns: safeRecent,
@@ -73,6 +91,18 @@ export async function generateTurnStreaming(params: {
     onToken: params.onToken,
     signal: params.signal,
   });
+
+  const weatherAdvisory = await buildExtremeWeatherAdvisory({
+    graph: params.graph,
+    userText: params.userText,
+    recentTurns: safeRecent,
+  }).catch(() => null);
+  const appended = appendWeatherAdvisory(assistant_text, weatherAdvisory);
+  if (appended !== assistant_text) {
+    const delta = appended.slice(assistant_text.length);
+    if (delta) params.onToken(delta);
+    assistant_text = appended;
+  }
 
   let graph_patch: GraphPatch;
   try {
