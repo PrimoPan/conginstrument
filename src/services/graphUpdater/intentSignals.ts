@@ -762,6 +762,7 @@ export function normalizeDestination(raw: string): string {
   s = s.replace(COUNTRY_PREFIX_RE, "");
   s = s.replace(/^的+/g, "");
   s = s.replace(/(旅游|旅行|游玩|出行|度假|参会|开会|会议|行程|计划|玩|逛)$/i, "");
+  s = s.replace(/[吧啊呀呢嘛]+$/g, "");
   s = s.trim();
   return s;
 }
@@ -785,6 +786,16 @@ export function isLikelyDestinationCandidate(x: string): boolean {
   if (s.endsWith("地区") && s.length <= 4) return false;
   if (/(参加|参会|开会|会议|玩|旅游|旅行|度假|计划|安排)$/i.test(s)) return false;
   if (/(看|观).{0,4}(球|赛|比赛|演出|展)|球迷|演唱会|音乐会|球票|门票/i.test(s)) return false;
+  if (/(西班牙语地区|英语地区|法语地区|德语地区|语地区)/i.test(s)) return false;
+  if (
+    /(安全|安静|方便|便宜|舒适|舒服|热闹|清净|治安|人少|离.*近|靠近|附近).{0,10}(地方|位置|区域)/i.test(s)
+  ) {
+    return false;
+  }
+  if (/^(更|比较|稍微|尽量|优先|最好)?\s*(安全|安静|方便|便宜|舒适|舒服|热闹|清净|治安).*/i.test(s)) {
+    return false;
+  }
+  if (/地方(吧|呢|呀|啊)?$/i.test(s) && s.length <= 10) return false;
   if (
     /心脏|母亲|父亲|父母|家人|我们一家|一起|预算|人数|行程|计划|注意|高强度|旅行时|旅游时|需要|限制|不能|安排|在此之前|此前|之前|之后|然后|再从|我会|我要|参会|参加|开会|会议|飞到|出发|机场|航班|汇报|论文|报告|顺带|顺便|顺路|顺道/i.test(
       s
