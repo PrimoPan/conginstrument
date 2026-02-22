@@ -1286,7 +1286,10 @@ export function extractIntentSignals(userText: string, opts?: { historyMode?: bo
   const text = String(userText || "");
   const out: IntentSignals = {};
   out.hasTemporalAnchor = /([0-9]{1,2})月([0-9]{1,2})日?(?:\s*[-~到至]\s*([0-9]{1,2})日?)?/.test(text);
-  out.hasDurationUpdateCue = /改成|改为|更新|调整|变为|变成|改到|上调|下调|放宽|改成了|改成到|从.*改到/i.test(text);
+  out.hasDurationUpdateCue =
+    /改成|改为|更新|调整|变为|变成|改到|上调|下调|放宽|改成了|改成到|从.*改到|延长|缩短|加(?:到|成)?|增加|减少|多(?:玩|待|留)|少(?:玩|待|留)|再(?:玩|待|留)|再加/i.test(
+      text
+    );
   out.hasExplicitTotalCue = /(总共|一共|全程|总计|整体|整个(?:行程|旅行)?|总行程|行程时长|trip length|overall|total|in total)/i.test(
     text
   );
@@ -1729,9 +1732,16 @@ function mergeSignalsWithLatest(history: IntentSignals, latest: IntentSignals): 
     const hasTravelSegment = out.cityDurations.some((x) => x.kind === "travel");
     const canPromoteBySegments = distinctCities >= 2 && hasTravelSegment;
     const segStrength = out.cityDurations.some((x) => x.kind === "meeting") ? 0.9 : 0.84;
+    const protectStableTotalFromSegmentLeak =
+      out.durationDays != null &&
+      !latest.hasDurationUpdateCue &&
+      !latest.hasExplicitTotalCue &&
+      !!latest.cityDurations?.length;
+
     const shouldTakeSeg =
       canPromoteBySegments &&
       segSum > 0 &&
+      !protectStableTotalFromSegmentLeak &&
       (!out.durationDays ||
         latestHasSnapshotDuration ||
         segSum > out.durationDays ||

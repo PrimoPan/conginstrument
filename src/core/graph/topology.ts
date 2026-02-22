@@ -66,6 +66,39 @@ function jaccardSimilarity(a: Set<string>, b: Set<string>): number {
   return inter / union;
 }
 
+function normalizedTopicText(text: string): string {
+  return cleanText(text)
+    .replace(
+      /^(目的地|子地点|总行程时长|城市时长|停留时长|关键日|会议关键日|关键会议日|论文汇报日|活动偏好|景点偏好|限制因素|健康约束|语言约束|出行约束|行程约束)[:：]\s*/i,
+      ""
+    )
+    .replace(/[（(][^）)]*[）)]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function statementSimilarity(a: string, b: string): number {
+  const sa = normalizedTopicText(a).toLowerCase();
+  const sb = normalizedTopicText(b).toLowerCase();
+  if (!sa || !sb) return 0;
+
+  const jac = jaccardSimilarity(tokenizeForSimilarity(sa), tokenizeForSimilarity(sb));
+  let bonus = 0;
+  if (sa.includes(sb) || sb.includes(sa)) bonus += 0.22;
+
+  const eventA =
+    /(看球|观赛|球迷|比赛|球场|stadium|arena|match|game|演唱会|演出|看展|展览|conference|chi|汇报|演讲|答辩)/i.test(
+      sa
+    );
+  const eventB =
+    /(看球|观赛|球迷|比赛|球场|stadium|arena|match|game|演唱会|演出|看展|展览|conference|chi|汇报|演讲|答辩)/i.test(
+      sb
+    );
+  if (eventA && eventB) bonus += 0.14;
+
+  return Math.max(0, Math.min(1, jac + bonus));
+}
+
 function inferPreferredSlot(node: ConceptNode, healthNode: ConceptNode | null): string | null {
   const s = cleanText(node.statement);
   if (!s) return null;
@@ -99,6 +132,13 @@ function slotDistancePenalty(a: string | null, b: string | null): number {
   if ((af === "duration_meeting" && bf === "duration_total") || (af === "duration_total" && bf === "duration_meeting")) return 0.1;
   if ((af === "meeting_critical" && bf === "duration_meeting") || (af === "duration_meeting" && bf === "meeting_critical")) return 0.06;
   if ((af === "meeting_critical" && bf === "destination") || (af === "destination" && bf === "meeting_critical")) return 0.12;
+  if ((af === "meeting_critical" && bf === "sub_location") || (af === "sub_location" && bf === "meeting_critical")) return 0.05;
+  if ((af === "meeting_critical" && bf === "activity_preference") || (af === "activity_preference" && bf === "meeting_critical")) {
+    return 0.04;
+  }
+  if ((af === "activity_preference" && bf === "sub_location") || (af === "sub_location" && bf === "activity_preference")) {
+    return 0.06;
+  }
   return 0.32;
 }
 
@@ -146,12 +186,31 @@ function pickBestSlotNode(slotNodes: Map<string, ConceptNode>, family: string, s
   if (!candidates.length) return null;
 
   if (family === "destination") {
-    const text = cleanText(statement).toLowerCase();
+    const text = normalizedTopicText(statement).toLowerCase();
     const direct = candidates.find(({ slot }) => {
       const city = slot.replace(/^slot:destination:/, "");
       return city && text.includes(city);
     });
     if (direct) return direct.node;
+  }
+
+  const query = normalizedTopicText(statement);
+  if (query) {
+    const ranked = candidates
+      .map((entry) => {
+        const sim = statementSimilarity(query, `${entry.node.statement} ${entry.slot}`);
+        return { ...entry, sim };
+      })
+      .sort((a, b) => {
+        if (b.sim !== a.sim) return b.sim - a.sim;
+        const ib = Number(b.node.importance) || 0;
+        const ia = Number(a.node.importance) || 0;
+        if (ib !== ia) return ib - ia;
+        const cb = Number(b.node.confidence) || 0;
+        const ca = Number(a.node.confidence) || 0;
+        return cb - ca;
+      });
+    if (ranked[0]?.sim >= 0.08) return ranked[0].node;
   }
 
   return candidates
@@ -642,6 +701,8 @@ function rebalanceIntentTopology(
   }
 
   const healthNode = slotNodes.get("slot:health") || null;
+  const budgetNode = slotNodes.get("slot:budget") || null;
+  const durationTotalNode = slotNodes.get("slot:duration_total") || null;
   const primaryNodes = Array.from(slotNodes.entries())
     .filter(([slot]) => isPrimarySlot(slot))
     .sort((a, b) => slotPriorityScore(a[0]) - slotPriorityScore(b[0]))
@@ -652,7 +713,27 @@ function rebalanceIntentTopology(
 
   for (const node of primaryNodes) {
     const slot = slotByNodeId.get(node.id) || null;
-    putEdge(node.id, rootId, rootEdgeTypeForNode(node, slot), Math.max(0.72, (Number(node.confidence) || 0.6) * 0.9));
+    const family = slotFamily(slot);
+    let anchorId = rootId;
+    let edgeType = rootEdgeTypeForNode(node, slot);
+
+    // Make hard constraints (duration/budget) the backbone for downstream planning branches.
+    if (family === "destination") {
+      if (durationTotalNode && durationTotalNode.id !== node.id) {
+        anchorId = durationTotalNode.id;
+        edgeType = "constraint";
+      } else if (budgetNode && budgetNode.id !== node.id) {
+        anchorId = budgetNode.id;
+        edgeType = "constraint";
+      }
+    } else if (family === "people") {
+      if (durationTotalNode && durationTotalNode.id !== node.id) {
+        anchorId = durationTotalNode.id;
+        edgeType = "determine";
+      }
+    }
+
+    putEdge(node.id, anchorId, edgeType, Math.max(0.72, (Number(node.confidence) || 0.6) * 0.9));
   }
 
   for (const [slot, node] of secondarySlotEntries) {
@@ -696,14 +777,44 @@ function rebalanceIntentTopology(
       anchorId = slotNodes.get("slot:duration_total")!.id;
     }
     if (slotFamily(slot) === "meeting_critical") {
+      const scoredAnchors: Array<{ id: string; score: number }> = [];
+      const bestActivity = pickBestSlotNode(slotNodes, "activity_preference", node.statement);
+      const bestSubLocation = pickBestSlotNode(slotNodes, "sub_location", node.statement);
       const meetingDuration = slotNodes.get("slot:duration_meeting");
-      if (meetingDuration) anchorId = meetingDuration.id;
-      else {
-        const bestDestination = pickBestSlotNode(slotNodes, "destination", node.statement);
-        if (bestDestination) anchorId = bestDestination.id;
+      const bestDestination = pickBestSlotNode(slotNodes, "destination", node.statement);
+
+      if (bestActivity) {
+        scoredAnchors.push({
+          id: bestActivity.id,
+          score: statementSimilarity(node.statement, bestActivity.statement) + 0.16,
+        });
       }
+      if (bestSubLocation) {
+        scoredAnchors.push({
+          id: bestSubLocation.id,
+          score: statementSimilarity(node.statement, bestSubLocation.statement) + 0.14,
+        });
+      }
+      if (meetingDuration) {
+        scoredAnchors.push({
+          id: meetingDuration.id,
+          score: statementSimilarity(node.statement, meetingDuration.statement) + 0.1,
+        });
+      }
+      if (bestDestination) {
+        scoredAnchors.push({
+          id: bestDestination.id,
+          score: statementSimilarity(node.statement, bestDestination.statement) + 0.08,
+        });
+      }
+
+      scoredAnchors.sort((a, b) => b.score - a.score);
+      if (scoredAnchors[0]?.score >= 0.22) anchorId = scoredAnchors[0].id;
+      else if (meetingDuration) anchorId = meetingDuration.id;
+      else if (bestDestination) anchorId = bestDestination.id;
     }
-    const edgeType: EdgeType = anchorId === rootId ? rootEdgeTypeForNode(node, slot) : "determine";
+    let edgeType: EdgeType = anchorId === rootId ? rootEdgeTypeForNode(node, slot) : "determine";
+    if (slotFamily(slot) === "meeting_critical") edgeType = "constraint";
     putEdge(node.id, anchorId, edgeType, Math.max(0.68, (Number(node.confidence) || 0.6) * 0.88));
   }
 
