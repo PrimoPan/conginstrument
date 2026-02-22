@@ -215,9 +215,8 @@ function buildDurationState(signals: IntentSignals): DurationState {
 
 function compactIntentDuration(intent: string, totalDays?: number): string {
   const s = cleanStatement(intent || "", 96);
-  if (!s || !totalDays) return s;
+  if (!s) return s;
   const out = s
-    .replace(new RegExp(`${totalDays}\\s*天`, "g"), "")
     .replace(/(旅游|旅行|出行|度假|玩)\s*(旅游|旅行|出行|度假|玩)/g, "$1")
     .replace(/[，,\s]{2,}/g, " ")
     .replace(/^[，,\s]+|[，,\s]+$/g, "");
@@ -230,7 +229,12 @@ function buildGoalNode(params: {
   totalDays?: number;
   now: string;
 }): SlotNodeSpec {
-  const rawIntent = buildTravelIntentStatement(params.signals, params.userText) || cleanStatement(params.userText, 88);
+  // 目标标题里的时长强制对齐状态机总时长，避免“意图6天 vs 总时长3天”这类显示分叉。
+  const signalsForIntent: IntentSignals = {
+    ...params.signals,
+    durationDays: params.totalDays || params.signals.durationDays,
+  };
+  const rawIntent = buildTravelIntentStatement(signalsForIntent, params.userText) || cleanStatement(params.userText, 88);
   const intent = compactIntentDuration(rawIntent, params.totalDays);
   const successCriteria: string[] = [];
   if (params.signals.destinations?.length) {

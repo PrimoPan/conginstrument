@@ -1033,6 +1033,35 @@ function extractCityDurationSegments(text: string): Array<{ city: string; days: 
   return Array.from(bestByCity.values()).sort((a, b) => a.index - b.index).slice(0, 6);
 }
 
+function dedupeCityDurationSegments(
+  list: Array<{ city: string; days: number; evidence: string; kind: "travel" | "meeting"; index?: number }>
+): Array<{ city: string; days: number; evidence: string; kind: "travel" | "meeting"; index: number }> {
+  const map = new Map<string, { city: string; days: number; evidence: string; kind: "travel" | "meeting"; index: number }>();
+  for (const seg of list || []) {
+    const city = normalizeDestination(seg?.city || "");
+    const days = Number(seg?.days) || 0;
+    if (!city || !isLikelyDestinationCandidate(city) || days <= 0 || days > 60) continue;
+    const key = city.toLowerCase();
+    const cand = {
+      city,
+      days,
+      evidence: cleanStatement(seg?.evidence || `${city}${days}天`, 60),
+      kind: seg?.kind === "meeting" ? "meeting" : "travel",
+      index: Number(seg?.index) || 0,
+    };
+    const cur = map.get(key);
+    const shouldReplace =
+      !cur ||
+      cand.days > cur.days ||
+      (cand.days === cur.days && cand.kind === "meeting" && cur.kind !== "meeting") ||
+      (cand.days === cur.days && cand.kind === cur.kind && cand.index < cur.index);
+    if (shouldReplace) map.set(key, cand);
+  }
+  return Array.from(map.values())
+    .sort((a, b) => a.index - b.index || a.city.localeCompare(b.city))
+    .slice(0, 6);
+}
+
 export function isTravelIntentText(text: string, signals: IntentSignals) {
   if (signals.destination || signals.durationDays || signals.budgetCny || signals.peopleCount) return true;
   return /旅游|旅行|出行|行程|景点|酒店|攻略|目的地|去|玩/i.test(String(text || ""));
@@ -1364,7 +1393,7 @@ export function extractIntentSignals(userText: string, opts?: { historyMode?: bo
     out.durationStrength = duration.strength;
   }
 
-  const citySegments = extractCityDurationSegments(text);
+  const citySegments = dedupeCityDurationSegments(extractCityDurationSegments(text));
   if (citySegments.length) {
     out.cityDurations = citySegments.map((x) => ({
       city: remapBySubLocationParent(x.city, out.subLocations),

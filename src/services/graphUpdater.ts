@@ -30,6 +30,15 @@ function normalizeUtterance(input: any): string {
     .trim();
 }
 
+function hasDirectDurationCue(text: string): boolean {
+  const s = String(text || "");
+  if (!s) return false;
+  // 用户直接表达时长（尤其是“玩X天/旅行X天/停留X天”）时，优先信任规则解析结果。
+  if (/(玩|旅游|旅行|出行|行程|停留|待)\s*[0-9一二三四五六七八九十两]{1,3}\s*天/i.test(s)) return true;
+  if (/(我|我们|计划|准备|想|打算).{0,20}[0-9一二三四五六七八九十两]{1,3}\s*天/i.test(s)) return true;
+  return false;
+}
+
 function pickRootGoalId(graph: CDG): string | null {
   const goals = (graph.nodes || []).filter((n) => n.type === "goal");
   if (!goals.length) return null;
@@ -161,6 +170,21 @@ async function buildSignals(params: {
       if (slotResult?.signals) {
         // deterministic parser优先处理冲突标量（例如总时长），function slots用于补齐缺失语义
         signals = mergeIntentSignals(slotResult.signals, textSignals);
+        const textDays = Number(textSignals.durationDays) || 0;
+        const mergedDays = Number(signals.durationDays) || 0;
+        const singleCityStable =
+          (textSignals.cityDurations || []).length === 1 &&
+          Number((textSignals.cityDurations || [])[0]?.days || 0) === textDays &&
+          textDays > 0;
+        const shouldPreferTextDuration =
+          textDays > 0 &&
+          (hasDirectDurationCue(params.userText) || singleCityStable) &&
+          (mergedDays <= 0 || mergedDays !== textDays);
+        if (shouldPreferTextDuration) {
+          signals.durationDays = textDays;
+          signals.durationEvidence = textSignals.durationEvidence || signals.durationEvidence || `${textDays}天`;
+          signals.durationStrength = Math.max(Number(textSignals.durationStrength) || 0.78, 0.78);
+        }
       }
     } catch (e: any) {
       dlog("function-call slot extraction failed:", e?.message || e);
