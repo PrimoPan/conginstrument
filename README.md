@@ -15,9 +15,25 @@ Language / 语言：
 2. 会话与对话轮次持久化（MongoDB）。
 3. 调用 LLM 生成助手回复。
 4. 基于用户最新输入持续更新 CDG（Concept Dependency Graph，意图依赖图）。
-5. 通过普通 JSON 接口和 SSE 流式接口向前端提供数据。
+5. 构建并维护 `Concept → Motif → Context` 三层认知模型（PRD 对齐）。
+6. 通过普通 JSON 接口和 SSE 流式接口向前端提供数据。
 
 这个服务的核心目标是“对话推进 + 意图建图同步”，不是纯聊天后端。
+
+### 1.1 Concept–Motif–Context（PRD 对齐实现）
+
+- `Concept`：基础语义槽位（intent / requirement / preference / risk 等）。
+- `Motif`：concept 间关系模式（pair / triad），并带生命周期状态：
+  `active | uncertain | deprecated | disabled | cancelled`。
+- `Context`：场景化聚合层（由多个 motifs + concepts 组成），并带状态：
+  `active | uncertain | conflicted | disabled`。
+
+后端在每次 `create/get/turn/saveGraph/saveConcepts` 后都会重建这三层，并一并返回给前端。
+
+此外，对话生成阶段（`chatResponder`）会把 `Motif/Context` 状态注入 LLM 提示：
+- 若存在 `deprecated` motif（冲突），优先触发强制澄清问题；
+- 若存在 `uncertain` motif，触发确认型问题；
+- 若均稳定，再回退到节点级不确定性提问。
 
 ---
 
@@ -114,6 +130,14 @@ Base URL 示例：`http://localhost:3001`
 | `GET` | `/api/conversations/:id/turns?limit=30` | 是 | 历史轮次 |
 | `POST` | `/api/conversations/:id/turn` | 是 | 非流式单轮 |
 | `POST` | `/api/conversations/:id/turn/stream` | 是 | SSE 流式单轮 |
+
+接口返回补充字段：
+
+- `concepts`: `ConceptItem[]`
+- `motifs`: `ConceptMotif[]`（含 `status/novelty/statusReason`）
+- `motifLinks`: `MotifLink[]`（motif 间关系，可由用户编辑后保存）
+- `contexts`: `ContextItem[]`
+- `conflictGate`: 仅在 `turn/turn/stream` 被冲突门控时返回，包含 `unresolvedMotifs[]` 与阻塞提示文案
 
 ---
 
@@ -607,6 +631,8 @@ conginstrument/
 | `src/services/motif/motifGrounding.ts` | patch 级 motif 元数据补全（motifType/claim/priority/revisionHistory） |
 | `src/services/motif/motifCatalog.ts` | motif 目录聚合与摘要（为跨任务迁移/可解释性打地基） |
 | `src/services/motif/conceptMotifs.ts` | concept-level motif 构建器（稳定模板 + concept 关系实例 + concept↔motif 回写） |
+| `src/services/motif/motifLinks.ts` | motif 间关系构建/合并（supports/depends_on/conflicts/refines，支持用户覆盖） |
+| `src/services/motif/conflictGate.ts` | 未解决 deprecated motif 门控（阻塞继续生成，要求用户先确认） |
 | `src/services/patchGuard.ts` | LLM patch 清洗与规范化（强约束） |
 | `src/services/textSanitizer.ts` | 把 Markdown/LaTeX 风格文本降级为纯文本 |
 | `src/services/llm.ts` | turn 编排：助手回复 + patch 生成 + 统一返回 |

@@ -9,6 +9,7 @@ import {
 } from "./uncertainty/questionPlanner.js";
 import { reconcileConceptsWithGraph } from "./concepts.js";
 import { reconcileMotifsWithGraph } from "./motif/conceptMotifs.js";
+import { reconcileContextsWithGraph } from "./contexts.js";
 
 const STREAM_MODE = (process.env.CI_STREAM_MODE || "pseudo") as "upstream" | "pseudo";
 const DEBUG = process.env.CI_DEBUG_LLM === "1";
@@ -140,6 +141,90 @@ function graphSummaryForChat(graph: CDG): string {
   ].join("\n");
 }
 
+function normalizeForMatch(input: string): string {
+  return String(input || "")
+    .toLowerCase()
+    .replace(/\s+/g, "")
+    .slice(0, 240);
+}
+
+function chooseQuestionWithPriority(params: {
+  motifQuestion: string | null;
+  uncertaintyQuestion: string | null;
+}): string | null {
+  const m = String(params.motifQuestion || "").trim();
+  const u = String(params.uncertaintyQuestion || "").trim();
+  if (!m && !u) return null;
+  if (m && !u) return m;
+  if (!m && u) return u;
+  if (normalizeForMatch(m).includes(normalizeForMatch(u)) || normalizeForMatch(u).includes(normalizeForMatch(m))) {
+    return m;
+  }
+  return `${m}；另外，${u}`;
+}
+
+function motifPriorityQuestion(params: { graph: CDG; concepts: ReturnType<typeof reconcileConceptsWithGraph> }) {
+  const motifs = reconcileMotifsWithGraph({
+    graph: params.graph,
+    concepts: params.concepts,
+    baseMotifs: [],
+  });
+  const contexts = reconcileContextsWithGraph({
+    graph: params.graph,
+    concepts: params.concepts,
+    motifs,
+    baseContexts: [],
+  });
+
+  const deprecated = motifs
+    .filter((m) => m.status === "deprecated")
+    .slice()
+    .sort((a, b) => b.confidence - a.confidence || a.id.localeCompare(b.id));
+  if (deprecated.length) {
+    const top = deprecated[0];
+    return {
+      motifs,
+      contexts,
+      question: `检测到冲突结构：${top.title}。请先确认你要优先保留哪一侧约束？`,
+      rationale: `motif_conflict:${top.id}`,
+    };
+  }
+
+  const uncertain = motifs
+    .filter((m) => m.status === "uncertain")
+    .slice()
+    .sort((a, b) => b.confidence - a.confidence || a.id.localeCompare(b.id));
+  if (uncertain.length) {
+    const top = uncertain[0];
+    return {
+      motifs,
+      contexts,
+      question: `请确认这条关系是否继续生效：${top.title}。若不成立我会停用该结构。`,
+      rationale: `motif_uncertain:${top.id}`,
+    };
+  }
+
+  return {
+    motifs,
+    contexts,
+    question: null,
+    rationale: "motif_stable",
+  };
+}
+
+function contextSummaryForPrompt(
+  contexts: ReturnType<typeof reconcileContextsWithGraph>
+): string {
+  if (!contexts.length) return "contexts: none";
+  return contexts
+    .slice(0, 5)
+    .map((ctx) => {
+      const qs = (ctx.openQuestions || []).slice(0, 2).join(" | ") || "-";
+      return `${ctx.key}[${ctx.status} c=${ctx.confidence.toFixed(2)}] q=${qs}`;
+    })
+    .join("\n");
+}
+
 async function pseudoStreamText(params: {
   text: string;
   onToken: (t: string) => void;
@@ -167,17 +252,25 @@ export async function generateAssistantTextNonStreaming(params: {
 }): Promise<string> {
   const safeRecent = normalizeRecentTurns(params.recentTurns);
   const gsum = graphSummaryForChat(params.graph);
+  const concepts = reconcileConceptsWithGraph({ graph: params.graph, baseConcepts: [] });
+  const motifCtx = motifPriorityQuestion({ graph: params.graph, concepts });
   const uncertaintyPlan = planUncertaintyQuestion({
     graph: params.graph,
     recentTurns: safeRecent,
+  });
+  const targetedQuestion = chooseQuestionWithPriority({
+    motifQuestion: motifCtx.question,
+    uncertaintyQuestion: uncertaintyPlan.question,
   });
 
   const systemOne =
     `${buildChatSystemPrompt(params.systemPrompt)}\n\n` +
     `当前意图图摘要（只供参考，不要复述）：\n${gsum}` +
+    `\n\nContext 摘要（只供你内部使用，不要逐字复述）：\n${contextSummaryForPrompt(motifCtx.contexts)}` +
     `\n\n不确定性分析（只供你内部使用，不要逐字复述）：${uncertaintyPlan.rationale}` +
-    (uncertaintyPlan.question
-      ? `\n本轮请在回答末尾给出一个定向澄清问题（避免泛问）：${uncertaintyPlan.question}`
+    `\n\nMotif 状态分析（只供你内部使用，不要逐字复述）：${motifCtx.rationale}` +
+    (targetedQuestion
+      ? `\n本轮请在回答末尾给出一个定向澄清问题（避免泛问）：${targetedQuestion}`
       : "");
 
   const resp = await openai.chat.completions.create({
@@ -191,7 +284,7 @@ export async function generateAssistantTextNonStreaming(params: {
   const raw = readTextContent(msg?.content);
   const text = enforceTargetedQuestion(
     stripMarkdownToText(raw),
-    uncertaintyPlan.question
+    targetedQuestion
   );
 
   dlog("choices=", resp?.choices?.length, "finish=", resp?.choices?.[0]?.finish_reason, "len=", text.length);
@@ -215,7 +308,7 @@ export async function generateAssistantTextNonStreaming(params: {
   const raw2 = readTextContent(resp2.choices?.[0]?.message?.content);
   const text2 = enforceTargetedQuestion(
     stripMarkdownToText(raw2),
-    uncertaintyPlan.question
+    targetedQuestion
   );
 
   dlog("fallback finish=", resp2?.choices?.[0]?.finish_reason, "len=", text2.length);
@@ -240,16 +333,24 @@ export async function streamAssistantText(params: {
   // upstream 真流（你的网关如果不稳，别开）
   const safeRecent = normalizeRecentTurns(params.recentTurns);
   const gsum = graphSummaryForChat(params.graph);
+  const concepts = reconcileConceptsWithGraph({ graph: params.graph, baseConcepts: [] });
+  const motifCtx = motifPriorityQuestion({ graph: params.graph, concepts });
   const uncertaintyPlan = planUncertaintyQuestion({
     graph: params.graph,
     recentTurns: safeRecent,
   });
+  const targetedQuestion = chooseQuestionWithPriority({
+    motifQuestion: motifCtx.question,
+    uncertaintyQuestion: uncertaintyPlan.question,
+  });
   const systemOne =
     `${buildChatSystemPrompt(params.systemPrompt)}\n\n` +
     `当前意图图摘要（只供参考，不要复述）：\n${gsum}` +
+    `\n\nContext 摘要（只供你内部使用，不要逐字复述）：\n${contextSummaryForPrompt(motifCtx.contexts)}` +
     `\n\n不确定性分析（只供你内部使用，不要逐字复述）：${uncertaintyPlan.rationale}` +
-    (uncertaintyPlan.question
-      ? `\n本轮请在回答末尾给出一个定向澄清问题（避免泛问）：${uncertaintyPlan.question}`
+    `\n\nMotif 状态分析（只供你内部使用，不要逐字复述）：${motifCtx.rationale}` +
+    (targetedQuestion
+      ? `\n本轮请在回答末尾给出一个定向澄清问题（避免泛问）：${targetedQuestion}`
       : "");
 
   const upstream = await openai.chat.completions.create(
@@ -276,7 +377,7 @@ export async function streamAssistantText(params: {
   }
 
   const stripped = stripMarkdownToText(full);
-  const clean = enforceTargetedQuestion(stripped, uncertaintyPlan.question);
+  const clean = enforceTargetedQuestion(stripped, targetedQuestion);
   if (gotAny && clean) {
     const missing = clean.startsWith(stripped) ? clean.slice(stripped.length) : "";
     if (missing) params.onToken(missing);

@@ -1,6 +1,7 @@
 import type { IntentSignals } from "./intentSignals.js";
 import { isLikelyDestinationCandidate, normalizeDestination } from "./intentSignals.js";
 import { cleanStatement } from "./text.js";
+import { classifyConstraintText, dedupeClassifiedConstraints } from "./constraintClassifier.js";
 
 const COUNTRY_OR_REGION_RE =
   /(中国|美国|英国|法国|德国|意大利|西班牙|葡萄牙|荷兰|比利时|瑞士|奥地利|日本|韩国|新加坡|泰国|马来西亚|印度尼西亚|澳大利亚|加拿大|新西兰|阿联酋|欧洲|亚洲|非洲|北美|南美|中东)/i;
@@ -8,7 +9,9 @@ const COUNTRY_OR_REGION_RE =
 const SUB_LOCATION_HINT_RE =
   /(球场|体育场|会展中心|会议中心|大学|学院|博物馆|公园|海滩|车站|机场|码头|教堂|广场|大道|街区|酒店|剧院|stadium|arena|museum|park|beach|district|quarter|square|centre|center|ccib|fira)/i;
 const NON_CITY_NOISE_RE =
-  /(人民币|预算|经费|花费|费用|准备|打算|计划|安排|行程|其中|其余|其他时候|顺带|顺便|顺路|顺道|之前|之后|此前|此后|这天|那天|总共|一共|总计|整体|全程|参会|开会|会议|发表|演讲|汇报|论文|报告)/i;
+  /(人民币|预算|经费|花费|费用|准备|打算|计划|安排|行程|其中|其余|其他时候|顺带|顺便|顺路|顺道|之前|之后|此前|此后|这天|那天|总共|一共|总计|整体|全程|参会|开会|会议|发表|演讲|汇报|论文|报告|安全一点|安静一点|方便一点|便宜一点|舒适一点|热闹一点|语地区)/i;
+const ABSTRACT_PLACE_RE =
+  /(西班牙语地区|英语地区|法语地区|德语地区|语地区)|(安全|安静|方便|便宜|舒适|舒服|热闹|清净|治安|人少|不拥挤|离.*近|靠近|附近).{0,10}(地方|位置|区域)?/i;
 
 function slug(input: string): string {
   return String(input || "")
@@ -63,10 +66,33 @@ function isNoiseCityLike(name: string): boolean {
   const s = normalizeDestination(name || "");
   if (!s) return true;
   if (NON_CITY_NOISE_RE.test(s)) return true;
+  if (/^(更|比较|尽量|优先|最好|稍微)?\s*(安全|安静|方便|便宜|舒适|舒服|热闹|清净|治安|人少|近一点|远一点)$/i.test(s)) return true;
+  if (/^(安全|安静|方便|便宜|舒适|舒服|热闹|清净|治安|人少)/i.test(s) && s.length <= 10) return true;
   if (/^[0-9]+$/.test(s)) return true;
   if (/^[一二三四五六七八九十两百千万]+$/.test(s)) return true;
   if (/^[A-Za-z]{1,2}$/.test(s)) return true;
   return false;
+}
+
+function isAbstractPlacePhrase(name: string): boolean {
+  const s = cleanStatement(name || "", 80);
+  if (!s) return false;
+  if (ABSTRACT_PLACE_RE.test(s)) return true;
+  if (/地方(吧|呢|呀|啊)?$/i.test(s) && s.length <= 14) return true;
+  return false;
+}
+
+function toDerivedConstraint(raw: string) {
+  const s = cleanStatement(raw || "", 80);
+  if (!s) return null;
+  if (!isAbstractPlacePhrase(s)) return null;
+  const normalized = /住|住宿|酒店|民宿/i.test(s) ? `住宿区域偏好：${s}` : `区域偏好：${s}`;
+  return classifyConstraintText({
+    text: normalized,
+    evidence: s,
+    hardHint: /必须|一定|务必|硬性要求/i.test(s),
+    importance: 0.76,
+  });
 }
 
 function reconcileDurationBySegments(out: IntentSignals): void {
@@ -81,13 +107,21 @@ function reconcileDurationBySegments(out: IntentSignals): void {
   const travelSegments = segments.filter((x) => x.kind === "travel");
   const sumTravel = travelSegments.reduce((acc, x) => acc + (Number(x.days) || 0), 0);
   const maxSeg = segments.reduce((acc, x) => Math.max(acc, Number(x.days) || 0), 0);
+  const detailSegments = segments.filter((x) =>
+    /第[一二三四五六七八九十0-9两]+天|首日|第一天|落地|抵达|转机|机场|当日|当天/i.test(
+      cleanStatement(x?.evidence || "", 80)
+    )
+  );
   const distinctCityCount = new Set(segments.map((x) => slug(canonicalCity(x.city)))).size;
+  const likelyNestedDetail = detailSegments.length > 0 && maxSeg >= sumAll - 2;
   const preferred =
-    distinctCityCount >= 2 && sumAll > 0
-      ? sumAll
-      : sumTravel > 0
-        ? sumTravel
-        : maxSeg;
+    likelyNestedDetail
+      ? maxSeg
+      : distinctCityCount >= 2 && sumAll > 0
+        ? sumAll
+        : sumTravel > 0
+          ? sumTravel
+          : maxSeg;
   if (!preferred || preferred <= 0) return;
 
   const curDays = Number(out.durationDays) || 0;
@@ -120,6 +154,7 @@ function reconcileDurationBySegments(out: IntentSignals): void {
 
 export function sanitizeIntentSignals(input: IntentSignals): IntentSignals {
   const out: IntentSignals = { ...input };
+  const derivedConstraints: NonNullable<IntentSignals["genericConstraints"]> = [];
 
   if (out.genericConstraints?.length) {
     const map = new Map<string, NonNullable<IntentSignals["genericConstraints"]>[number]>();
@@ -159,6 +194,20 @@ export function sanitizeIntentSignals(input: IntentSignals): IntentSignals {
       const nameNorm = canonicalCity(name);
       const parent = canonicalCity(sub?.parentCity || "");
       const parentOk = parent && isLikelyDestinationCandidate(parent) ? parent : undefined;
+      if (!parentOk && (isNoiseCityLike(nameNorm) || isAbstractPlacePhrase(name))) {
+        const derived = toDerivedConstraint(name);
+        if (derived?.family === "generic") {
+          derivedConstraints.push({
+            text: derived.text,
+            evidence: derived.evidence,
+            kind: derived.kind,
+            hard: derived.hard,
+            severity: derived.severity,
+            importance: derived.importance,
+          });
+        }
+        continue;
+      }
       const key = `${slug(nameNorm || name)}|${slug(parentOk || "")}`;
       const prev = dedup.get(key);
       const merged = {
@@ -182,7 +231,20 @@ export function sanitizeIntentSignals(input: IntentSignals): IntentSignals {
   const destMap = new Map<string, string>();
   for (const raw of destinationCandidates) {
     const city = canonicalCity(raw);
-    if (!city || isNoiseCityLike(city) || !isLikelyDestinationCandidate(city)) continue;
+    if (!city || isNoiseCityLike(city) || !isLikelyDestinationCandidate(city)) {
+      const derived = toDerivedConstraint(raw);
+      if (derived?.family === "generic") {
+        derivedConstraints.push({
+          text: derived.text,
+          evidence: derived.evidence,
+          kind: derived.kind,
+          hard: derived.hard,
+          severity: derived.severity,
+          importance: derived.importance,
+        });
+      }
+      continue;
+    }
     const key = slug(city);
     if (!key) continue;
 
@@ -206,6 +268,14 @@ export function sanitizeIntentSignals(input: IntentSignals): IntentSignals {
   } else {
     out.destinations = undefined;
     out.destination = undefined;
+  }
+
+  if (derivedConstraints.length) {
+    const merged = dedupeClassifiedConstraints([
+      ...(out.genericConstraints || []),
+      ...derivedConstraints,
+    ]).slice(0, 8);
+    out.genericConstraints = merged.length ? merged : undefined;
   }
 
   if (out.cityDurations?.length) {

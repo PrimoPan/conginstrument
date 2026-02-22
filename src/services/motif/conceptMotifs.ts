@@ -2,6 +2,8 @@ import type { CDG, EdgeType } from "../../core/graph.js";
 import type { ConceptItem } from "../concepts.js";
 
 export type ConceptMotifType = "pair" | "triad";
+export type MotifLifecycleStatus = "active" | "uncertain" | "deprecated" | "disabled" | "cancelled";
+export type MotifChangeState = "new" | "updated" | "unchanged";
 
 export type ConceptMotif = {
   id: string;
@@ -15,6 +17,12 @@ export type ConceptMotif = {
   confidence: number;
   supportEdgeIds: string[];
   supportNodeIds: string[];
+  status: MotifLifecycleStatus;
+  statusReason?: string;
+  resolved?: boolean;
+  resolvedAt?: string;
+  resolvedBy?: "user" | "system";
+  novelty: MotifChangeState;
   updatedAt: string;
 };
 
@@ -71,9 +79,9 @@ function familyLabel(family: ConceptItem["family"]): string {
   if (family === "lodging") return "住宿";
   if (family === "meeting_critical") return "关键日程";
   if (family === "limiting_factor") return "限制因素";
-  if (family === "scenic_preference") return "偏好";
+  if (family === "scenic_preference") return "景点偏好";
   if (family === "activity_preference") return "活动偏好";
-  if (family === "generic_constraint") return "约束";
+  if (family === "generic_constraint") return "通用约束";
   if (family === "sub_location") return "子地点";
   return "概念";
 }
@@ -182,6 +190,8 @@ function buildPairMotifs(graph: CDG, concepts: ConceptItem[]): ConceptMotif[] {
       confidence,
       supportEdgeIds: uniq(pair.supportEdgeIds, 32),
       supportNodeIds: uniq(pair.supportNodeIds, 32),
+      status: "active",
+      novelty: "new",
       updatedAt: now,
     });
   }
@@ -252,6 +262,8 @@ function buildTriadMotifs(pairMotifs: ConceptMotif[], concepts: ConceptItem[]): 
         confidence,
         supportEdgeIds: uniq(top.flatMap((m) => m.supportEdgeIds), 36),
         supportNodeIds: uniq(top.flatMap((m) => m.supportNodeIds), 36),
+        status: "active",
+        novelty: "new",
         updatedAt: now,
       });
     }
@@ -270,6 +282,10 @@ function normalizeMotifs(input: any): ConceptMotif[] {
     seen.add(id);
     const relation = cleanText((raw as any)?.relation, 40) as EdgeType;
     const motifType = cleanText((raw as any)?.motifType, 20) as ConceptMotifType;
+    const statusRaw = cleanText((raw as any)?.status, 24).toLowerCase();
+    const noveltyRaw = cleanText((raw as any)?.novelty, 24).toLowerCase();
+    const resolved = !!(raw as any)?.resolved;
+    const resolvedByRaw = cleanText((raw as any)?.resolvedBy, 24).toLowerCase();
     out.push({
       id,
       templateKey: cleanText((raw as any)?.templateKey, 180),
@@ -298,10 +314,110 @@ function normalizeMotifs(input: any): ConceptMotif[] {
         ),
         48
       ),
+      status:
+        statusRaw === "uncertain" ||
+        statusRaw === "deprecated" ||
+        statusRaw === "disabled" ||
+        statusRaw === "cancelled"
+          ? (statusRaw as MotifLifecycleStatus)
+          : "active",
+      statusReason: cleanText((raw as any)?.statusReason, 180),
+      resolved,
+      resolvedAt: resolved ? cleanText((raw as any)?.resolvedAt, 40) || undefined : undefined,
+      resolvedBy: resolved ? (resolvedByRaw === "user" ? "user" : "system") : undefined,
+      novelty: noveltyRaw === "updated" || noveltyRaw === "unchanged" ? (noveltyRaw as MotifChangeState) : "new",
       updatedAt: cleanText((raw as any)?.updatedAt, 40) || new Date().toISOString(),
     });
   }
   return out;
+}
+
+function isSupportChanged(prev: ConceptMotif, next: ConceptMotif): boolean {
+  const prevSupport = `${prev.supportEdgeIds.slice().sort().join("|")}::${prev.supportNodeIds.slice().sort().join("|")}`;
+  const nextSupport = `${next.supportEdgeIds.slice().sort().join("|")}::${next.supportNodeIds.slice().sort().join("|")}`;
+  return prevSupport !== nextSupport;
+}
+
+function sourceFamilySignature(m: ConceptMotif, conceptById: Map<string, ConceptItem>): string {
+  const ids = (m.conceptIds || []).slice();
+  if (m.anchorConceptId) {
+    const idx = ids.indexOf(m.anchorConceptId);
+    if (idx >= 0) ids.splice(idx, 1);
+  }
+  const families = ids
+    .map((id) => conceptById.get(id)?.family || "other")
+    .sort();
+  return families.join("+") || "none";
+}
+
+function statusRank(s: MotifLifecycleStatus): number {
+  if (s === "deprecated") return 5;
+  if (s === "uncertain") return 4;
+  if (s === "active") return 3;
+  if (s === "disabled") return 2;
+  return 1;
+}
+
+function inferBaseStatus(m: ConceptMotif, prev: ConceptMotif | undefined, conceptById: Map<string, ConceptItem>) {
+  if (prev?.resolved && (prev.status === "active" || prev.status === "disabled" || prev.status === "cancelled")) {
+    return { status: prev.status as MotifLifecycleStatus, reason: prev.statusReason || "user_resolved" };
+  }
+  if (m.relation === "conflicts_with") return { status: "deprecated" as MotifLifecycleStatus, reason: "relation_conflicts_with" };
+
+  const hasConcepts = (m.conceptIds || []).length > 0;
+  const allPaused =
+    hasConcepts &&
+    (m.conceptIds || []).every((cid) => {
+      const c = conceptById.get(cid);
+      return !!c?.paused;
+    });
+  if (allPaused) return { status: "disabled" as MotifLifecycleStatus, reason: "all_related_concepts_paused" };
+
+  if (prev?.status === "disabled" && !allPaused) {
+    return { status: "disabled" as MotifLifecycleStatus, reason: prev.statusReason || "user_disabled" };
+  }
+  if (m.confidence < 0.7) return { status: "uncertain" as MotifLifecycleStatus, reason: "low_confidence" };
+  return { status: "active" as MotifLifecycleStatus, reason: "" };
+}
+
+function applyRedundancyDeprecation(motifs: ConceptMotif[], conceptById: Map<string, ConceptItem>): ConceptMotif[] {
+  const groups = new Map<string, ConceptMotif[]>();
+  for (const m of motifs) {
+    if (m.resolved) continue;
+    if (m.status === "cancelled" || m.status === "disabled") continue;
+    if (!m.anchorConceptId) continue;
+    const signature = `${m.relation}|${m.anchorConceptId}|${sourceFamilySignature(m, conceptById)}`;
+    if (!groups.has(signature)) groups.set(signature, []);
+    groups.get(signature)!.push(m);
+  }
+
+  const patch = new Map<string, { status: MotifLifecycleStatus; reason: string }>();
+  for (const list of groups.values()) {
+    if (list.length <= 1) continue;
+    const sorted = list
+      .slice()
+      .sort((a, b) => b.confidence - a.confidence || a.id.localeCompare(b.id));
+    const winner = sorted[0];
+    const threshold = Math.max(0.04, 0.14 - winner.confidence * 0.08);
+    for (const loser of sorted.slice(1)) {
+      if (winner.confidence - loser.confidence >= threshold || loser.status === "uncertain") {
+        patch.set(loser.id, {
+          status: "deprecated",
+          reason: `redundant_with:${winner.id}`,
+        });
+      }
+    }
+  }
+
+  return motifs.map((m) => {
+    const p = patch.get(m.id);
+    if (!p) return m;
+    return {
+      ...m,
+      status: p.status,
+      statusReason: p.reason,
+    };
+  });
 }
 
 export function reconcileMotifsWithGraph(params: {
@@ -309,32 +425,65 @@ export function reconcileMotifsWithGraph(params: {
   concepts: ConceptItem[];
   baseMotifs?: any;
 }): ConceptMotif[] {
+  const now = new Date().toISOString();
   const pair = buildPairMotifs(params.graph, params.concepts);
   const triads = buildTriadMotifs(pair, params.concepts);
   const derived = [...pair, ...triads];
-  const baseById = new Map(normalizeMotifs(params.baseMotifs).map((m) => [m.id, m]));
+  const base = normalizeMotifs(params.baseMotifs);
+  const baseById = new Map(base.map((m) => [m.id, m]));
+  const conceptById = new Map((params.concepts || []).map((c) => [c.id, c]));
 
-  const merged = derived.map((m) => {
+  const mergedDerived = derived.map((m) => {
     const prev = baseById.get(m.id);
-    if (!prev) return m;
+    const inferred = inferBaseStatus(m, prev, conceptById);
+    const status = inferred.status;
+    const changed =
+      !!prev &&
+      (Math.abs((prev.confidence || 0) - (m.confidence || 0)) >= 0.04 ||
+        prev.status !== status ||
+        isSupportChanged(prev, m));
     return {
       ...m,
-      title: prev.title || m.title,
-      description: prev.description || m.description,
-      confidence: m.confidence,
-      updatedAt: new Date().toISOString(),
+      title: prev?.title || m.title,
+      description: prev?.description || m.description,
+      status,
+      statusReason: inferred.reason || prev?.statusReason,
+      resolved: !!prev?.resolved && status !== "deprecated",
+      resolvedAt: prev?.resolvedAt,
+      resolvedBy: prev?.resolvedBy,
+      novelty: prev ? (changed ? "updated" : "unchanged") : "new",
+      updatedAt: now,
     };
   });
 
-  return merged
+  const deprecationApplied = applyRedundancyDeprecation(mergedDerived, conceptById).map((m) => {
+    if (m.status !== "deprecated") return m;
+    if (m.novelty === "new") return m;
+    return { ...m, novelty: "updated" as MotifChangeState, resolved: false, resolvedAt: undefined, resolvedBy: undefined };
+  });
+
+  const derivedIds = new Set(deprecationApplied.map((m) => m.id));
+  const cancelledFromHistory: ConceptMotif[] = base
+    .filter((old) => !derivedIds.has(old.id))
+    .map((old) => ({
+      ...old,
+      status: "cancelled",
+      statusReason: "not_supported_by_current_graph",
+      novelty: "updated",
+      updatedAt: now,
+    }));
+
+  const all = [...deprecationApplied, ...cancelledFromHistory];
+  return all
     .slice()
-    .sort((a, b) => b.confidence - a.confidence || a.id.localeCompare(b.id))
-    .slice(0, 240);
+    .sort((a, b) => statusRank(b.status) - statusRank(a.status) || b.confidence - a.confidence || a.id.localeCompare(b.id))
+    .slice(0, 320);
 }
 
 export function attachMotifIdsToConcepts(concepts: ConceptItem[], motifs: ConceptMotif[]): ConceptItem[] {
   const motifIdsByConcept = new Map<string, string[]>();
   for (const m of motifs || []) {
+    if (m.status === "cancelled") continue;
     for (const cid of m.conceptIds || []) {
       if (!motifIdsByConcept.has(cid)) motifIdsByConcept.set(cid, []);
       motifIdsByConcept.get(cid)!.push(m.id);

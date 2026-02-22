@@ -40,7 +40,7 @@ export const GENERIC_TIMELINE_HINT_RE = /截止|deadline|里程碑|周期|排期
 export const GENERIC_STAKEHOLDER_HINT_RE = /用户|客户|老板|团队|同事|角色|stakeholder|owner|reviewer|审批/i;
 export const GENERIC_RISK_HINT_RE = /风险|故障|安全|合规|隐私|法律|阻塞|依赖|上线事故|risk|security|privacy|compliance/i;
 export const DESTINATION_BAD_TOKEN_RE =
-  /我|你|他|她|我们|时间|之外|之前|之后|必须|到场|安排|计划|准备|打算|预算|经费|花费|费用|人民币|pre|chi|会议|汇报|报告|论文|一天|两天|三天|四天|五天|顺带|顺便|顺路|顺道|其中|其中有|其余|其他时候|海地区|该地区|看球|观赛|比赛|演讲|发表|打卡|参观|游览|所以这|因此|另外|此外|unknown|语地区|西班牙语地区|英语地区|安全一点|安静一点|方便一点|便宜一点|舒适一点|热闹一点|地方吧|地方呢|地方啊|地方呀/i;
+  /我|你|他|她|我们|时间|之外|之前|之后|必须|到场|安排|计划|准备|打算|预算|经费|花费|费用|人民币|pre|chi|会议|汇报|报告|论文|一天|两天|三天|四天|五天|顺带|顺便|顺路|顺道|其中|其中有|其余|其他时候|海地区|该地区|看球|观赛|比赛|演讲|发表|打卡|参观|游览|所以这|因此|另外|此外|unknown|语地区|西班牙语地区|英语地区|安全一点|安静一点|方便一点|便宜一点|舒适一点|热闹一点|清净一点|治安好一点|附近一点|地方吧|地方呢|地方啊|地方呀|安全的地方|安静的地方|方便的地方|便宜的地方/i;
 
 function normalizePlaceToken(raw: string): string {
   return cleanText(raw)

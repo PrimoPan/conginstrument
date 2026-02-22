@@ -43,6 +43,52 @@ type DurationCandidate = {
   source: "explicit_total" | "city_sum" | "max_segment";
 };
 
+function isDetailLikeDurationEvidence(evidence: string): boolean {
+  const s = cleanStatement(evidence || "", 100);
+  if (!s) return false;
+  return /第[一二三四五六七八九十0-9两]+天|首日|第一天|落地|抵达|转机|机场|当日|当天|晚上到|早上到/i.test(s);
+}
+
+function likelyNestedDuration(parentCity: string, childCity: string): boolean {
+  const p = normalizeDestination(parentCity || "");
+  const c = normalizeDestination(childCity || "");
+  if (!p || !c || p === c) return false;
+  if (p.includes(c) || c.includes(p)) return true;
+  return false;
+}
+
+function compactCityDurations(
+  cityDurations: Array<{ city: string; days: number; kind: "travel" | "meeting"; evidence: string; importance: number }>
+): Array<{ city: string; days: number; kind: "travel" | "meeting"; evidence: string; importance: number }> {
+  if (cityDurations.length <= 1) return cityDurations;
+
+  const sorted = cityDurations
+    .slice()
+    .sort((a, b) => b.days - a.days || a.city.localeCompare(b.city));
+  const kept: typeof cityDurations = [];
+
+  for (const seg of sorted) {
+    const nestedInKept = kept.some(
+      (k) => k.days >= seg.days && likelyNestedDuration(k.city, seg.city)
+    );
+    if (!nestedInKept) kept.push(seg);
+  }
+
+  const maxSeg = sorted[0];
+  const sumAll = sorted.reduce((acc, x) => acc + x.days, 0);
+  const detailSegments = sorted.filter(
+    (x) =>
+      x !== maxSeg &&
+      x.days <= 2 &&
+      (isDetailLikeDurationEvidence(x.evidence) || x.kind === "travel")
+  );
+  if (maxSeg && detailSegments.length && maxSeg.days >= sumAll - 2) {
+    return [maxSeg];
+  }
+
+  return kept.length ? kept : cityDurations;
+}
+
 function weightedMedian(candidates: DurationCandidate[]): DurationCandidate | null {
   const list = candidates
     .filter((x) => Number.isFinite(x.days) && x.days > 0 && Number.isFinite(x.weight) && x.weight > 0)
@@ -82,7 +128,7 @@ function buildDurationState(signals: IntentSignals): DurationState {
     }
   }
 
-  const cityDurations = Array.from(byCity.values());
+  const cityDurations = compactCityDurations(Array.from(byCity.values()));
   const citySum = cityDurations.reduce((acc, x) => acc + x.days, 0);
   const cityCount = cityDurations.length;
   const travelCityCount = new Set(cityDurations.filter((x) => x.kind === "travel").map((x) => slug(x.city))).size;
@@ -142,8 +188,12 @@ function buildDurationState(signals: IntentSignals): DurationState {
 
   // 多城市且有旅行段时，优先满足分段总和，避免漏算前后段。
   if (travelCityCount >= 2 && citySum > 0) {
+    const explicitStrong =
+      !!explicitTotal &&
+      (signals.hasExplicitTotalCue || clamp01(signals.durationStrength, 0.55) >= 0.88);
     const underEstimate = !totalDays || totalDays < citySum;
-    if (underEstimate || signals.hasDurationUpdateCue) {
+    const shouldUseSum = underEstimate || (signals.hasDurationUpdateCue && !explicitStrong);
+    if (shouldUseSum) {
       totalDays = citySum;
       totalEvidence = cityDurations.map((x) => `${x.city}${x.days}天`).join(" + ");
     }

@@ -28,7 +28,7 @@ export type ConstraintClassified = {
 const LEGAL_RE =
   /签证|申根|护照|入境|出入境|海关|居留|许可|visa|passport|immigration|permit|consulate|embassy/i;
 const SAFETY_RE =
-  /危险|高风险|不安全|治安|诈骗|抢劫|急救|夜间不宜|security|safety|danger|emergency|risk/i;
+  /危险|高风险|不安全|治安|诈骗|抢劫|急救|夜间不宜|安全一点|更安全|治安好|security|safety|danger|emergency|risk/i;
 const MOBILITY_RE =
   /行动不便|轮椅|无障碍|不能久走|不能爬|台阶|体力|走不动|搬运行李|mobility|wheelchair|accessibility/i;
 const LOGISTICS_RE =
@@ -45,8 +45,19 @@ function clampImportance(x: any, fallback = 0.72) {
 }
 
 function normalizeConstraintText(input: string): string {
-  const s = cleanStatement(input || "", 120);
-  return s.replace(/^(健康约束|语言约束|关键约束|法律约束|安全约束|出行约束|沟通约束)[:：]\s*/i, "").trim();
+  let s = cleanStatement(input || "", 120);
+  s = s.replace(/^(健康约束|语言约束|关键约束|法律约束|安全约束|出行约束|沟通约束|区域偏好|住宿区域偏好)[:：]\s*/i, "").trim();
+  const parts = s
+    .split(/[，,。；;]/)
+    .map((x) => cleanStatement(x, 80))
+    .filter(Boolean);
+  if (parts.length > 1) {
+    const cueRe =
+      /不能|必须|务必|一定|避免|禁忌|签证|护照|入境|治安|安全|轮椅|无障碍|转机|换乘|托运|语言障碍|不会英语|翻译|饮食|忌口|素食|清真|宗教|礼拜|祷告|斋月|安息日|halal|kosher|vegetarian|vegan|religion|prayer|visa|passport|safety|logistics/i;
+    const picked = parts.find((p) => cueRe.test(p));
+    if (picked) s = picked;
+  }
+  return s;
 }
 
 function inferHardness(text: string): boolean {

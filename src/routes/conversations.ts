@@ -7,16 +7,8 @@ import { applyPatchWithGuards, normalizeGraphSnapshot } from "../core/graph.js";
 import type { CDG } from "../core/graph.js";
 import { config } from "../server/config.js";
 import { generateAssistantTextNonStreaming } from "../services/chatResponder.js";
-import {
-  applyConceptStateToGraph,
-  reconcileConceptsWithGraph,
-  type ConceptItem,
-} from "../services/concepts.js";
-import {
-  attachMotifIdsToConcepts,
-  reconcileMotifsWithGraph,
-  type ConceptMotif,
-} from "../services/motif/conceptMotifs.js";
+import { buildCognitiveModel } from "../services/cognitiveModel.js";
+import { buildConflictGateMessage, listUnresolvedDeprecatedMotifs } from "../services/motif/conflictGate.js";
 
 export const convRouter = Router();
 convRouter.use(authMiddleware);
@@ -81,22 +73,14 @@ function parseBoolFlag(v: any): boolean {
   return false;
 }
 
-function buildConceptModel(params: {
-  graph: CDG;
-  baseConcepts?: any;
-  baseMotifs?: any;
-}): { concepts: ConceptItem[]; motifs: ConceptMotif[] } {
-  const baseConcepts = reconcileConceptsWithGraph({
-    graph: params.graph,
-    baseConcepts: params.baseConcepts,
-  });
-  const motifs = reconcileMotifsWithGraph({
-    graph: params.graph,
-    concepts: baseConcepts,
-    baseMotifs: params.baseMotifs,
-  });
-  const concepts = attachMotifIdsToConcepts(baseConcepts, motifs);
-  return { concepts, motifs };
+function toConflictGatePayload(motifs: any[]) {
+  const unresolved = listUnresolvedDeprecatedMotifs(Array.isArray(motifs) ? motifs : []);
+  if (!unresolved.length) return null;
+  return {
+    blocked: true,
+    unresolvedMotifs: unresolved,
+    message: buildConflictGateMessage(unresolved),
+  };
 }
 
 /**
@@ -151,31 +135,38 @@ convRouter.post("/", async (req: AuthedRequest, res) => {
     graph: emptyGraph("temp"), // 先占位，写入后再用 _id 修正
     concepts: [],
     motifs: [],
+    motifLinks: [],
+    contexts: [],
   } as any);
 
   const conversationId = String(inserted.insertedId);
 
   await collections.conversations.updateOne(
     { _id: inserted.insertedId, userId },
-    { $set: { graph: emptyGraph(conversationId), concepts: [], motifs: [] } }
+    { $set: { graph: emptyGraph(conversationId), concepts: [], motifs: [], motifLinks: [], contexts: [] } }
   );
 
   const conv = await collections.conversations.findOne({ _id: inserted.insertedId, userId });
   if (!conv) return res.status(500).json({ error: "failed to create conversation" });
 
-  const model = buildConceptModel({
+  const model = buildCognitiveModel({
     graph: conv.graph,
+    prevConcepts: conv.concepts || [],
     baseConcepts: conv.concepts || [],
     baseMotifs: (conv as any).motifs || [],
+    baseMotifLinks: (conv as any).motifLinks || [],
+    baseContexts: (conv as any).contexts || [],
   });
 
   res.json({
     conversationId,
     title: conv.title,
     systemPrompt: conv.systemPrompt,
-    graph: conv.graph,
+    graph: model.graph,
     concepts: model.concepts,
     motifs: model.motifs,
+    motifLinks: model.motifLinks,
+    contexts: model.contexts,
   });
 });
 
@@ -189,19 +180,24 @@ convRouter.get("/:id", async (req: AuthedRequest, res) => {
   const conv = await collections.conversations.findOne({ _id: oid, userId });
   if (!conv) return res.status(404).json({ error: "conversation not found" });
 
-  const model = buildConceptModel({
+  const model = buildCognitiveModel({
     graph: conv.graph,
+    prevConcepts: conv.concepts || [],
     baseConcepts: conv.concepts || [],
     baseMotifs: (conv as any).motifs || [],
+    baseMotifLinks: (conv as any).motifLinks || [],
+    baseContexts: (conv as any).contexts || [],
   });
 
   res.json({
     conversationId: id,
     title: conv.title,
     systemPrompt: conv.systemPrompt,
-    graph: conv.graph,
+    graph: model.graph,
     concepts: model.concepts,
     motifs: model.motifs,
+    motifLinks: model.motifLinks,
+    contexts: model.contexts,
   });
 });
 
@@ -235,22 +231,15 @@ convRouter.put("/:id/graph", async (req: AuthedRequest, res) => {
     version: prevGraph.version,
   });
   normalized.id = prevGraph.id;
-
-  const nextConceptsDraft = reconcileConceptsWithGraph({
-    graph: normalized,
-    baseConcepts: Array.isArray(req.body?.concepts) ? req.body.concepts : conv.concepts || [],
-  });
-  const graphWithConceptState = applyConceptStateToGraph({
+  const model = buildCognitiveModel({
     graph: normalized,
     prevConcepts: conv.concepts || [],
-    nextConcepts: nextConceptsDraft,
-  });
-  graphWithConceptState.version = prevGraph.version + (graphChanged(prevGraph, graphWithConceptState) ? 1 : 0);
-  const model = buildConceptModel({
-    graph: graphWithConceptState,
-    baseConcepts: nextConceptsDraft,
+    baseConcepts: Array.isArray(req.body?.concepts) ? req.body.concepts : conv.concepts || [],
     baseMotifs: Array.isArray(req.body?.motifs) ? req.body.motifs : (conv as any).motifs || [],
+    baseMotifLinks: Array.isArray(req.body?.motifLinks) ? req.body.motifLinks : (conv as any).motifLinks || [],
+    baseContexts: Array.isArray(req.body?.contexts) ? req.body.contexts : (conv as any).contexts || [],
   });
+  model.graph.version = prevGraph.version + (graphChanged(prevGraph, model.graph) ? 1 : 0);
 
   const requestAdvice = parseBoolFlag(req.body?.requestAdvice);
   const advicePrompt = String(req.body?.advicePrompt || "").trim().slice(0, 1200);
@@ -258,7 +247,16 @@ convRouter.put("/:id/graph", async (req: AuthedRequest, res) => {
   const now = new Date();
   await collections.conversations.updateOne(
     { _id: oid, userId },
-    { $set: { graph: graphWithConceptState, concepts: model.concepts, motifs: model.motifs, updatedAt: now } }
+    {
+      $set: {
+        graph: model.graph,
+        concepts: model.concepts,
+        motifs: model.motifs,
+        motifLinks: model.motifLinks,
+        contexts: model.contexts,
+        updatedAt: now,
+      },
+    }
   );
 
   let assistantText = "";
@@ -282,7 +280,7 @@ convRouter.put("/:id/graph", async (req: AuthedRequest, res) => {
         "用户已经手动修改了意图流程图。请把这个图视为最新有效意图，结合最近对话给出下一步可执行建议。先给具体行动方案，再给1-2个澄清问题。";
 
       assistantText = await generateAssistantTextNonStreaming({
-        graph: graphWithConceptState,
+        graph: model.graph,
         userText: mergedPrompt,
         recentTurns,
         systemPrompt: conv.systemPrompt,
@@ -294,9 +292,11 @@ convRouter.put("/:id/graph", async (req: AuthedRequest, res) => {
 
   res.json({
     conversationId: id,
-    graph: graphWithConceptState,
+    graph: model.graph,
     concepts: model.concepts,
     motifs: model.motifs,
+    motifLinks: model.motifLinks,
+    contexts: model.contexts,
     updatedAt: now,
     assistantText,
     adviceError,
@@ -322,33 +322,38 @@ convRouter.put("/:id/concepts", async (req: AuthedRequest, res) => {
     nodes: Array.isArray(conv.graph?.nodes) ? conv.graph.nodes : [],
     edges: Array.isArray(conv.graph?.edges) ? conv.graph.edges : [],
   };
-  const nextConceptsDraft: ConceptItem[] = reconcileConceptsWithGraph({
-    graph: prevGraph,
-    baseConcepts: req.body?.concepts,
-  });
-  const graphWithConceptState = applyConceptStateToGraph({
+  const model = buildCognitiveModel({
     graph: prevGraph,
     prevConcepts: conv.concepts || [],
-    nextConcepts: nextConceptsDraft,
-  });
-  graphWithConceptState.version = prevGraph.version + (graphChanged(prevGraph, graphWithConceptState) ? 1 : 0);
-  const model = buildConceptModel({
-    graph: graphWithConceptState,
-    baseConcepts: nextConceptsDraft,
+    baseConcepts: req.body?.concepts,
     baseMotifs: (conv as any).motifs || [],
+    baseMotifLinks: (conv as any).motifLinks || [],
+    baseContexts: (conv as any).contexts || [],
   });
+  model.graph.version = prevGraph.version + (graphChanged(prevGraph, model.graph) ? 1 : 0);
 
   const now = new Date();
   await collections.conversations.updateOne(
     { _id: oid, userId },
-    { $set: { graph: graphWithConceptState, concepts: model.concepts, motifs: model.motifs, updatedAt: now } }
+    {
+      $set: {
+        graph: model.graph,
+        concepts: model.concepts,
+        motifs: model.motifs,
+        motifLinks: model.motifLinks,
+        contexts: model.contexts,
+        updatedAt: now,
+      },
+    }
   );
 
   res.json({
     conversationId: id,
-    graph: graphWithConceptState,
+    graph: model.graph,
     concepts: model.concepts,
     motifs: model.motifs,
+    motifLinks: model.motifLinks,
+    contexts: model.contexts,
     updatedAt: now,
   });
 });
@@ -413,6 +418,54 @@ convRouter.post("/:id/turn", async (req: AuthedRequest, res) => {
       { role: "assistant" as const, content: t.assistantText },
     ]);
 
+  const preModel = buildCognitiveModel({
+    graph,
+    prevConcepts: conv.concepts || [],
+    baseConcepts: conv.concepts || [],
+    baseMotifs: (conv as any).motifs || [],
+    baseMotifLinks: (conv as any).motifLinks || [],
+    baseContexts: (conv as any).contexts || [],
+  });
+  const conflictGate = toConflictGatePayload(preModel.motifs);
+  if (conflictGate) {
+    const now = new Date();
+    const blockedPatch = { ops: [], notes: ["blocked:motif_conflict_gate"] };
+    await collections.turns.insertOne({
+      conversationId: oid,
+      userId,
+      createdAt: now,
+      userText,
+      assistantText: conflictGate.message,
+      graphPatch: blockedPatch,
+      graphVersion: preModel.graph.version,
+    } as any);
+
+    await collections.conversations.updateOne(
+      { _id: oid, userId },
+      {
+        $set: {
+          graph: preModel.graph,
+          concepts: preModel.concepts,
+          motifs: preModel.motifs,
+          motifLinks: preModel.motifLinks,
+          contexts: preModel.contexts,
+          updatedAt: now,
+        },
+      }
+    );
+
+    return res.json({
+      assistantText: conflictGate.message,
+      graphPatch: blockedPatch,
+      graph: preModel.graph,
+      concepts: preModel.concepts,
+      motifs: preModel.motifs,
+      motifLinks: preModel.motifLinks,
+      contexts: preModel.contexts,
+      conflictGate,
+    });
+  }
+
   // ✅ 把 conv.systemPrompt 传给 LLM
   const out = await generateTurn({
     graph,
@@ -422,22 +475,15 @@ convRouter.post("/:id/turn", async (req: AuthedRequest, res) => {
   });
 
   const merged = applyPatchWithGuards(graph, out.graph_patch);
-  const nextConceptsDraft = reconcileConceptsWithGraph({
-    graph: merged.newGraph,
-    baseConcepts: conv.concepts || [],
-  });
-  const graphWithConceptState = applyConceptStateToGraph({
+  const model = buildCognitiveModel({
     graph: merged.newGraph,
     prevConcepts: conv.concepts || [],
-    nextConcepts: nextConceptsDraft,
-  });
-  graphWithConceptState.version =
-    merged.newGraph.version + (graphChanged(merged.newGraph, graphWithConceptState) ? 1 : 0);
-  const model = buildConceptModel({
-    graph: graphWithConceptState,
-    baseConcepts: nextConceptsDraft,
+    baseConcepts: conv.concepts || [],
     baseMotifs: (conv as any).motifs || [],
+    baseMotifLinks: (conv as any).motifLinks || [],
+    baseContexts: (conv as any).contexts || [],
   });
+  model.graph.version = merged.newGraph.version + (graphChanged(merged.newGraph, model.graph) ? 1 : 0);
 
   const now = new Date();
   await collections.turns.insertOne({
@@ -447,20 +493,31 @@ convRouter.post("/:id/turn", async (req: AuthedRequest, res) => {
     userText,
     assistantText: out.assistant_text,
     graphPatch: merged.appliedPatch,
-    graphVersion: graphWithConceptState.version,
+    graphVersion: model.graph.version,
   } as any);
 
   await collections.conversations.updateOne(
     { _id: oid, userId },
-    { $set: { graph: graphWithConceptState, concepts: model.concepts, motifs: model.motifs, updatedAt: now } }
+    {
+      $set: {
+        graph: model.graph,
+        concepts: model.concepts,
+        motifs: model.motifs,
+        motifLinks: model.motifLinks,
+        contexts: model.contexts,
+        updatedAt: now,
+      },
+    }
   );
 
   res.json({
     assistantText: out.assistant_text,
     graphPatch: merged.appliedPatch,
-    graph: graphWithConceptState,
+    graph: model.graph,
     concepts: model.concepts,
     motifs: model.motifs,
+    motifLinks: model.motifLinks,
+    contexts: model.contexts,
   });
 });
 
@@ -496,6 +553,64 @@ convRouter.post("/:id/turn/stream", async (req: AuthedRequest, res) => {
       { role: "user" as const, content: t.userText },
       { role: "assistant" as const, content: t.assistantText },
     ]);
+
+  const preModel = buildCognitiveModel({
+    graph,
+    prevConcepts: conv.concepts || [],
+    baseConcepts: conv.concepts || [],
+    baseMotifs: (conv as any).motifs || [],
+    baseMotifLinks: (conv as any).motifLinks || [],
+    baseContexts: (conv as any).contexts || [],
+  });
+  const conflictGate = toConflictGatePayload(preModel.motifs);
+  if (conflictGate) {
+    const now = new Date();
+    const blockedPatch = { ops: [], notes: ["blocked:motif_conflict_gate"] };
+
+    await collections.turns.insertOne({
+      conversationId: oid,
+      userId,
+      createdAt: now,
+      userText,
+      assistantText: conflictGate.message,
+      graphPatch: blockedPatch,
+      graphVersion: preModel.graph.version,
+    } as any);
+
+    await collections.conversations.updateOne(
+      { _id: oid, userId },
+      {
+        $set: {
+          graph: preModel.graph,
+          concepts: preModel.concepts,
+          motifs: preModel.motifs,
+          motifLinks: preModel.motifLinks,
+          contexts: preModel.contexts,
+          updatedAt: now,
+        },
+      }
+    );
+
+    res.status(200);
+    res.setHeader("Content-Type", "text/event-stream; charset=utf-8");
+    res.setHeader("Cache-Control", "no-cache, no-transform");
+    res.setHeader("Connection", "keep-alive");
+    res.setHeader("X-Accel-Buffering", "no");
+    (res as any).flushHeaders?.();
+    sseSend(res, "start", { conversationId: id, graphVersion: preModel.graph.version });
+    sseSend(res, "token", { token: conflictGate.message });
+    sseSend(res, "done", {
+      assistantText: conflictGate.message,
+      graphPatch: blockedPatch,
+      graph: preModel.graph,
+      concepts: preModel.concepts,
+      motifs: preModel.motifs,
+      motifLinks: preModel.motifLinks,
+      contexts: preModel.contexts,
+      conflictGate,
+    });
+    return res.end();
+  }
 
   // SSE headers
   res.status(200);
@@ -546,22 +661,15 @@ convRouter.post("/:id/turn/stream", async (req: AuthedRequest, res) => {
     if (closed) return;
 
     const merged = applyPatchWithGuards(graph, out.graph_patch);
-    const nextConceptsDraft = reconcileConceptsWithGraph({
-      graph: merged.newGraph,
-      baseConcepts: conv.concepts || [],
-    });
-    const graphWithConceptState = applyConceptStateToGraph({
+    const model = buildCognitiveModel({
       graph: merged.newGraph,
       prevConcepts: conv.concepts || [],
-      nextConcepts: nextConceptsDraft,
-    });
-    graphWithConceptState.version =
-      merged.newGraph.version + (graphChanged(merged.newGraph, graphWithConceptState) ? 1 : 0);
-    const model = buildConceptModel({
-      graph: graphWithConceptState,
-      baseConcepts: nextConceptsDraft,
+      baseConcepts: conv.concepts || [],
       baseMotifs: (conv as any).motifs || [],
+      baseMotifLinks: (conv as any).motifLinks || [],
+      baseContexts: (conv as any).contexts || [],
     });
+    model.graph.version = merged.newGraph.version + (graphChanged(merged.newGraph, model.graph) ? 1 : 0);
 
     const now = new Date();
     await collections.turns.insertOne({
@@ -571,20 +679,31 @@ convRouter.post("/:id/turn/stream", async (req: AuthedRequest, res) => {
       userText,
       assistantText: out.assistant_text,
       graphPatch: merged.appliedPatch,
-      graphVersion: graphWithConceptState.version,
+      graphVersion: model.graph.version,
     } as any);
 
     await collections.conversations.updateOne(
       { _id: oid, userId },
-      { $set: { graph: graphWithConceptState, concepts: model.concepts, motifs: model.motifs, updatedAt: now } }
+      {
+        $set: {
+          graph: model.graph,
+          concepts: model.concepts,
+          motifs: model.motifs,
+          motifLinks: model.motifLinks,
+          contexts: model.contexts,
+          updatedAt: now,
+        },
+      }
     );
 
     sseSend(res, "done", {
       assistantText: out.assistant_text,
       graphPatch: merged.appliedPatch,
-      graph: graphWithConceptState,
+      graph: model.graph,
       concepts: model.concepts,
       motifs: model.motifs,
+      motifLinks: model.motifLinks,
+      contexts: model.contexts,
     });
 
     clearInterval(pingTimer);
@@ -601,22 +720,15 @@ convRouter.post("/:id/turn/stream", async (req: AuthedRequest, res) => {
         });
 
         const merged2 = applyPatchWithGuards(graph, out2.graph_patch);
-        const nextConceptsDraft2 = reconcileConceptsWithGraph({
-          graph: merged2.newGraph,
-          baseConcepts: conv.concepts || [],
-        });
-        const graphWithConceptState2 = applyConceptStateToGraph({
+        const model2 = buildCognitiveModel({
           graph: merged2.newGraph,
           prevConcepts: conv.concepts || [],
-          nextConcepts: nextConceptsDraft2,
-        });
-        graphWithConceptState2.version =
-          merged2.newGraph.version + (graphChanged(merged2.newGraph, graphWithConceptState2) ? 1 : 0);
-        const model2 = buildConceptModel({
-          graph: graphWithConceptState2,
-          baseConcepts: nextConceptsDraft2,
+          baseConcepts: conv.concepts || [],
           baseMotifs: (conv as any).motifs || [],
+          baseMotifLinks: (conv as any).motifLinks || [],
+          baseContexts: (conv as any).contexts || [],
         });
+        model2.graph.version = merged2.newGraph.version + (graphChanged(merged2.newGraph, model2.graph) ? 1 : 0);
 
         const now = new Date();
         await collections.turns.insertOne({
@@ -626,20 +738,31 @@ convRouter.post("/:id/turn/stream", async (req: AuthedRequest, res) => {
           userText,
           assistantText: out2.assistant_text,
           graphPatch: merged2.appliedPatch,
-          graphVersion: graphWithConceptState2.version,
+          graphVersion: model2.graph.version,
         } as any);
 
         await collections.conversations.updateOne(
           { _id: oid, userId },
-          { $set: { graph: graphWithConceptState2, concepts: model2.concepts, motifs: model2.motifs, updatedAt: now } }
+          {
+            $set: {
+              graph: model2.graph,
+              concepts: model2.concepts,
+              motifs: model2.motifs,
+              motifLinks: model2.motifLinks,
+              contexts: model2.contexts,
+              updatedAt: now,
+            },
+          }
         );
 
         sseSend(res, "done", {
           assistantText: out2.assistant_text,
           graphPatch: merged2.appliedPatch,
-          graph: graphWithConceptState2,
+          graph: model2.graph,
           concepts: model2.concepts,
           motifs: model2.motifs,
+          motifLinks: model2.motifLinks,
+          contexts: model2.contexts,
         });
 
         clearInterval(pingTimer);
