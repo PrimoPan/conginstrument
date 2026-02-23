@@ -208,6 +208,7 @@ export function buildHeuristicIntentOps(params: {
     if (rootId) pushEdge(id, rootId, "enable");
   }
 
+  let totalDurationNodeId = "";
   if (signals.durationDays) {
     const id = pushNode({
       type: "constraint",
@@ -218,8 +219,22 @@ export function buildHeuristicIntentOps(params: {
       importance: importanceWithHint(signals.durationImportance, 0.78),
       evidenceIds: [signals.durationEvidence || `${signals.durationDays}天`],
     });
+    if (id) totalDurationNodeId = id;
     if (id) layer2Set.add(id);
     if (id && rootId) pushEdge(id, rootId, "constraint");
+  }
+  if (signals.durationBoundaryAmbiguous && signals.durationBoundaryQuestion) {
+    const id = pushNode({
+      type: "question",
+      statement: signals.durationBoundaryQuestion,
+      status: "proposed",
+      confidence: 0.82,
+      importance: 0.68,
+      evidenceIds: [signals.durationEvidence || "日期跨度"],
+    });
+    if (id) layer2Set.add(id);
+    if (id && totalDurationNodeId) pushEdge(id, totalDurationNodeId, "determine");
+    else if (id && rootId) pushEdge(id, rootId, "determine");
   }
   if (!signals.durationDays && signals.durationUnknown) {
     const id = pushNode({

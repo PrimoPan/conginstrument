@@ -26,6 +26,8 @@ function parseSlotKeyFromStatement(node: ConceptNode): string | null {
 
   if (/^总行程时长[:：]\s*[0-9]{1,3}\s*天$/.test(s)) return "slot:duration_total";
   if (/^预算(?:上限)?[:：]/.test(s)) return "slot:budget";
+  if (/^已花预算[:：]/.test(s)) return "slot:budget_spent";
+  if (/^(?:剩余预算|可用预算)[:：]/.test(s)) return "slot:budget_remaining";
   if (/^同行人数[:：]/.test(s)) return "slot:people";
   if (/^健康约束[:：]/.test(s)) return "slot:health";
   if (/^语言约束[:：]/.test(s)) return "slot:language";

@@ -356,6 +356,28 @@ export function sanitizeIntentSignals(input: IntentSignals): IntentSignals {
     out.destination = out.destinations?.[0];
   }
 
+  const budget = Number(out.budgetCny);
+  const spent = Number(out.budgetSpentCny);
+  if (Number.isFinite(budget)) {
+    out.budgetCny = Math.max(0, Math.round(budget));
+  }
+  if (Number.isFinite(spent)) {
+    out.budgetSpentCny = Math.max(0, Math.round(spent));
+  }
+  if (Number.isFinite(Number(out.budgetSpentDeltaCny))) {
+    out.budgetSpentDeltaCny = Math.max(0, Math.round(Number(out.budgetSpentDeltaCny)));
+  }
+  if (out.budgetCny != null && out.budgetSpentCny != null) {
+    out.budgetRemainingCny = Math.max(0, Math.round((out.budgetCny || 0) - (out.budgetSpentCny || 0)));
+  } else if (Number.isFinite(Number(out.budgetRemainingCny))) {
+    out.budgetRemainingCny = Math.max(0, Math.round(Number(out.budgetRemainingCny)));
+  }
+
+  if (out.hasExplicitTotalCue || out.hasDurationUpdateCue || (Number(out.durationStrength) || 0) >= 0.9) {
+    out.durationBoundaryAmbiguous = false;
+    out.durationBoundaryQuestion = undefined;
+  }
+
   reconcileDurationBySegments(out);
 
   return out;

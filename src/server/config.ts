@@ -17,6 +17,7 @@ export const config = {
   openaiBaseUrl: process.env.OPENAI_BASE_URL || "",
   model: process.env.MODEL || "gpt-4o",
   sessionTtlDays: Number(process.env.SESSION_TTL_DAYS || 7),
+  timezone: process.env.TZ || process.env.TIMEZONE || "Asia/Shanghai",
   corsOrigins: parseCsv(process.env.CORS_ORIGINS || ""),
   corsAllowAll: String(process.env.CORS_ALLOW_ALL || "1") !== "0",
 };

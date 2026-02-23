@@ -63,6 +63,8 @@ export type IntentSignals = {
   durationEvidence?: string;
   durationStrength?: number;
   durationImportance?: number;
+  durationBoundaryAmbiguous?: boolean;
+  durationBoundaryQuestion?: string;
   hasTemporalAnchor?: boolean;
   hasDurationUpdateCue?: boolean;
   hasExplicitTotalCue?: boolean;
@@ -92,7 +94,11 @@ export type IntentSignals = {
   durationUnknownEvidence?: string;
   budgetCny?: number;
   budgetDeltaCny?: number;
+  budgetSpentCny?: number;
+  budgetSpentDeltaCny?: number;
+  budgetRemainingCny?: number;
   budgetEvidence?: string;
+  budgetSpentEvidence?: string;
   budgetImportance?: number;
   healthConstraint?: string;
   healthEvidence?: string;
@@ -275,11 +281,15 @@ function parseBudgetAmountToken(raw: string): number | null {
   return cn && cn > 0 ? cn : null;
 }
 
-const DATE_RANGE_BOUNDARY_MODE: DateRangeBoundaryMode = (() => {
-  const raw = String(process.env.CI_DATE_RANGE_BOUNDARY_MODE || "auto").trim().toLowerCase();
-  if (raw === "inclusive" || raw === "exclusive" || raw === "auto") return raw;
+function parseBoundaryMode(raw: string): DateRangeBoundaryMode {
+  const v = String(raw || "").trim().toLowerCase();
+  if (v === "inclusive" || v === "exclusive" || v === "auto") return v;
   return "auto";
-})();
+}
+
+function getDateRangeBoundaryMode(): DateRangeBoundaryMode {
+  return parseBoundaryMode(String(process.env.CI_DATE_RANGE_BOUNDARY_MODE || "auto"));
+}
 
 const RANGE_MS_PER_DAY = 24 * 60 * 60 * 1000;
 
@@ -507,6 +517,27 @@ function pickLatestBudgetMatch(
 function pickBudgetFromText(text: string): { value: number; evidence: string } | null {
   const t = String(text || "").replace(/,/g, "");
   if (!t) return null;
+  const GLOBAL_BUDGET_CUE_RE =
+    /(预算上限|总预算|预算(?:为|是|在)?|经费|费用|控制在|不超过|上限|可用预算|剩余预算)/i;
+  const hasGlobalBudgetCue = GLOBAL_BUDGET_CUE_RE.test(t);
+  const isLikelyBudgetContext = (idx: number, hitLen: number) => {
+    const left = t.slice(Math.max(0, idx - 10), idx);
+    const right = t.slice(idx, Math.min(t.length, idx + hitLen + 14));
+    const near = `${left}${right}`;
+    const hasBudgetCue = GLOBAL_BUDGET_CUE_RE.test(near);
+    const hasRemainingCue = /(剩余预算|可用预算|余额|还剩)/i.test(near);
+    const hasSpendCue =
+      /(花了|花费了|用了|消费了|支出|支付|付了|已花|开销|打车花了|酒店花了|机票花了)/i.test(near);
+    const immediateSpendLeft = /(?:花了?|花费了?|用了?|消费了?|支出了?|支付了?|付了?|已花|已用)\s*$/i.test(left);
+    const budgetCueClose =
+      /(?:总预算|预算(?:上限)?|经费|费用|上限|可用预算|剩余预算)\s*[:：]?\s*$/i.test(left) ||
+      /^\s*(?:元|块|人民币)?\s*(?:预算|总预算|经费|费用|上限)/i.test(right);
+
+    if ((immediateSpendLeft || hasSpendCue) && !budgetCueClose && !hasRemainingCue) return false;
+    if (hasBudgetCue || hasRemainingCue || budgetCueClose) return true;
+    if (hasGlobalBudgetCue && !hasSpendCue) return true;
+    return false;
+  };
 
   const pickRangeBudget = (): BudgetMatch | null => {
     const defs: Array<{
@@ -532,12 +563,7 @@ function pickBudgetFromText(text: string): { value: number; evidence: string } |
       for (const m of t.matchAll(def.re)) {
         if (!m?.[1] || !m?.[2]) continue;
         const idx = Number(m.index) || 0;
-        const near = t.slice(
-          Math.max(0, idx - 14),
-          Math.min(t.length, idx + String(m[0] || "").length + 14)
-        );
-        const hasBudgetCue = /(预算|经费|花费|费用|人民币|rmb|cny|元|块)/i.test(near);
-        if (!hasBudgetCue) continue;
+        if (!isLikelyBudgetContext(idx, String(m[0] || "").length)) continue;
         const value = def.parser(m[1], m[2]);
         if (!Number.isFinite(value) || value <= 0) continue;
         const cand: BudgetMatch = {
@@ -577,6 +603,7 @@ function pickBudgetFromText(text: string): { value: number; evidence: string } |
       const value = parseBudgetAmountToken(m[1]);
       if (!value || value <= 0) continue;
       const idx = Number(m.index) || 0;
+      if (!isLikelyBudgetContext(idx, String(m[0] || m[1]).length)) continue;
       const cand: BudgetMatch = {
         value,
         index: idx,
@@ -595,6 +622,7 @@ function pickBudgetFromText(text: string): { value: number; evidence: string } |
     for (const re of wanPatterns) {
       const match = pickLatestBudgetMatch(t, re, (raw) => Math.round(Number(raw) * 10000));
       if (!match) continue;
+      if (!isLikelyBudgetContext(match.index, match.evidence.length)) continue;
       if (
         !best ||
         match.index > best.index ||
@@ -612,6 +640,7 @@ function pickBudgetFromText(text: string): { value: number; evidence: string } |
   for (const re of yuanPatterns) {
     const match = pickLatestBudgetMatch(t, re, (raw) => Number(raw));
     if (!match) continue;
+    if (!isLikelyBudgetContext(match.index, match.evidence.length)) continue;
     if (
       !best ||
       match.index > best.index ||
@@ -688,6 +717,85 @@ function pickBudgetDeltaFromText(text: string): { delta: number; evidence: strin
     return null;
   }
   return { delta: best.delta, evidence: best.evidence };
+}
+
+function pickBudgetSpentDeltaFromText(text: string): { delta: number; evidence: string } | null {
+  const t = String(text || "").replace(/,/g, "");
+  if (!t) return null;
+
+  const defs: Array<{ re: RegExp; parser?: (raw: string) => number }> = [
+    {
+      re: /(?:又|再|另外|额外|追加|新增|多)\s*(?:花了?|花费了?|用了?|消费了?|支出了?|支付了?|付了?)\s*([0-9一二两三四五六七八九十百千万\.]{1,14}(?:万|千)?[0-9一二两三四五六七八九十百千]{0,6}|[0-9]{2,9})\s*(?:元|块|人民币|rmb|cny)?/gi,
+      parser: (raw) => Number(parseBudgetAmountToken(raw) || 0),
+    },
+    {
+      re: /(?:新增|追加|额外)\s*(?:开销|支出|消费|花费|费用)\s*([0-9一二两三四五六七八九十百千万\.]{1,14}(?:万|千)?[0-9一二两三四五六七八九十百千]{0,6}|[0-9]{2,9})\s*(?:元|块|人民币|rmb|cny)?/gi,
+      parser: (raw) => Number(parseBudgetAmountToken(raw) || 0),
+    },
+  ];
+
+  let best: BudgetDeltaMatch | null = null;
+  for (const def of defs) {
+    for (const m of t.matchAll(def.re)) {
+      if (!m?.[1]) continue;
+      const value = def.parser ? def.parser(m[1]) : Number(m[1]);
+      if (!Number.isFinite(value) || value <= 0) continue;
+      const index = Number(m.index) || 0;
+      const cand: BudgetDeltaMatch = {
+        delta: Math.round(value),
+        evidence: cleanStatement(m[0] || m[1], 48),
+        index,
+      };
+      if (!best || cand.index >= best.index) best = cand;
+    }
+  }
+  return best ? { delta: best.delta, evidence: best.evidence } : null;
+}
+
+function pickBudgetSpentAbsoluteFromText(text: string): { spent: number; evidence: string } | null {
+  const t = String(text || "").replace(/,/g, "");
+  if (!t) return null;
+
+  const defs: Array<{ re: RegExp; parser?: (raw: string) => number }> = [
+    {
+      re: /(?:已经|已|目前|当前|到现在|截至目前|这次|本次)?\s*(?:花了?|花费了?|用了?|消费了?|支出了?|支付了?|付了?|已花)\s*([0-9一二两三四五六七八九十百千万\.]{1,14}(?:万|千)?[0-9一二两三四五六七八九十百千]{0,6}|[0-9]{2,9})\s*(?:元|块|人民币|rmb|cny)?/gi,
+      parser: (raw) => Number(parseBudgetAmountToken(raw) || 0),
+    },
+    {
+      re: /(?:酒店|住宿|机票|餐饮|交通|门票|购物|打车|火车|航班|活动|演出|比赛|球票|签证)[^\n，。,；;]{0,10}?(?:花了?|花费了?|用了?|消费了?|支出了?|支付了?|付了?)\s*([0-9一二两三四五六七八九十百千万\.]{1,14}(?:万|千)?[0-9一二两三四五六七八九十百千]{0,6}|[0-9]{2,9})\s*(?:元|块|人民币|rmb|cny)?/gi,
+      parser: (raw) => Number(parseBudgetAmountToken(raw) || 0),
+    },
+    {
+      re: /(?:已花|已用|累计花费|累计消费|已支出|已付款)\s*([0-9一二两三四五六七八九十百千万\.]{1,14}(?:万|千)?[0-9一二两三四五六七八九十百千]{0,6}|[0-9]{2,9})\s*(?:元|块|人民币|rmb|cny)?/gi,
+      parser: (raw) => Number(parseBudgetAmountToken(raw) || 0),
+    },
+  ];
+
+  let best: BudgetMatch | null = null;
+  for (const def of defs) {
+    for (const m of t.matchAll(def.re)) {
+      if (!m?.[1]) continue;
+      const value = def.parser ? def.parser(m[1]) : Number(m[1]);
+      if (!Number.isFinite(value) || value <= 0) continue;
+      const index = Number(m.index) || 0;
+      const near = t.slice(Math.max(0, index - 10), Math.min(t.length, index + 50));
+      if (/(预算|预算上限|总预算|预算总额)/i.test(near) && !/(花|用|消费|支出|支付|付)/i.test(near)) {
+        continue;
+      }
+      const cand: BudgetMatch = {
+        value: Math.round(value),
+        evidence: cleanStatement(m[0] || m[1], 48),
+        index,
+      };
+      if (!best || cand.index >= best.index) best = cand;
+    }
+  }
+  if (!best) return null;
+  const near = t.slice(Math.max(0, best.index - 12), Math.min(t.length, best.index + 42));
+  if (/(又|再|另外|额外|追加|新增|多)\s*(花|用|消费|支出|支付|付)/i.test(near)) {
+    return null;
+  }
+  return { spent: best.value, evidence: best.evidence };
 }
 
 function parseDateMentions(text: string): DateMention[] {
@@ -813,7 +921,7 @@ function calcRangeDays(
   const inclusiveDays = raw + 1;
   const exclusiveDays = Math.max(1, raw);
 
-  const mode = opts?.mode || DATE_RANGE_BOUNDARY_MODE;
+  const mode = opts?.mode || getDateRangeBoundaryMode();
   if (mode === "inclusive") return inclusiveDays;
   if (mode === "exclusive") return exclusiveDays;
 
@@ -850,7 +958,7 @@ function extractDateRangeDurations(text: string): DateRangeCandidate[] {
     );
     const isMeetingLike = /(学术会议|会议|开会|chi|conference|workshop|forum|summit|参会|发表|汇报|报告|讲论文)/i.test(ctx);
     const days = calcRangeDays(month, dayA, month, dayB, {
-      mode: DATE_RANGE_BOUNDARY_MODE,
+      mode: getDateRangeBoundaryMode(),
       context: ctx,
       isMeetingLike,
       hintedDays: extractExplicitDurationHints(ctx),
@@ -880,7 +988,7 @@ function extractDateRangeDurations(text: string): DateRangeCandidate[] {
     );
     const isMeetingLike = /(学术会议|会议|开会|chi|conference|workshop|forum|summit|参会|发表|汇报|报告|讲论文)/i.test(ctx);
     const days = calcRangeDays(monthA, dayA, monthB, dayB, {
-      mode: DATE_RANGE_BOUNDARY_MODE,
+      mode: getDateRangeBoundaryMode(),
       context: ctx,
       isMeetingLike,
       hintedDays: extractExplicitDurationHints(ctx),
@@ -958,7 +1066,13 @@ function extractDurationCandidates(text: string): DurationCandidate[] {
 function inferDurationFromText(
   text: string,
   opts?: { historyMode?: boolean }
-): { days: number; evidence: string; strength: number } | null {
+): {
+  days: number;
+  evidence: string;
+  strength: number;
+  boundaryAmbiguous?: boolean;
+  boundaryQuestion?: string;
+} | null {
   const historyMode = !!opts?.historyMode;
   const durationCandidates = extractDurationCandidates(text);
   const dateRangeCandidates = extractDateRangeDurations(text);
@@ -1003,6 +1117,13 @@ function inferDurationFromText(
   };
 
   const rangeLatest = dateRangeCandidates.slice().sort((a, b) => b.index - a.index)[0];
+  const boundaryMode = getDateRangeBoundaryMode();
+  const hasBoundaryCue =
+    /(不含首尾|不算首尾|exclusive|净天数|含首尾|算上首尾|inclusive|含出发和返程|包含首末日)/i.test(
+      text
+    );
+  let boundaryAmbiguous = false;
+  let boundaryQuestion = "";
   if (!historyMode && rangeLatest) {
     const nearbyExplicit = durationCandidates
       .filter(
@@ -1023,6 +1144,25 @@ function inferDurationFromText(
     }
     const rangeStrength = rangeLatest.isMeetingLike ? 0.92 : 0.88;
     consider(rangeLatest.days, rangeLatest.evidence, rangeStrength);
+
+    const hasExplicitDayCue = /(总共|一共|总计|共|净停留|停留)\s*[0-9一二三四五六七八九十两]{1,3}\s*(天|周|星期)/i.test(
+      text
+    );
+    const hasHintedDuration = extractExplicitDurationHints(text).length > 0;
+    if (
+      boundaryMode === "auto" &&
+      !rangeLatest.isMeetingLike &&
+      !hasExplicitDayCue &&
+      !hasBoundaryCue &&
+      !hasHintedDuration
+    ) {
+      const inclusive = rangeLatest.days;
+      const exclusive = Math.max(1, inclusive - 1);
+      if (inclusive !== exclusive) {
+        boundaryAmbiguous = true;
+        boundaryQuestion = `你说的“${rangeLatest.evidence}”是按含首尾（${inclusive}天）还是净停留（${exclusive}天）？`;
+      }
+    }
   }
 
   const eligibleForTotal = durationCandidates.filter(
@@ -1104,7 +1244,11 @@ function inferDurationFromText(
     };
   }
 
-  return best;
+  return {
+    ...best,
+    boundaryAmbiguous,
+    boundaryQuestion: boundaryQuestion || undefined,
+  };
 }
 
 export function normalizeDestination(raw: string): string {
@@ -1356,7 +1500,7 @@ function extractCityDurationSegments(text: string): Array<{ city: string; days: 
     const kind: "travel" | "meeting" =
       /(参加|参会|开会|会议|chi|conference|workshop)/i.test(action) ? "meeting" : "travel";
     const days = calcRangeDays(monthA, startDay, monthB, endDay, {
-      mode: DATE_RANGE_BOUNDARY_MODE,
+      mode: getDateRangeBoundaryMode(),
       context: ctx,
       isMeetingLike: kind === "meeting",
       hintedDays: extractExplicitDurationHints(ctx),
@@ -1543,7 +1687,15 @@ export function normalizeLodgingPreferenceStatement(raw: string) {
   if (!s) return null;
   const hasLodging =
     /酒店|民宿|住宿|房型|星级|房费|住在|入住|住全程|全程住|酒店标准/i.test(s);
+  const hasPreferenceCue =
+    /想住|住在|入住|选择|优先|偏好|希望|住全程|全程住|酒店标准|星级|房型|靠近|附近|离.*近|步行可达|交通方便/i.test(
+      s
+    );
+  const isExpenseOnly =
+    /(花了|花费|用了|消费|支出|支付|付了|预算|价格|多少钱|费用|开销|花销)/i.test(s) &&
+    !hasPreferenceCue;
   if (!hasLodging) return null;
+  if (isExpenseOnly) return null;
   const hard = HARD_REQUIRE_RE.test(s) || HARD_CONSTRAINT_RE.test(s);
 
   if (/(五星|5星|豪华|高端)/i.test(s)) {
@@ -1803,6 +1955,8 @@ export function extractIntentSignals(userText: string, opts?: { historyMode?: bo
     out.durationDays = duration.days;
     out.durationEvidence = duration.evidence;
     out.durationStrength = duration.strength;
+    out.durationBoundaryAmbiguous = !!duration.boundaryAmbiguous;
+    out.durationBoundaryQuestion = duration.boundaryQuestion;
   }
 
   const citySegments = dedupeCityDurationSegments(extractCityDurationSegments(text));
@@ -1897,6 +2051,21 @@ export function extractIntentSignals(userText: string, opts?: { historyMode?: bo
     out.budgetEvidence = budgetDelta.evidence;
     out.budgetImportance = clampImportance(0.9, out.budgetImportance || 0.86);
   }
+
+  const budgetSpentDelta = pickBudgetSpentDeltaFromText(text);
+  if (budgetSpentDelta) {
+    out.budgetSpentDeltaCny = budgetSpentDelta.delta;
+    out.budgetSpentEvidence = budgetSpentDelta.evidence;
+    out.budgetImportance = clampImportance(0.9, out.budgetImportance || 0.86);
+  }
+
+  const budgetSpent = pickBudgetSpentAbsoluteFromText(text);
+  if (budgetSpent) {
+    out.budgetSpentCny = budgetSpent.spent;
+    out.budgetSpentEvidence = budgetSpent.evidence;
+    out.budgetImportance = clampImportance(0.88, out.budgetImportance || 0.84);
+  }
+
   const budget = pickBudgetFromText(text);
   if (budget) {
     const hasOnlyDeltaCue =
@@ -1908,6 +2077,9 @@ export function extractIntentSignals(userText: string, opts?: { historyMode?: bo
       out.budgetCny = budget.value;
       out.budgetEvidence = budget.evidence;
     }
+  }
+  if (out.budgetCny != null && out.budgetSpentCny != null) {
+    out.budgetRemainingCny = Math.max(0, Math.round(out.budgetCny - out.budgetSpentCny));
   }
 
   const healthClause = pickHealthClause(text);
@@ -1996,6 +2168,8 @@ function mergeSignalsWithLatest(history: IntentSignals, latest: IntentSignals): 
   out.hasTemporalAnchor = !!history.hasTemporalAnchor;
   out.hasDurationUpdateCue = !!history.hasDurationUpdateCue;
   out.hasExplicitTotalCue = !!history.hasExplicitTotalCue;
+  out.durationBoundaryAmbiguous = !!history.durationBoundaryAmbiguous;
+  out.durationBoundaryQuestion = history.durationBoundaryQuestion;
 
   const mergeDestinations = (a?: string[], b?: string[]) => {
     const seen = new Set<string>();
@@ -2108,6 +2282,17 @@ function mergeSignalsWithLatest(history: IntentSignals, latest: IntentSignals): 
   out.hasTemporalAnchor = !!latest.hasTemporalAnchor || !!out.hasTemporalAnchor;
   out.hasDurationUpdateCue = !!latest.hasDurationUpdateCue || !!out.hasDurationUpdateCue;
   out.hasExplicitTotalCue = !!latest.hasExplicitTotalCue || !!out.hasExplicitTotalCue;
+  if (latest.durationBoundaryAmbiguous) {
+    out.durationBoundaryAmbiguous = true;
+    out.durationBoundaryQuestion = latest.durationBoundaryQuestion || out.durationBoundaryQuestion;
+  } else if (
+    latest.durationDays != null ||
+    latest.hasDurationUpdateCue ||
+    latest.hasExplicitTotalCue
+  ) {
+    out.durationBoundaryAmbiguous = false;
+    out.durationBoundaryQuestion = undefined;
+  }
   const latestHasSnapshotDuration =
     latest.durationDays != null &&
     (!!latest.hasDurationUpdateCue || (!!latest.hasTemporalAnchor && !!latest.hasExplicitTotalCue));
@@ -2237,6 +2422,29 @@ function mergeSignalsWithLatest(history: IntentSignals, latest: IntentSignals): 
   if (latest.budgetCny != null) {
     out.budgetCny = latest.budgetCny;
     out.budgetEvidence = latest.budgetEvidence || out.budgetEvidence;
+  }
+  if (latest.budgetSpentDeltaCny != null) {
+    const prevSpent = Number(out.budgetSpentCny);
+    if (Number.isFinite(prevSpent) && prevSpent >= 0) {
+      out.budgetSpentCny = Math.max(0, Math.round(prevSpent + Number(latest.budgetSpentDeltaCny)));
+    } else {
+      out.budgetSpentCny = Math.max(0, Math.round(Number(latest.budgetSpentDeltaCny)));
+    }
+    out.budgetSpentEvidence =
+      latest.budgetSpentEvidence ||
+      cleanStatement(
+        `${out.budgetSpentEvidence || "已花"} + ${latest.budgetSpentDeltaCny}元`,
+        80
+      );
+  }
+  if (latest.budgetSpentCny != null) {
+    out.budgetSpentCny = Math.max(0, Math.round(Number(latest.budgetSpentCny)));
+    out.budgetSpentEvidence = latest.budgetSpentEvidence || out.budgetSpentEvidence;
+  }
+  if (out.budgetCny != null && out.budgetSpentCny != null) {
+    out.budgetRemainingCny = Math.max(0, Math.round(Number(out.budgetCny) - Number(out.budgetSpentCny)));
+  } else if (latest.budgetRemainingCny != null) {
+    out.budgetRemainingCny = Math.max(0, Math.round(Number(latest.budgetRemainingCny)));
   }
   if (latest.budgetImportance != null) {
     out.budgetImportance = clampImportance(

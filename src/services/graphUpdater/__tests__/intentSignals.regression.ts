@@ -26,6 +26,13 @@ const cases: Case[] = [
     },
   },
   {
+    name: "budget colloquial CN digits: 三千五",
+    run: () => {
+      const s = extractIntentSignals("预算三千五人民币");
+      assert.equal(s.budgetCny, 3500);
+    },
+  },
+  {
     name: "budget range with colloquial upper bound",
     run: () => {
       const s = extractIntentSignals("预算在1万到1万5之间");
@@ -43,6 +50,46 @@ const cases: Case[] = [
     },
   },
   {
+    name: "budget spent absolute should be parsed",
+    run: () => {
+      const s = extractIntentSignals("我酒店已经花了3000元");
+      assert.equal(s.budgetSpentCny, 3000);
+    },
+  },
+  {
+    name: "budget total should not be overwritten by spent amount in same sentence",
+    run: () => {
+      const s = extractIntentSignals("总预算10000元，酒店花了3000元");
+      assert.equal(s.budgetCny, 10000);
+      assert.equal(s.budgetSpentCny, 3000);
+      assert.equal(s.budgetRemainingCny, 7000);
+      assert.equal(s.lodgingPreference, undefined);
+    },
+  },
+  {
+    name: "budget remaining from total - spent",
+    run: () => {
+      const merged = extractIntentSignalsWithRecency(
+        "总预算10000元",
+        "酒店订在市中心花了3000元"
+      );
+      assert.equal(merged.budgetCny, 10000);
+      assert.equal(merged.budgetSpentCny, 3000);
+      assert.equal(merged.budgetRemainingCny, 7000);
+    },
+  },
+  {
+    name: "budget spent incremental update",
+    run: () => {
+      const merged = extractIntentSignalsWithRecency(
+        "总预算10000元，酒店花了3000元",
+        "我又花了500元打车"
+      );
+      assert.equal(merged.budgetSpentCny, 3500);
+      assert.equal(merged.budgetRemainingCny, 6500);
+    },
+  },
+  {
     name: "meeting date range in auto mode prefers exclusive boundary",
     run: () => {
       const s = extractIntentSignals("我4月13日到4月18日在巴塞罗那参加CHI学术会议");
@@ -54,6 +101,49 @@ const cases: Case[] = [
     run: () => {
       const s = extractIntentSignals("我4月13日到4月18日去巴塞罗那旅游");
       assert.equal(s.durationDays, 6);
+    },
+  },
+  {
+    name: "date boundary mode: exclusive",
+    run: () => {
+      const prev = process.env.CI_DATE_RANGE_BOUNDARY_MODE;
+      process.env.CI_DATE_RANGE_BOUNDARY_MODE = "exclusive";
+      try {
+        const s = extractIntentSignals("我4月13日到4月18日去巴塞罗那旅游");
+        assert.equal(s.durationDays, 5);
+      } finally {
+        if (prev == null) delete process.env.CI_DATE_RANGE_BOUNDARY_MODE;
+        else process.env.CI_DATE_RANGE_BOUNDARY_MODE = prev;
+      }
+    },
+  },
+  {
+    name: "date boundary mode: inclusive",
+    run: () => {
+      const prev = process.env.CI_DATE_RANGE_BOUNDARY_MODE;
+      process.env.CI_DATE_RANGE_BOUNDARY_MODE = "inclusive";
+      try {
+        const s = extractIntentSignals("我4月13日到4月18日去巴塞罗那旅游");
+        assert.equal(s.durationDays, 6);
+      } finally {
+        if (prev == null) delete process.env.CI_DATE_RANGE_BOUNDARY_MODE;
+        else process.env.CI_DATE_RANGE_BOUNDARY_MODE = prev;
+      }
+    },
+  },
+  {
+    name: "date boundary ambiguity should generate clarification hint in auto mode",
+    run: () => {
+      const prev = process.env.CI_DATE_RANGE_BOUNDARY_MODE;
+      process.env.CI_DATE_RANGE_BOUNDARY_MODE = "auto";
+      try {
+        const s = extractIntentSignals("我4月13日到4月18日去巴塞罗那旅游");
+        assert.equal(s.durationBoundaryAmbiguous, true);
+        assert.match(String(s.durationBoundaryQuestion || ""), /含首尾|净停留/);
+      } finally {
+        if (prev == null) delete process.env.CI_DATE_RANGE_BOUNDARY_MODE;
+        else process.env.CI_DATE_RANGE_BOUNDARY_MODE = prev;
+      }
     },
   },
   {
@@ -85,6 +175,16 @@ const cases: Case[] = [
       );
       assert.equal(s.durationDays, 3);
       assert.equal(s.budgetCny, 10000);
+    },
+  },
+  {
+    name: "duration should stay 3 days when later sentence has no new duration",
+    run: () => {
+      const merged = extractIntentSignalsWithRecency(
+        "我想去米兰玩3天，和父母一起，预算10000元",
+        "机票已经买了，不需要考虑机票钱"
+      );
+      assert.equal(merged.durationDays, 3);
     },
   },
 ];

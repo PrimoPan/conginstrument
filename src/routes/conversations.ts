@@ -9,6 +9,8 @@ import { config } from "../server/config.js";
 import { generateAssistantTextNonStreaming } from "../services/chatResponder.js";
 import { buildCognitiveModel } from "../services/cognitiveModel.js";
 import { buildConflictGateMessage, listUnresolvedDeprecatedMotifs } from "../services/motif/conflictGate.js";
+import { buildTravelPlanState, type TravelPlanState } from "../services/travelPlan/state.js";
+import { defaultTravelPlanFileName, renderTravelPlanPdf } from "../services/travelPlan/pdf.js";
 
 export const convRouter = Router();
 convRouter.use(authMiddleware);
@@ -71,6 +73,70 @@ function parseBoolFlag(v: any): boolean {
     return s === "1" || s === "true" || s === "yes" || s === "on";
   }
   return false;
+}
+
+async function loadRecentTurnsForPlan(params: {
+  conversationId: ObjectId;
+  userId: ObjectId;
+  limit?: number;
+}) {
+  return collections.turns
+    .find({ conversationId: params.conversationId, userId: params.userId })
+    .sort({ createdAt: 1 })
+    .limit(Math.max(1, Math.min(params.limit || 60, 240)))
+    .toArray();
+}
+
+async function computeTravelPlanState(params: {
+  conversationId: ObjectId;
+  userId: ObjectId;
+  graph: CDG;
+  previous?: TravelPlanState | null;
+}): Promise<TravelPlanState> {
+  const turns = await loadRecentTurnsForPlan({
+    conversationId: params.conversationId,
+    userId: params.userId,
+    limit: 80,
+  });
+  return buildTravelPlanState({
+    graph: params.graph,
+    turns: turns.map((t) => ({
+      createdAt: t.createdAt,
+      userText: t.userText,
+      assistantText: t.assistantText,
+    })),
+    previous: params.previous || null,
+  });
+}
+
+async function persistConversationModel(params: {
+  conversationId: ObjectId;
+  userId: ObjectId;
+  model: ReturnType<typeof buildCognitiveModel>;
+  updatedAt: Date;
+  previousTravelPlan?: TravelPlanState | null;
+}): Promise<TravelPlanState> {
+  const travelPlanState = await computeTravelPlanState({
+    conversationId: params.conversationId,
+    userId: params.userId,
+    graph: params.model.graph,
+    previous: params.previousTravelPlan || null,
+  });
+  await collections.conversations.updateOne(
+    { _id: params.conversationId, userId: params.userId },
+    {
+      $set: {
+        graph: params.model.graph,
+        concepts: params.model.concepts,
+        motifs: params.model.motifs,
+        motifLinks: params.model.motifLinks,
+        contexts: params.model.contexts,
+        travelPlanState,
+        updatedAt: params.updatedAt,
+      },
+    }
+  );
+  return travelPlanState;
 }
 
 function toConflictGatePayload(motifs: any[]) {
@@ -137,13 +203,39 @@ convRouter.post("/", async (req: AuthedRequest, res) => {
     motifs: [],
     motifLinks: [],
     contexts: [],
+    travelPlanState: {
+      version: 1,
+      updatedAt: now.toISOString(),
+      summary: "暂无旅行计划，请先开始对话。",
+      destinations: [],
+      constraints: [],
+      dayPlans: [],
+      source: { turnCount: 0 },
+    },
   } as any);
 
   const conversationId = String(inserted.insertedId);
 
   await collections.conversations.updateOne(
     { _id: inserted.insertedId, userId },
-    { $set: { graph: emptyGraph(conversationId), concepts: [], motifs: [], motifLinks: [], contexts: [] } }
+    {
+      $set: {
+        graph: emptyGraph(conversationId),
+        concepts: [],
+        motifs: [],
+        motifLinks: [],
+        contexts: [],
+        travelPlanState: {
+          version: 1,
+          updatedAt: now.toISOString(),
+          summary: "暂无旅行计划，请先开始对话。",
+          destinations: [],
+          constraints: [],
+          dayPlans: [],
+          source: { turnCount: 0 },
+        },
+      },
+    }
   );
 
   const conv = await collections.conversations.findOne({ _id: inserted.insertedId, userId });
@@ -167,6 +259,7 @@ convRouter.post("/", async (req: AuthedRequest, res) => {
     motifs: model.motifs,
     motifLinks: model.motifLinks,
     contexts: model.contexts,
+    travelPlanState: (conv as any).travelPlanState || null,
   });
 });
 
@@ -198,6 +291,7 @@ convRouter.get("/:id", async (req: AuthedRequest, res) => {
     motifs: model.motifs,
     motifLinks: model.motifLinks,
     contexts: model.contexts,
+    travelPlanState: (conv as any).travelPlanState || null,
   });
 });
 
@@ -243,6 +337,12 @@ convRouter.put("/:id/graph", async (req: AuthedRequest, res) => {
 
   const requestAdvice = parseBoolFlag(req.body?.requestAdvice);
   const advicePrompt = String(req.body?.advicePrompt || "").trim().slice(0, 1200);
+  const travelPlanState = await computeTravelPlanState({
+    conversationId: oid,
+    userId,
+    graph: model.graph,
+    previous: (conv as any).travelPlanState || null,
+  });
 
   const now = new Date();
   await collections.conversations.updateOne(
@@ -254,6 +354,7 @@ convRouter.put("/:id/graph", async (req: AuthedRequest, res) => {
         motifs: model.motifs,
         motifLinks: model.motifLinks,
         contexts: model.contexts,
+        travelPlanState,
         updatedAt: now,
       },
     }
@@ -297,6 +398,7 @@ convRouter.put("/:id/graph", async (req: AuthedRequest, res) => {
     motifs: model.motifs,
     motifLinks: model.motifLinks,
     contexts: model.contexts,
+    travelPlanState,
     updatedAt: now,
     assistantText,
     adviceError,
@@ -331,6 +433,12 @@ convRouter.put("/:id/concepts", async (req: AuthedRequest, res) => {
     baseContexts: (conv as any).contexts || [],
   });
   model.graph.version = prevGraph.version + (graphChanged(prevGraph, model.graph) ? 1 : 0);
+  const travelPlanState = await computeTravelPlanState({
+    conversationId: oid,
+    userId,
+    graph: model.graph,
+    previous: (conv as any).travelPlanState || null,
+  });
 
   const now = new Date();
   await collections.conversations.updateOne(
@@ -342,6 +450,7 @@ convRouter.put("/:id/concepts", async (req: AuthedRequest, res) => {
         motifs: model.motifs,
         motifLinks: model.motifLinks,
         contexts: model.contexts,
+        travelPlanState,
         updatedAt: now,
       },
     }
@@ -354,6 +463,7 @@ convRouter.put("/:id/concepts", async (req: AuthedRequest, res) => {
     motifs: model.motifs,
     motifLinks: model.motifLinks,
     contexts: model.contexts,
+    travelPlanState,
     updatedAt: now,
   });
 });
@@ -383,6 +493,63 @@ convRouter.get("/:id/turns", async (req: AuthedRequest, res) => {
       graphVersion: t.graphVersion,
     }))
   );
+});
+
+// 导出当前旅行计划 PDF（含中文自然语言与按天行程）
+convRouter.get("/:id/travel-plan/export.pdf", async (req: AuthedRequest, res) => {
+  const userId = req.userId!;
+  const id = req.params.id;
+
+  const oid = parseObjectId(id);
+  if (!oid) return res.status(400).json({ error: "invalid conversation id" });
+
+  const conv = await collections.conversations.findOne({ _id: oid, userId });
+  if (!conv) return res.status(404).json({ error: "conversation not found" });
+
+  const turns = await loadRecentTurnsForPlan({ conversationId: oid, userId, limit: 120 });
+  if (!turns.length) {
+    return res.status(400).json({ error: "no conversation turns yet, cannot export plan" });
+  }
+
+  const graph: CDG = {
+    id: String(conv.graph?.id || id),
+    version: Number(conv.graph?.version || 0),
+    nodes: Array.isArray(conv.graph?.nodes) ? conv.graph.nodes : [],
+    edges: Array.isArray(conv.graph?.edges) ? conv.graph.edges : [],
+  };
+  const travelPlanState = buildTravelPlanState({
+    graph,
+    turns: turns.map((t) => ({
+      createdAt: t.createdAt,
+      userText: t.userText,
+      assistantText: t.assistantText,
+    })),
+    previous: (conv as any).travelPlanState || null,
+  });
+
+  const now = new Date();
+  await collections.conversations.updateOne(
+    { _id: oid, userId },
+    {
+      $set: {
+        travelPlanState,
+        updatedAt: now,
+      },
+    }
+  );
+
+  const pdf = await renderTravelPlanPdf({
+    plan: travelPlanState,
+    conversationId: id,
+  });
+  const filename = defaultTravelPlanFileName(id);
+  res.setHeader("Content-Type", "application/pdf");
+  res.setHeader("Content-Length", String(pdf.length));
+  res.setHeader(
+    "Content-Disposition",
+    `attachment; filename=\"travel-plan.pdf\"; filename*=UTF-8''${encodeURIComponent(filename)}`
+  );
+  return res.status(200).send(pdf);
 });
 
 // ==========================
@@ -440,19 +607,13 @@ convRouter.post("/:id/turn", async (req: AuthedRequest, res) => {
       graphVersion: preModel.graph.version,
     } as any);
 
-    await collections.conversations.updateOne(
-      { _id: oid, userId },
-      {
-        $set: {
-          graph: preModel.graph,
-          concepts: preModel.concepts,
-          motifs: preModel.motifs,
-          motifLinks: preModel.motifLinks,
-          contexts: preModel.contexts,
-          updatedAt: now,
-        },
-      }
-    );
+    const travelPlanState = await persistConversationModel({
+      conversationId: oid,
+      userId,
+      model: preModel,
+      updatedAt: now,
+      previousTravelPlan: (conv as any).travelPlanState || null,
+    });
 
     return res.json({
       assistantText: conflictGate.message,
@@ -462,6 +623,7 @@ convRouter.post("/:id/turn", async (req: AuthedRequest, res) => {
       motifs: preModel.motifs,
       motifLinks: preModel.motifLinks,
       contexts: preModel.contexts,
+      travelPlanState,
       conflictGate,
     });
   }
@@ -496,19 +658,13 @@ convRouter.post("/:id/turn", async (req: AuthedRequest, res) => {
     graphVersion: model.graph.version,
   } as any);
 
-  await collections.conversations.updateOne(
-    { _id: oid, userId },
-    {
-      $set: {
-        graph: model.graph,
-        concepts: model.concepts,
-        motifs: model.motifs,
-        motifLinks: model.motifLinks,
-        contexts: model.contexts,
-        updatedAt: now,
-      },
-    }
-  );
+  const travelPlanState = await persistConversationModel({
+    conversationId: oid,
+    userId,
+    model,
+    updatedAt: now,
+    previousTravelPlan: (conv as any).travelPlanState || null,
+  });
 
   res.json({
     assistantText: out.assistant_text,
@@ -518,6 +674,7 @@ convRouter.post("/:id/turn", async (req: AuthedRequest, res) => {
     motifs: model.motifs,
     motifLinks: model.motifLinks,
     contexts: model.contexts,
+    travelPlanState,
   });
 });
 
@@ -577,19 +734,13 @@ convRouter.post("/:id/turn/stream", async (req: AuthedRequest, res) => {
       graphVersion: preModel.graph.version,
     } as any);
 
-    await collections.conversations.updateOne(
-      { _id: oid, userId },
-      {
-        $set: {
-          graph: preModel.graph,
-          concepts: preModel.concepts,
-          motifs: preModel.motifs,
-          motifLinks: preModel.motifLinks,
-          contexts: preModel.contexts,
-          updatedAt: now,
-        },
-      }
-    );
+    const travelPlanState = await persistConversationModel({
+      conversationId: oid,
+      userId,
+      model: preModel,
+      updatedAt: now,
+      previousTravelPlan: (conv as any).travelPlanState || null,
+    });
 
     res.status(200);
     res.setHeader("Content-Type", "text/event-stream; charset=utf-8");
@@ -607,6 +758,7 @@ convRouter.post("/:id/turn/stream", async (req: AuthedRequest, res) => {
       motifs: preModel.motifs,
       motifLinks: preModel.motifLinks,
       contexts: preModel.contexts,
+      travelPlanState,
       conflictGate,
     });
     return res.end();
@@ -682,19 +834,13 @@ convRouter.post("/:id/turn/stream", async (req: AuthedRequest, res) => {
       graphVersion: model.graph.version,
     } as any);
 
-    await collections.conversations.updateOne(
-      { _id: oid, userId },
-      {
-        $set: {
-          graph: model.graph,
-          concepts: model.concepts,
-          motifs: model.motifs,
-          motifLinks: model.motifLinks,
-          contexts: model.contexts,
-          updatedAt: now,
-        },
-      }
-    );
+    const travelPlanState = await persistConversationModel({
+      conversationId: oid,
+      userId,
+      model,
+      updatedAt: now,
+      previousTravelPlan: (conv as any).travelPlanState || null,
+    });
 
     sseSend(res, "done", {
       assistantText: out.assistant_text,
@@ -704,6 +850,7 @@ convRouter.post("/:id/turn/stream", async (req: AuthedRequest, res) => {
       motifs: model.motifs,
       motifLinks: model.motifLinks,
       contexts: model.contexts,
+      travelPlanState,
     });
 
     clearInterval(pingTimer);
@@ -741,19 +888,13 @@ convRouter.post("/:id/turn/stream", async (req: AuthedRequest, res) => {
           graphVersion: model2.graph.version,
         } as any);
 
-        await collections.conversations.updateOne(
-          { _id: oid, userId },
-          {
-            $set: {
-              graph: model2.graph,
-              concepts: model2.concepts,
-              motifs: model2.motifs,
-              motifLinks: model2.motifLinks,
-              contexts: model2.contexts,
-              updatedAt: now,
-            },
-          }
-        );
+        const travelPlanState = await persistConversationModel({
+          conversationId: oid,
+          userId,
+          model: model2,
+          updatedAt: now,
+          previousTravelPlan: (conv as any).travelPlanState || null,
+        });
 
         sseSend(res, "done", {
           assistantText: out2.assistant_text,
@@ -763,6 +904,7 @@ convRouter.post("/:id/turn/stream", async (req: AuthedRequest, res) => {
           motifs: model2.motifs,
           motifLinks: model2.motifLinks,
           contexts: model2.contexts,
+          travelPlanState,
         });
 
         clearInterval(pingTimer);

@@ -481,6 +481,7 @@ export function buildSlotStateMachine(params: {
   const limitingFactorSlotKeys: string[] = [];
   let peopleSlotKey: string | null = null;
   let budgetSlotKey: string | null = null;
+  let budgetSpentSlotKey: string | null = null;
   let durationTotalSlotKey: string | null = null;
   let lodgingSlotKey: string | null = null;
   let scenicSlotKey: string | null = null;
@@ -691,6 +692,86 @@ export function buildSlotStateMachine(params: {
       budgetSlotKey = "slot:budget";
       pushEdge(edges, "slot:budget", "slot:goal", "constraint", 0.92);
     }
+  }
+  if (params.signals.budgetSpentCny != null || params.signals.budgetSpentDeltaCny != null) {
+    const spent = Number(params.signals.budgetSpentCny);
+    const spentFromDelta = Number(params.signals.budgetSpentDeltaCny);
+    const normalizedSpent =
+      Number.isFinite(spent) && spent >= 0
+        ? Math.round(spent)
+        : Number.isFinite(spentFromDelta) && spentFromDelta > 0
+          ? Math.round(spentFromDelta)
+          : 0;
+    if (normalizedSpent > 0) {
+      const spentImportance = clamp01(params.signals.budgetImportance, 0.78);
+      nodes.push({
+        slotKey: "slot:budget_spent",
+        type: "fact",
+        layer: "requirement",
+        statement: `已花预算: ${normalizedSpent}元`,
+        confidence: 0.88,
+        importance: spentImportance,
+        tags: ["budget", "spent"],
+        evidenceIds: [params.signals.budgetSpentEvidence || `${normalizedSpent}元`].filter(Boolean),
+        sourceMsgIds: ["latest_user"],
+        key: "slot:budget_spent",
+        motifType: "cognitive_step",
+        claim: `当前已花费${normalizedSpent}元`,
+        evidence: motifEvidence(params.signals.budgetSpentEvidence || `${normalizedSpent}元`),
+        linkedIntentIds: ["slot:goal"],
+        revisionHistory: [{ at: now, action: "updated", by: "system", reason: "slot_state_machine" }],
+        priority: spentImportance,
+      });
+      budgetSpentSlotKey = "slot:budget_spent";
+      pushEdge(edges, "slot:budget_spent", "slot:goal", "determine", 0.86);
+    }
+  }
+
+  const totalBudgetForRemaining =
+    Number.isFinite(Number(params.signals.budgetCny)) && Number(params.signals.budgetCny) > 0
+      ? Math.round(Number(params.signals.budgetCny))
+      : 0;
+  const spentBudgetForRemaining =
+    Number.isFinite(Number(params.signals.budgetSpentCny)) && Number(params.signals.budgetSpentCny) >= 0
+      ? Math.round(Number(params.signals.budgetSpentCny))
+      : 0;
+  const remainingByCalc =
+    totalBudgetForRemaining > 0 ? Math.max(0, totalBudgetForRemaining - spentBudgetForRemaining) : 0;
+  const remainingBySignal =
+    Number.isFinite(Number(params.signals.budgetRemainingCny)) && Number(params.signals.budgetRemainingCny) >= 0
+      ? Math.round(Number(params.signals.budgetRemainingCny))
+      : 0;
+  const remainingBudget = Math.max(remainingByCalc, remainingBySignal);
+  if (totalBudgetForRemaining > 0 && spentBudgetForRemaining > 0) {
+    const remainingImportance = clamp01(params.signals.budgetImportance, 0.86);
+    nodes.push({
+      slotKey: "slot:budget_remaining",
+      type: "constraint",
+      layer: "requirement",
+      strength: "hard",
+      statement: `剩余预算: ${remainingBudget}元`,
+      confidence: 0.9,
+      importance: remainingImportance,
+      tags: ["budget", "remaining"],
+      evidenceIds: [
+        cleanStatement(
+          `${params.signals.budgetEvidence || `${totalBudgetForRemaining}元`}；${params.signals.budgetSpentEvidence || `${spentBudgetForRemaining}元`}`,
+          80
+        ),
+      ].filter(Boolean),
+      sourceMsgIds: ["latest_user"],
+      key: "slot:budget_remaining",
+      motifType: "hypothesis",
+      claim: `可用预算还剩${remainingBudget}元`,
+      evidence: motifEvidence(`总预算${totalBudgetForRemaining}元，已花${spentBudgetForRemaining}元，剩余${remainingBudget}元`),
+      linkedIntentIds: ["slot:goal"],
+      revisionHistory: [{ at: now, action: "updated", by: "system", reason: "slot_state_machine" }],
+      priority: remainingImportance,
+      successCriteria: [`剩余预算不少于${Math.round(remainingBudget * 0.2)}元用于机动安排`],
+    });
+    pushEdge(edges, "slot:budget_remaining", "slot:goal", "constraint", 0.92);
+    if (budgetSlotKey) pushEdge(edges, budgetSlotKey, "slot:budget_remaining", "determine", 0.9);
+    if (budgetSpentSlotKey) pushEdge(edges, budgetSpentSlotKey, "slot:budget_remaining", "determine", 0.9);
   }
 
   const limitingFactors = collectLimitingFactors(params.signals);

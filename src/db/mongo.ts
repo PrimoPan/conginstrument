@@ -27,6 +27,9 @@ export type ConversationDoc = {
   graph: any; // 先用 any，后面换成你CDG类型
   concepts?: any[];
   motifs?: any[];
+  motifLinks?: any[];
+  contexts?: any[];
+  travelPlanState?: any;
 };
 
 export type TurnDoc = {

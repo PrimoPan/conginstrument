@@ -97,6 +97,7 @@ curl http://localhost:3001/healthz
 | `CI_ALLOW_DELETE` | 否 | `0` | 是否允许 remove_node/remove_edge |
 | `CI_DEBUG_LLM` | 否 | `0` | LLM 与 patch 调试日志 |
 | `CI_DATE_RANGE_BOUNDARY_MODE` | 否 | `auto` | 日期跨度边界策略：`auto`（会议偏 exclusive，旅游偏 inclusive）/`inclusive`/`exclusive` |
+| `CI_PDF_FONT_PATH` | 否 | 空 | PDF 导出中文字体路径（优先）；为空时会尝试系统常见 CJK 字体 |
 
 ---
 
@@ -130,6 +131,7 @@ Base URL 示例：`http://localhost:3001`
 | `PUT` | `/api/conversations/:id/graph` | 是 | 保存前端编辑后的整图快照（可选触发“基于新图”的建议） |
 | `PUT` | `/api/conversations/:id/concepts` | 是 | 保存中间 Concept 模块状态（锁定/暂停/编辑） |
 | `GET` | `/api/conversations/:id/turns?limit=30` | 是 | 历史轮次 |
+| `GET` | `/api/conversations/:id/travel-plan/export.pdf` | 是 | 导出旅行计划 PDF（中文、按天行程） |
 | `POST` | `/api/conversations/:id/turn` | 是 | 非流式单轮 |
 | `POST` | `/api/conversations/:id/turn/stream` | 是 | SSE 流式单轮 |
 
@@ -816,3 +818,15 @@ src/services/llm.ts          # turn orchestration
 - Treat `src/core/graph/types.ts` as the backend graph contract source of truth (`src/core/graph.ts` keeps compatibility exports).
 - Keep frontend `src/core/type.ts` aligned after every graph schema change.
 - Update README API docs whenever route payloads/events change.
+### 6.1 隐藏式旅行计划状态（后端）
+
+后端在每轮 turn、保存 graph/concepts 时，都会同步维护 `travelPlanState`（存于 `conversations` 文档）：
+
+- 摘要 `summary`
+- 目的地 `destinations[]`
+- 预算结构：`totalCny / spentCny / remainingCny`
+- 总天数 `totalDays`
+- 关键约束 `constraints[]`
+- 按天行程 `dayPlans[]`
+
+该结构用于导出 PDF 与后续“基于当前计划继续建议”，默认不在主对话界面完整展示。
