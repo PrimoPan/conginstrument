@@ -51,6 +51,7 @@ Language / 语言：
 ```bash
 npm install
 npm run dev:api
+npm run test:graph-regression   # 可选：数字槽位回归测试
 ```
 
 默认端口：`3001`（可通过 `PORT` 覆盖）。
@@ -95,6 +96,7 @@ curl http://localhost:3001/healthz
 | `CORS_ORIGINS` | 否 | 空 | CORS 白名单，逗号分隔，如 `http://localhost:3000,http://your.server:6688` |
 | `CI_ALLOW_DELETE` | 否 | `0` | 是否允许 remove_node/remove_edge |
 | `CI_DEBUG_LLM` | 否 | `0` | LLM 与 patch 调试日志 |
+| `CI_DATE_RANGE_BOUNDARY_MODE` | 否 | `auto` | 日期跨度边界策略：`auto`（会议偏 exclusive，旅游偏 inclusive）/`inclusive`/`exclusive` |
 
 ---
 

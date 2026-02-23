@@ -47,6 +47,8 @@ type DateRangeCandidate = {
   isMeetingLike: boolean;
 };
 
+type DateRangeBoundaryMode = "auto" | "inclusive" | "exclusive";
+
 export type IntentSignals = {
   peopleCount?: number;
   peopleEvidence?: string;
@@ -151,6 +153,164 @@ export function parseCnInt(raw: string): number | null {
 
   if (map[s] != null) return map[s];
   return null;
+}
+
+function parseCnCompositeInt(raw: string): number | null {
+  const s = String(raw || "").trim();
+  if (!s) return null;
+  if (/^\d+$/.test(s)) return Number(s);
+  if (!/^[零一二两三四五六七八九十百千万]+$/.test(s)) return null;
+
+  const map: Record<string, number> = {
+    零: 0,
+    一: 1,
+    二: 2,
+    两: 2,
+    三: 3,
+    四: 4,
+    五: 5,
+    六: 6,
+    七: 7,
+    八: 8,
+    九: 9,
+  };
+  const unitMap: Record<string, number> = {
+    十: 10,
+    百: 100,
+    千: 1000,
+    万: 10000,
+  };
+
+  let total = 0;
+  let section = 0;
+  let number = 0;
+
+  for (const ch of s) {
+    if (ch in map) {
+      number = map[ch];
+      continue;
+    }
+    const unit = unitMap[ch];
+    if (!unit) return null;
+    if (unit === 10000) {
+      section = (section + (number || 1)) * unit;
+      total += section;
+      section = 0;
+      number = 0;
+      continue;
+    }
+    section += (number || 1) * unit;
+    number = 0;
+  }
+
+  const out = total + section + number;
+  return Number.isFinite(out) && out > 0 ? out : null;
+}
+
+function parseBudgetAmountToken(raw: string): number | null {
+  const s = String(raw || "")
+    .replace(/[,，\s]/g, "")
+    .replace(/(人民币|rmb|cny|元|块)$/i, "");
+  if (!s) return null;
+
+  const wanLike = s.match(
+    /^([0-9]+(?:\.[0-9]+)?|[零一二两三四五六七八九十百千万]+)万([0-9]+|[零一二两三四五六七八九十百千]+)?$/i
+  );
+  if (wanLike?.[1]) {
+    const headRaw = wanLike[1];
+    const tailRaw = wanLike[2] || "";
+    const head =
+      /^\d+(?:\.\d+)?$/.test(headRaw) ? Number(headRaw) : Number(parseCnCompositeInt(headRaw) || 0);
+    if (!Number.isFinite(head) || head <= 0) return null;
+    let value = Math.round(head * 10000);
+    if (tailRaw) {
+      if (/[十百千]/.test(tailRaw)) {
+        const tail = parseCnCompositeInt(tailRaw);
+        if (tail && tail > 0) value = Math.round(head * 10000 + tail);
+      } else {
+        const tail =
+          /^\d+$/.test(tailRaw) ? Number(tailRaw) : Number(parseCnInt(tailRaw) || parseCnCompositeInt(tailRaw) || 0);
+        if (Number.isFinite(tail) && tail > 0) {
+          const tailDigits = String(Math.trunc(tail)).length;
+          const scale = Math.max(0, 4 - tailDigits);
+          value = Math.round(head * 10000 + tail * Math.pow(10, scale));
+        }
+      }
+    }
+    return value > 0 ? value : null;
+  }
+
+  const qianLike = s.match(
+    /^([0-9]+(?:\.[0-9]+)?|[零一二两三四五六七八九十百千万]+)千([0-9]+|[零一二两三四五六七八九十百]+)?$/i
+  );
+  if (qianLike?.[1]) {
+    const headRaw = qianLike[1];
+    const tailRaw = qianLike[2] || "";
+    const head =
+      /^\d+(?:\.\d+)?$/.test(headRaw) ? Number(headRaw) : Number(parseCnCompositeInt(headRaw) || 0);
+    if (!Number.isFinite(head) || head <= 0) return null;
+    let value = Math.round(head * 1000);
+    if (tailRaw) {
+      if (/[十百]/.test(tailRaw)) {
+        const tail = parseCnCompositeInt(tailRaw);
+        if (tail && tail > 0) value = Math.round(head * 1000 + tail);
+      } else {
+        const tail =
+          /^\d+$/.test(tailRaw) ? Number(tailRaw) : Number(parseCnInt(tailRaw) || parseCnCompositeInt(tailRaw) || 0);
+        if (Number.isFinite(tail) && tail > 0) {
+          const tailDigits = String(Math.trunc(tail)).length;
+          const scale = Math.max(0, 3 - tailDigits);
+          value = Math.round(head * 1000 + tail * Math.pow(10, scale));
+        }
+      }
+    }
+    return value > 0 ? value : null;
+  }
+
+  if (/^\d+(?:\.\d+)?$/.test(s)) {
+    const n = Number(s);
+    return Number.isFinite(n) && n > 0 ? Math.round(n) : null;
+  }
+  const cn = parseCnCompositeInt(s);
+  return cn && cn > 0 ? cn : null;
+}
+
+const DATE_RANGE_BOUNDARY_MODE: DateRangeBoundaryMode = (() => {
+  const raw = String(process.env.CI_DATE_RANGE_BOUNDARY_MODE || "auto").trim().toLowerCase();
+  if (raw === "inclusive" || raw === "exclusive" || raw === "auto") return raw;
+  return "auto";
+})();
+
+const RANGE_MS_PER_DAY = 24 * 60 * 60 * 1000;
+
+function dayOfYear(month: number, day: number, year = 2026): number {
+  const d = new Date(year, month - 1, day);
+  if (Number.isNaN(d.getTime())) return 0;
+  if (d.getMonth() !== month - 1 || d.getDate() !== day) return 0;
+  const start = new Date(year, 0, 1);
+  return Math.floor((d.getTime() - start.getTime()) / RANGE_MS_PER_DAY) + 1;
+}
+
+function daysInYear(year = 2026): number {
+  const start = new Date(year, 0, 1).getTime();
+  const end = new Date(year + 1, 0, 1).getTime();
+  return Math.round((end - start) / RANGE_MS_PER_DAY);
+}
+
+function extractExplicitDurationHints(snippet: string): number[] {
+  const out: number[] = [];
+  const text = String(snippet || "");
+  const re = /([0-9一二三四五六七八九十两]{1,3})\s*(天|周|星期)/g;
+  for (const m of text.matchAll(re)) {
+    const idx = Number(m.index) || 0;
+    const prev = text[Math.max(0, idx - 1)] || "";
+    if (prev === "第") continue;
+    const base = parseCnInt(m[1] || "");
+    if (!base || base <= 0) continue;
+    const days = m[2] === "天" ? base : base * 7;
+    if (days > 0 && days <= 120) out.push(days);
+  }
+  return out;
 }
 
 function escapeRegExp(input: string): string {
@@ -332,7 +492,13 @@ function pickLatestBudgetMatch(
       index,
       evidence: cleanStatement(m[0] || m[1], 40),
     };
-    if (!best || candidate.index >= best.index) best = candidate;
+    if (
+      !best ||
+      candidate.index > best.index ||
+      (candidate.index === best.index && candidate.value > best.value)
+    ) {
+      best = candidate;
+    }
   }
 
   return best;
@@ -342,15 +508,101 @@ function pickBudgetFromText(text: string): { value: number; evidence: string } |
   const t = String(text || "").replace(/,/g, "");
   if (!t) return null;
 
+  const pickRangeBudget = (): BudgetMatch | null => {
+    const defs: Array<{
+      re: RegExp;
+      parser: (left: string, right: string) => number;
+    }> = [
+      {
+        re: /(?:总预算|预算(?:上限)?|经费|花费|费用)?\s*([0-9]+(?:\.[0-9]+)?)\s*万\s*[-~到至]\s*([0-9]+(?:\.[0-9]+)?)\s*万(?:元|人民币)?/gi,
+        parser: (left, right) => Math.round(Math.max(Number(left), Number(right)) * 10000),
+      },
+      {
+        re: /(?:总预算|预算(?:上限)?|经费|花费|费用)?\s*([0-9]{3,9})\s*[-~到至]\s*([0-9]{3,9})\s*(?:元|块|人民币)?/gi,
+        parser: (left, right) => Math.max(Number(left), Number(right)),
+      },
+      {
+        re: /(?:总预算|预算(?:上限)?|经费|花费|费用)?\s*([0-9一二两三四五六七八九十百千万\.]{1,14}(?:万|千)?[0-9一二两三四五六七八九十百千]{0,6})\s*[-~到至]\s*([0-9一二两三四五六七八九十百千万\.]{1,14}(?:万|千)?[0-9一二两三四五六七八九十百千]{0,6})\s*(?:元|块|人民币)?/gi,
+        parser: (left, right) =>
+          Math.max(Number(parseBudgetAmountToken(left) || 0), Number(parseBudgetAmountToken(right) || 0)),
+      },
+    ];
+    let best: BudgetMatch | null = null;
+    for (const def of defs) {
+      for (const m of t.matchAll(def.re)) {
+        if (!m?.[1] || !m?.[2]) continue;
+        const idx = Number(m.index) || 0;
+        const near = t.slice(
+          Math.max(0, idx - 14),
+          Math.min(t.length, idx + String(m[0] || "").length + 14)
+        );
+        const hasBudgetCue = /(预算|经费|花费|费用|人民币|rmb|cny|元|块)/i.test(near);
+        if (!hasBudgetCue) continue;
+        const value = def.parser(m[1], m[2]);
+        if (!Number.isFinite(value) || value <= 0) continue;
+        const cand: BudgetMatch = {
+          value: Math.round(value),
+          evidence: cleanStatement(m[0] || `${m[1]}-${m[2]}`, 40),
+          index: idx,
+        };
+        if (
+          !best ||
+          cand.index > best.index ||
+          (cand.index === best.index && cand.value > best.value)
+        ) {
+          best = cand;
+        }
+      }
+    }
+    return best;
+  };
+
   const wanPatterns = [
     /(?:总预算|预算(?:上限)?|经费|花费|费用)\s*(?:调整为|改成|改到|上调到|提高到|提升到|增加到|降到|降低到|放宽到|调到|更新为|大概|大约|约|在|为|是|控制在|控制|不超过|不要超过|上限为|上限是|以内|左右|约为|大致|大致在|大概在)?\s*([0-9]+(?:\.[0-9]+)?)\s*万/i,
     /([0-9]+(?:\.[0-9]+)?)\s*万(?:元|人民币)?\s*(?:预算|经费|花费|费用)?/i,
   ];
   let best: BudgetMatch | null = null;
-  for (const re of wanPatterns) {
-    const match = pickLatestBudgetMatch(t, re, (raw) => Math.round(Number(raw) * 10000));
-    if (!match) continue;
-    if (!best || match.index >= best.index) best = match;
+  const range = pickRangeBudget();
+  if (range) best = range;
+
+  const colloquialPatterns = [
+    /(?:总预算|预算(?:上限)?|经费|花费|费用)\s*(?:调整为|改成|改到|上调到|提高到|提升到|增加到|降到|降低到|放宽到|调到|更新为|大概|大约|约|在|为|是|控制在|控制|不超过|不要超过|上限为|上限是|以内|左右|约为|大致|大致在|大概在)?\s*([0-9一二两三四五六七八九十百千万\.]{1,12}(?:万|千)[0-9一二两三四五六七八九十百千]{0,4})\s*(?:元|块|人民币)?/gi,
+    /([0-9一二两三四五六七八九十百千万\.]{1,12}(?:万|千)[0-9一二两三四五六七八九十百千]{0,4})\s*(?:元|块|人民币)\s*(?:预算|总预算|经费|花费|费用)?/gi,
+    /(?:总预算|预算(?:上限)?|经费|花费|费用)\s*(?:调整为|改成|改到|上调到|提高到|提升到|增加到|降到|降低到|放宽到|调到|更新为|大概|大约|约|在|为|是|控制在|控制|不超过|不要超过|上限为|上限是|以内|左右|约为|大致|大致在|大概在)?\s*([零一二两三四五六七八九十百千万]{2,12})\s*(?:元|块|人民币)?/gi,
+    /([零一二两三四五六七八九十百千万]{2,12})\s*(?:元|块|人民币)\s*(?:预算|总预算|经费|花费|费用)?/gi,
+  ];
+  for (const re of colloquialPatterns) {
+    for (const m of t.matchAll(re)) {
+      if (!m?.[1]) continue;
+      const value = parseBudgetAmountToken(m[1]);
+      if (!value || value <= 0) continue;
+      const idx = Number(m.index) || 0;
+      const cand: BudgetMatch = {
+        value,
+        index: idx,
+        evidence: cleanStatement(m[0] || m[1], 40),
+      };
+      if (
+        !best ||
+        cand.index > best.index ||
+        (cand.index === best.index && cand.value > best.value)
+      ) {
+        best = cand;
+      }
+    }
+  }
+  if (!best) {
+    for (const re of wanPatterns) {
+      const match = pickLatestBudgetMatch(t, re, (raw) => Math.round(Number(raw) * 10000));
+      if (!match) continue;
+      if (
+        !best ||
+        match.index > best.index ||
+        (match.index === best.index && match.value > best.value)
+      ) {
+        best = match;
+      }
+    }
   }
 
   const yuanPatterns = [
@@ -360,7 +612,13 @@ function pickBudgetFromText(text: string): { value: number; evidence: string } |
   for (const re of yuanPatterns) {
     const match = pickLatestBudgetMatch(t, re, (raw) => Number(raw));
     if (!match) continue;
-    if (!best || match.index >= best.index) best = match;
+    if (
+      !best ||
+      match.index > best.index ||
+      (match.index === best.index && match.value > best.value)
+    ) {
+      best = match;
+    }
   }
 
   if (!best) return null;
@@ -386,6 +644,11 @@ function pickBudgetDeltaFromText(text: string): { delta: number; evidence: strin
       sign: 1,
     },
     {
+      re: /(?:再|又|额外|另外|追加|多给|增加了?|加了?|上调了?|提高了?|提升了?)\s*([0-9一二两三四五六七八九十百千万\.]{1,12}(?:万|千)[0-9一二两三四五六七八九十百千]{0,4}|[零一二两三四五六七八九十百千]{2,8})\s*(?:元|块|人民币)?(?:预算|经费|花费|费用)?/gi,
+      sign: 1,
+      parser: (raw) => Number(parseBudgetAmountToken(raw) || 0),
+    },
+    {
       re: /(?:减少了?|减了?|减去|下调了?|砍掉|扣减|省下了?)\s*([0-9]+(?:\.[0-9]+)?)\s*万(?:元|人民币)?(?:预算|经费|花费|费用)?/gi,
       sign: -1,
       parser: (raw) => Math.round(Number(raw) * 10000),
@@ -393,6 +656,11 @@ function pickBudgetDeltaFromText(text: string): { delta: number; evidence: strin
     {
       re: /(?:减少了?|减了?|减去|下调了?|砍掉|扣减|省下了?)\s*([0-9]{2,9})\s*(?:元|块|人民币)?(?:预算|经费|花费|费用)?/gi,
       sign: -1,
+    },
+    {
+      re: /(?:减少了?|减了?|减去|下调了?|砍掉|扣减|省下了?)\s*([0-9一二两三四五六七八九十百千万\.]{1,12}(?:万|千)[0-9一二两三四五六七八九十百千]{0,4}|[零一二两三四五六七八九十百千]{2,8})\s*(?:元|块|人民币)?(?:预算|经费|花费|费用)?/gi,
+      sign: -1,
+      parser: (raw) => Number(parseBudgetAmountToken(raw) || 0),
     },
   ];
 
@@ -430,11 +698,13 @@ function parseDateMentions(text: string): DateMention[] {
     const day = Number(m[2]);
     if (!Number.isFinite(month) || !Number.isFinite(day)) continue;
     if (month < 1 || month > 12 || day < 1 || day > 31) continue;
+    const ordinal = dayOfYear(month, day);
+    if (ordinal <= 0) continue;
     const index = Number(m.index) || 0;
     out.push({
       month,
       day,
-      ordinal: month * 31 + day,
+      ordinal,
       index,
       evidence: cleanStatement(m[0] || "", 24),
     });
@@ -447,18 +717,21 @@ function parseDateMentions(text: string): DateMention[] {
     const day2 = Number(m[3]);
     if (!Number.isFinite(month) || !Number.isFinite(day1) || !Number.isFinite(day2)) continue;
     if (month < 1 || month > 12 || day1 < 1 || day1 > 31 || day2 < 1 || day2 > 31) continue;
+    const ordinalA = dayOfYear(month, day1);
+    const ordinalB = dayOfYear(month, day2);
+    if (ordinalA <= 0 || ordinalB <= 0) continue;
     const index = Number(m.index) || 0;
     out.push({
       month,
       day: day1,
-      ordinal: month * 31 + day1,
+      ordinal: ordinalA,
       index,
       evidence: cleanStatement(`${month}月${day1}日`, 24),
     });
     out.push({
       month,
       day: day2,
-      ordinal: month * 31 + day2,
+      ordinal: ordinalB,
       index: index + String(m[0] || "").length - 1,
       evidence: cleanStatement(`${month}月${day2}日`, 24),
     });
@@ -470,11 +743,13 @@ function parseDateMentions(text: string): DateMention[] {
     const day = Number(m[3]);
     if (!Number.isFinite(month) || !Number.isFinite(day)) continue;
     if (month < 1 || month > 12 || day < 1 || day > 31) continue;
+    const ordinal = dayOfYear(month, day);
+    if (ordinal <= 0) continue;
     const index = (Number(m.index) || 0) + String(m[1] || "").length;
     out.push({
       month,
       day,
-      ordinal: month * 31 + day,
+      ordinal,
       index,
       evidence: cleanStatement(`${month}-${day}`, 24),
     });
@@ -483,17 +758,79 @@ function parseDateMentions(text: string): DateMention[] {
   return out;
 }
 
-function calcRangeDays(monthA: number, dayA: number, monthB: number, dayB: number): number {
+function computeDateMentionSpanDays(mentions: DateMention[]): number {
+  if (!mentions.length) return 0;
+  const ordinals = mentions.map((x) => Number(x.ordinal) || 0).filter((x) => x > 0);
+  if (!ordinals.length) return 0;
+  const minOrdinal = Math.min(...ordinals);
+  const maxOrdinal = Math.max(...ordinals);
+  let span = maxOrdinal - minOrdinal + 1;
+  const months = mentions.map((x) => Number(x.month) || 0);
+  const likelyCrossYear =
+    months.some((m) => m >= 11) && months.some((m) => m <= 2) && span > 120;
+  if (likelyCrossYear) {
+    const yearDays = daysInYear(2026);
+    const lateOrdinals = mentions
+      .filter((x) => (Number(x.month) || 0) >= 11)
+      .map((x) => Number(x.ordinal) || 0)
+      .filter((x) => x > 0);
+    const earlyOrdinals = mentions
+      .filter((x) => (Number(x.month) || 0) <= 2)
+      .map((x) => Number(x.ordinal) || 0)
+      .filter((x) => x > 0);
+    if (lateOrdinals.length && earlyOrdinals.length) {
+      const wrapSpan = yearDays - Math.min(...lateOrdinals) + 1 + Math.max(...earlyOrdinals);
+      if (Number.isFinite(wrapSpan) && wrapSpan > 0) span = Math.min(span, wrapSpan);
+    }
+  }
+  return span;
+}
+
+function calcRangeDays(
+  monthA: number,
+  dayA: number,
+  monthB: number,
+  dayB: number,
+  opts?: {
+    mode?: DateRangeBoundaryMode;
+    context?: string;
+    isMeetingLike?: boolean;
+    hintedDays?: number[];
+  }
+): number {
   const year = 2026;
   const start = new Date(year, monthA - 1, dayA);
   let end = new Date(year, monthB - 1, dayB);
   if (Number.isNaN(start.getTime()) || Number.isNaN(end.getTime())) return 0;
+  if (start.getMonth() !== monthA - 1 || start.getDate() !== dayA) return 0;
+  if (end.getMonth() !== monthB - 1 || end.getDate() !== dayB) return 0;
   if (end.getTime() < start.getTime()) {
     end = new Date(year + 1, monthB - 1, dayB);
+    if (end.getMonth() !== monthB - 1 || end.getDate() !== dayB) return 0;
   }
-  const diff = Math.floor((end.getTime() - start.getTime()) / (24 * 60 * 60 * 1000)) + 1;
-  if (!Number.isFinite(diff)) return 0;
-  return diff;
+  const raw = Math.floor((end.getTime() - start.getTime()) / RANGE_MS_PER_DAY);
+  if (!Number.isFinite(raw)) return 0;
+  const inclusiveDays = raw + 1;
+  const exclusiveDays = Math.max(1, raw);
+
+  const mode = opts?.mode || DATE_RANGE_BOUNDARY_MODE;
+  if (mode === "inclusive") return inclusiveDays;
+  if (mode === "exclusive") return exclusiveDays;
+
+  const ctx = cleanStatement(opts?.context || "", 160);
+  if (/(不含首尾|不算首尾|exclusive|净天数)/i.test(ctx)) return exclusiveDays;
+  if (/(含首尾|算上首尾|inclusive|含出发和返程|包含首末日)/i.test(ctx)) return inclusiveDays;
+
+  const hinted = (opts?.hintedDays || []).filter((x) => Number.isFinite(x) && x > 0 && x <= 120);
+  if (hinted.length) {
+    const incLoss = hinted.reduce((acc, x) => acc + Math.abs(x - inclusiveDays), 0);
+    const excLoss = hinted.reduce((acc, x) => acc + Math.abs(x - exclusiveDays), 0);
+    if (incLoss + 0.25 < excLoss) return inclusiveDays;
+    if (excLoss + 0.25 < incLoss) return exclusiveDays;
+  }
+
+  if (opts?.isMeetingLike) return exclusiveDays;
+  return inclusiveDays;
 }
 
 function extractDateRangeDurations(text: string): DateRangeCandidate[] {
@@ -506,11 +843,19 @@ function extractDateRangeDurations(text: string): DateRangeCandidate[] {
     const dayB = Number(m[3]);
     if (!Number.isFinite(month) || !Number.isFinite(dayA) || !Number.isFinite(dayB)) continue;
     if (month < 1 || month > 12 || dayA < 1 || dayA > 31 || dayB < 1 || dayB > 31) continue;
-    const days = calcRangeDays(month, dayA, month, dayB);
-    if (days <= 0 || days > 62) continue;
     const idx = Number(m.index) || 0;
-    const ctx = cleanStatement(text.slice(Math.max(0, idx - 12), Math.min(text.length, idx + String(m[0] || "").length + 44)), 120);
+    const ctx = cleanStatement(
+      text.slice(Math.max(0, idx - 12), Math.min(text.length, idx + String(m[0] || "").length + 44)),
+      120
+    );
     const isMeetingLike = /(学术会议|会议|开会|chi|conference|workshop|forum|summit|参会|发表|汇报|报告|讲论文)/i.test(ctx);
+    const days = calcRangeDays(month, dayA, month, dayB, {
+      mode: DATE_RANGE_BOUNDARY_MODE,
+      context: ctx,
+      isMeetingLike,
+      hintedDays: extractExplicitDurationHints(ctx),
+    });
+    if (days <= 0 || days > 62) continue;
     out.push({
       days,
       evidence: cleanStatement(m[0] || `${month}月${dayA}日-${dayB}日`, 36),
@@ -528,11 +873,19 @@ function extractDateRangeDurations(text: string): DateRangeCandidate[] {
     const dayB = Number(m[4]);
     if (!Number.isFinite(monthA) || !Number.isFinite(dayA) || !Number.isFinite(monthB) || !Number.isFinite(dayB)) continue;
     if (monthA < 1 || monthA > 12 || monthB < 1 || monthB > 12 || dayA < 1 || dayA > 31 || dayB < 1 || dayB > 31) continue;
-    const days = calcRangeDays(monthA, dayA, monthB, dayB);
-    if (days <= 0 || days > 62) continue;
     const idx = Number(m.index) || 0;
-    const ctx = cleanStatement(text.slice(Math.max(0, idx - 12), Math.min(text.length, idx + String(m[0] || "").length + 44)), 120);
+    const ctx = cleanStatement(
+      text.slice(Math.max(0, idx - 12), Math.min(text.length, idx + String(m[0] || "").length + 44)),
+      120
+    );
     const isMeetingLike = /(学术会议|会议|开会|chi|conference|workshop|forum|summit|参会|发表|汇报|报告|讲论文)/i.test(ctx);
+    const days = calcRangeDays(monthA, dayA, monthB, dayB, {
+      mode: DATE_RANGE_BOUNDARY_MODE,
+      context: ctx,
+      isMeetingLike,
+      hintedDays: extractExplicitDurationHints(ctx),
+    });
+    if (days <= 0 || days > 62) continue;
     out.push({
       days,
       evidence: cleanStatement(m[0] || `${monthA}月${dayA}日-${monthB}月${dayB}日`, 42),
@@ -551,16 +904,21 @@ function extractDurationCandidates(text: string): DurationCandidate[] {
   const re = /([0-9一二三四五六七八九十两]{1,3})\s*(天|周|星期)/g;
   for (const m of text.matchAll(re)) {
     if (!m?.[1] || !m?.[2]) continue;
+    const index = Number(m.index) || 0;
+    const prevChar = text[Math.max(0, index - 1)] || "";
+    if (prevChar === "第") continue;
     const base = parseCnInt(m[1]);
     if (!base || base <= 0) continue;
     const unit = m[2];
     const days = unit === "天" ? base : base * 7;
     if (days <= 0 || days > 120) continue;
 
-    const index = Number(m.index) || 0;
     const left = Math.max(0, index - 20);
     const right = Math.min(text.length, index + String(m[0] || "").length + 28);
     const ctx = cleanStatement(text.slice(left, right), 120);
+    if ((prevChar === "前" || prevChar === "后") && !/(玩|待|停留|旅行|旅游|出行|行程|参会|开会|会议)/i.test(ctx)) {
+      continue;
+    }
 
     const isTotal = /(总共|一共|总计|全程|整个(?:行程|旅行)?|整体|行程时长|trip length|overall|total|in total)/i.test(ctx);
     const isMeeting = /(学术会议|会议|开会|chi|conference|workshop|forum|summit|参会)/i.test(ctx);
@@ -633,7 +991,10 @@ function inferDurationFromText(
       return;
     }
     if (days > best.days) {
-      best = { days, evidence: e, strength };
+      // 更大的天数不应无条件覆盖：需要置信度接近当前最优，避免被噪声跨度抬高。
+      if (strength + 0.04 >= best.strength) {
+        best = { days, evidence: e, strength };
+      }
       return;
     }
     if (days === best.days && strength > best.strength) {
@@ -643,6 +1004,23 @@ function inferDurationFromText(
 
   const rangeLatest = dateRangeCandidates.slice().sort((a, b) => b.index - a.index)[0];
   if (!historyMode && rangeLatest) {
+    const nearbyExplicit = durationCandidates
+      .filter(
+        (x) =>
+          (x.kind === "meeting" ||
+            x.kind === "segment" ||
+            x.kind === "total" ||
+            (x.kind === "unknown" && x.days >= 3)) &&
+          Math.abs(x.index - rangeLatest.index) <= 48
+      )
+      .sort((a, b) => b.strength - a.strength || b.index - a.index)[0];
+    if (nearbyExplicit && Math.abs(nearbyExplicit.days - rangeLatest.days) <= 2) {
+      consider(
+        nearbyExplicit.days,
+        nearbyExplicit.evidence,
+        Math.max(0.97, nearbyExplicit.strength)
+      );
+    }
     const rangeStrength = rangeLatest.isMeetingLike ? 0.92 : 0.88;
     consider(rangeLatest.days, rangeLatest.evidence, rangeStrength);
   }
@@ -673,10 +1051,7 @@ function inferDurationFromText(
   }
 
   if (!historyMode && uniqueDateMentions.length >= 2) {
-    const ordinals = uniqueDateMentions.map((d) => d.ordinal);
-    const minOrdinal = Math.min(...ordinals);
-    const maxOrdinal = Math.max(...ordinals);
-    const span = maxOrdinal - minOrdinal + 1;
+    const span = computeDateMentionSpanDays(uniqueDateMentions);
     if (span >= 2 && span <= 60) {
       const first = uniqueDateMentions.slice().sort((a, b) => a.ordinal - b.ordinal)[0];
       const last = uniqueDateMentions.slice().sort((a, b) => b.ordinal - a.ordinal)[0];
@@ -838,8 +1213,15 @@ function extractDestinationList(text: string): Array<{ city: string; evidence: s
   }
 
   const goRe =
-    /(?:去|到|前往|飞到|抵达)\s*([A-Za-z\u4e00-\u9fff]{2,14}?)(?=[0-9一二三四五六七八九十两]{1,3}\s*天|之前|之后|参加|参会|开会|会议|玩|旅游|旅行|度假|逛|游|[，。,；;！!？?\s]|$)/gi;
+    /(?:去|到|前往|飞到|抵达|经过|途经|经停|经由)\s*([A-Za-z\u4e00-\u9fff]{2,14}?)(?=[0-9一二三四五六七八九十两]{1,3}\s*天|之前|之后|参加|参会|开会|会议|玩|旅游|旅行|度假|逛|游|[，。,；;！!？?\s]|$)/gi;
   for (const m of scanText.matchAll(goRe)) {
+    if (!m?.[1]) continue;
+    push(m[1], m[1], Number(m.index) || 0);
+  }
+
+  const viaRe =
+    /(?:经过|途经|经停|经由)\s*([A-Za-z\u4e00-\u9fff]{2,14})(?=[，。,；;！!？?\s]|$)/gi;
+  for (const m of scanText.matchAll(viaRe)) {
     if (!m?.[1]) continue;
     push(m[1], m[1], Number(m.index) || 0);
   }
@@ -902,7 +1284,7 @@ function extractCityDurationSegments(text: string): Array<{ city: string; days: 
   };
 
   const travelHintRe =
-    /(?:在|于|到|去|飞到|抵达)\s*([A-Za-z\u4e00-\u9fff]{2,16}?)(?=(?:玩|逛|停留|待|旅行|旅游|参会|开会|参加|[，。,；;！!？?\s]))\s*(?:玩|逛|停留|待|旅行|旅游|参会|开会|参加)?\s*([0-9一二三四五六七八九十两]{1,3})\s*天/gi;
+    /(?:在|于|到|去|飞到|抵达|经过|途经|经停|经由)\s*([A-Za-z\u4e00-\u9fff]{2,16}?)(?=(?:玩|逛|停留|待|旅行|旅游|参会|开会|参加|[，。,；;！!？?\s]))\s*(?:玩|逛|停留|待|旅行|旅游|参会|开会|参加)?\s*([0-9一二三四五六七八九十两]{1,3})\s*天/gi;
   for (const m of scanText.matchAll(travelHintRe)) {
     const city = normalizeDestination(m?.[1] || "");
     const days = parseCnInt(m?.[2] || "");
@@ -925,7 +1307,7 @@ function extractCityDurationSegments(text: string): Array<{ city: string; days: 
   }
 
   const re =
-    /(?:^|[，。,；;！!？?\s])(?:在|于|到|去|飞到|抵达|前往)?\s*([^\s，。,；;！!？?\d]{2,14})(?:\s*(?:停留|待|玩|逛|旅行|旅游|参会|开会|参加))?[^\n。；;，,]{0,6}?([0-9一二三四五六七八九十两]{1,3})\s*天/g;
+    /(?:^|[，。,；;！!？?\s])(?:在|于|到|去|飞到|抵达|前往|经过|途经|经停|经由)?\s*([^\s，。,；;！!？?\d]{2,14})(?:\s*(?:停留|待|玩|逛|旅行|旅游|参会|开会|参加))?[^\n。；;，,]{0,6}?([0-9一二三四五六七八九十两]{1,3})\s*天/g;
   for (const m of scanText.matchAll(re)) {
     const rawCity = m?.[1] || "";
     const rawDays = m?.[2] || "";
@@ -963,11 +1345,23 @@ function extractCityDurationSegments(text: string): Array<{ city: string; days: 
     const city = normalizeDestination(m[5] || "");
     if (!Number.isFinite(monthA) || !Number.isFinite(startDay) || !Number.isFinite(monthB) || !Number.isFinite(endDay)) continue;
     if (!city || !isLikelyDestinationCandidate(city)) continue;
-    const days = calcRangeDays(monthA, startDay, monthB, endDay);
-    if (days <= 0 || days > 31) continue;
     const action = String(m[6] || "");
+    const ctx = cleanStatement(
+      scanText.slice(
+        Math.max(0, (Number(m.index) || 0) - 12),
+        Math.min(scanText.length, (Number(m.index) || 0) + String(m[0] || "").length + 44)
+      ),
+      120
+    );
     const kind: "travel" | "meeting" =
       /(参加|参会|开会|会议|chi|conference|workshop)/i.test(action) ? "meeting" : "travel";
+    const days = calcRangeDays(monthA, startDay, monthB, endDay, {
+      mode: DATE_RANGE_BOUNDARY_MODE,
+      context: ctx,
+      isMeetingLike: kind === "meeting",
+      hintedDays: extractExplicitDurationHints(ctx),
+    });
+    if (days <= 0 || days > 31) continue;
     out.push({
       city,
       days,
@@ -979,7 +1373,7 @@ function extractCityDurationSegments(text: string): Array<{ city: string; days: 
 
   const cityMentions = Array.from(
     scanText.matchAll(
-      /(?:在|于|去|到|飞到|抵达)\s*([A-Za-z\u4e00-\u9fff]{2,14}?)(?=玩|逛|停留|待|旅行|旅游|参会|开会|参加|[，。,；;！!？?\s（(]|$)/gi
+      /(?:在|于|去|到|飞到|抵达|经过|途经|经停|经由)\s*([A-Za-z\u4e00-\u9fff]{2,14}?)(?=玩|逛|停留|待|旅行|旅游|参会|开会|参加|[，。,；;！!？?\s（(]|$)/gi
     )
   )
     .map((m) => {
@@ -1330,14 +1724,32 @@ export function extractCriticalPresentationRequirement(text: string): { days: nu
   };
 }
 
+function detectDurationUpdateCue(text: string): boolean {
+  const s = cleanStatement(text || "", 240);
+  if (!s) return false;
+  if (/(多|少|再)\s*(玩|待|停留|旅行|旅游|出行)\s*[0-9一二三四五六七八九十两]{1,3}\s*天/i.test(s)) {
+    return true;
+  }
+  if (/(延长|缩短)\s*(行程|时长|天数|旅行|旅游|出行)?/i.test(s)) return true;
+
+  const updateVerb = /(改成|改为|改到|调整为|调整到|更新为|更新到|变为|变成|上调|下调|放宽|加到|减到|增加|减少)/i;
+  const durationToken = /(天数|时长|总共|一共|全程|总行程|行程|旅行|旅游|出行|停留|待|玩|周|星期|天)/i;
+
+  if (new RegExp(`${updateVerb.source}[\\s\\S]{0,10}${durationToken.source}`, "i").test(s)) return true;
+  if (new RegExp(`${durationToken.source}[\\s\\S]{0,10}${updateVerb.source}`, "i").test(s)) return true;
+  if (/(改成|改为|改到|调整为|调整到|更新为|更新到|变为|变成)[^，。；;\n]{0,12}[0-9一二三四五六七八九十两]{1,3}\s*(天|周|星期)/i.test(s)) {
+    return true;
+  }
+  return false;
+}
+
 export function extractIntentSignals(userText: string, opts?: { historyMode?: boolean }): IntentSignals {
   const text = String(userText || "");
   const out: IntentSignals = {};
-  out.hasTemporalAnchor = /([0-9]{1,2})月([0-9]{1,2})日?(?:\s*[-~到至]\s*([0-9]{1,2})日?)?/.test(text);
-  out.hasDurationUpdateCue =
-    /改成|改为|更新|调整|变为|变成|改到|上调|下调|放宽|改成了|改成到|从.*改到|延长|缩短|加(?:到|成)?|增加|减少|多(?:玩|待|留)|少(?:玩|待|留)|再(?:玩|待|留)|再加/i.test(
-      text
-    );
+  out.hasTemporalAnchor =
+    /([0-9]{1,2})月([0-9]{1,2})日?(?:\s*[-~到至]\s*([0-9]{1,2})日?)?/.test(text) ||
+    /(^|[^\d])([0-9]{1,2})[-/]([0-9]{1,2})(?=[^\d]|$)/.test(text);
+  out.hasDurationUpdateCue = detectDurationUpdateCue(text);
   out.hasExplicitTotalCue = /(总共|一共|全程|总计|整体|整个(?:行程|旅行)?|总行程|行程时长|trip length|overall|total|in total)/i.test(
     text
   );

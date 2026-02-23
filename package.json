@@ -3,7 +3,8 @@
   "version": "1.0.0",
   "type": "module",
   "scripts": {
-    "dev:api": "tsx src/services/server.ts"
+    "dev:api": "tsx src/services/server.ts",
+    "test:graph-regression": "tsx src/services/graphUpdater/__tests__/intentSignals.regression.ts"
   },
   "dependencies": {
     "axios": "^1.13.5",

@@ -105,6 +105,7 @@ function reconcileDurationBySegments(out: IntentSignals): void {
 
   const sumAll = segments.reduce((acc, x) => acc + (Number(x.days) || 0), 0);
   const travelSegments = segments.filter((x) => x.kind === "travel");
+  const hasMeetingOnly = travelSegments.length === 0 && segments.some((x) => x.kind === "meeting");
   const sumTravel = travelSegments.reduce((acc, x) => acc + (Number(x.days) || 0), 0);
   const maxSeg = segments.reduce((acc, x) => Math.max(acc, Number(x.days) || 0), 0);
   const detailSegments = segments.filter((x) =>
@@ -125,6 +126,11 @@ function reconcileDurationBySegments(out: IntentSignals): void {
   if (!preferred || preferred <= 0) return;
 
   const curDays = Number(out.durationDays) || 0;
+  if (hasMeetingOnly && curDays > 0 && !out.hasDurationUpdateCue) {
+    // 会议日期区间常有“含首尾”歧义（如 4/13-4/18 可能说成 5 天）。
+    // 当仅有会议段且差值很小时，优先保留用户显式总时长，避免 5=>6 这类膨胀。
+    if (Math.abs(curDays - preferred) <= 2) return;
+  }
   const curStrength = Number(out.durationStrength) || 0.55;
   const explicitStrong = !!out.hasExplicitTotalCue && curStrength >= 0.9;
 

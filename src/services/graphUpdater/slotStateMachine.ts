@@ -128,12 +128,26 @@ function buildDurationState(signals: IntentSignals): DurationState {
     }
   }
 
-  const cityDurations = compactCityDurations(Array.from(byCity.values()));
+  const explicitTotal = Number(signals.durationDays || 0) || undefined;
+  let cityDurations = compactCityDurations(Array.from(byCity.values()));
+  if (
+    explicitTotal &&
+    cityDurations.length === 1 &&
+    cityDurations[0].kind === "meeting" &&
+    !signals.hasDurationUpdateCue &&
+    Math.abs(cityDurations[0].days - explicitTotal) <= 2
+  ) {
+    cityDurations = [
+      {
+        ...cityDurations[0],
+        days: explicitTotal,
+        evidence: cleanStatement(signals.durationEvidence || cityDurations[0].evidence, 64),
+      },
+    ];
+  }
   const citySum = cityDurations.reduce((acc, x) => acc + x.days, 0);
   const cityCount = cityDurations.length;
-  const travelCityCount = new Set(cityDurations.filter((x) => x.kind === "travel").map((x) => slug(x.city))).size;
   const hasTravelSegment = cityDurations.some((x) => x.kind === "travel");
-  const explicitTotal = Number(signals.durationDays || 0) || undefined;
 
   const candidates: DurationCandidate[] = [];
   if (explicitTotal) {
@@ -174,6 +188,19 @@ function buildDurationState(signals: IntentSignals): DurationState {
   let totalDays = consensus?.days;
   let totalEvidence = consensus?.evidence;
 
+  // 会议日期区间常出现“含首尾”的 1 天偏差（如 4/13-4/18 vs 5天）。
+  // 若用户显式总时长存在且仅有单一会议段，优先采用显式总时长。
+  if (
+    explicitTotal &&
+    cityDurations.length === 1 &&
+    cityDurations[0].kind === "meeting" &&
+    !signals.hasDurationUpdateCue &&
+    Math.abs(cityDurations[0].days - explicitTotal) <= 2
+  ) {
+    totalDays = explicitTotal;
+    totalEvidence = cleanStatement(signals.durationEvidence || `${explicitTotal}天`, 80);
+  }
+
   // 防止“显式总时长”在无总时长语气下明显偏离城市时长和（例如 14 vs 7）时占优。
   if (
     explicitTotal &&
@@ -186,8 +213,8 @@ function buildDurationState(signals: IntentSignals): DurationState {
     totalEvidence = cityDurations.map((x) => `${x.city}${x.days}天`).join(" + ");
   }
 
-  // 多城市且有旅行段时，优先满足分段总和，避免漏算前后段。
-  if (travelCityCount >= 2 && citySum > 0) {
+  // 多城市且至少有一个“旅行段”时，优先满足分段总和，避免漏算“会议+旅行”这类组合行程。
+  if (cityDurations.length >= 2 && hasTravelSegment && citySum > 0) {
     const explicitStrong =
       !!explicitTotal &&
       (signals.hasExplicitTotalCue || clamp01(signals.durationStrength, 0.55) >= 0.88);
