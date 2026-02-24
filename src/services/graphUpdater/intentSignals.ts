@@ -1305,6 +1305,8 @@ export function isLikelyDestinationCandidate(x: string): boolean {
   if (/^[A-Za-z]+$/.test(s) && s.length <= 2) return false;
   if (/(其中|其中有|其余|其他时候|海地区|该地区)/.test(s)) return false;
   if (s.endsWith("地区") && s.length <= 4) return false;
+  if (/^(现场|现场观看|现场观赛|观看|观赏)$/.test(s)) return false;
+  if (/(现场观看|现场观赛|现场看|去现场|到现场|去.*观看|看.*现场)$/.test(s)) return false;
   if (/(参加|参会|开会|会议|玩|旅游|旅行|度假|计划|安排)$/i.test(s)) return false;
   if (/(看|观).{0,4}(球|赛|比赛|演出|展)|球迷|演唱会|音乐会|球票|门票/i.test(s)) return false;
   if (/(西班牙语地区|英语地区|法语地区|德语地区|语地区)/i.test(s)) return false;
@@ -2537,7 +2539,19 @@ function mergeSignalsWithLatest(history: IntentSignals, latest: IntentSignals): 
 }
 
 export function extractIntentSignalsWithRecency(historyText: string, latestUserText: string): IntentSignals {
-  const fromHistory = extractIntentSignals(historyText, { historyMode: true });
+  const chunks = String(historyText || "")
+    .split(/\n+/)
+    .map((x) => String(x || "").trim())
+    .filter(Boolean);
+  let fromHistory: IntentSignals = {};
+  if (chunks.length) {
+    for (const chunk of chunks) {
+      const turnSignals = extractIntentSignals(chunk, { historyMode: true });
+      fromHistory = mergeSignalsWithLatest(fromHistory, turnSignals);
+    }
+  } else {
+    fromHistory = extractIntentSignals(historyText, { historyMode: true });
+  }
   const fromLatest = extractIntentSignals(latestUserText);
   return mergeSignalsWithLatest(fromHistory, fromLatest);
 }

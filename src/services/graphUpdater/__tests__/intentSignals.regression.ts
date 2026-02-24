@@ -90,6 +90,19 @@ const cases: Case[] = [
     },
   },
   {
+    name: "historical budget delta should not be re-applied on later non-budget turn",
+    run: () => {
+      const merged = extractIntentSignalsWithRecency(
+        [
+          "我想去意大利米兰旅行3天，预算在10000元人民币，机票已经买了",
+          "我的父亲突然给我增加了5000的预算",
+        ].join("\n"),
+        "我4月10日到4月12日在米兰玩，4月13日离开米兰"
+      );
+      assert.equal(merged.budgetCny, 15000);
+    },
+  },
+  {
     name: "meeting date range in auto mode prefers exclusive boundary",
     run: () => {
       const s = extractIntentSignals("我4月13日到4月18日在巴塞罗那参加CHI学术会议");
@@ -175,6 +188,18 @@ const cases: Case[] = [
       );
       assert.equal(s.durationDays, 3);
       assert.equal(s.budgetCny, 10000);
+    },
+  },
+  {
+    name: "non-place phrase '现场观看' should not be parsed as destination",
+    run: () => {
+      const merged = extractIntentSignalsWithRecency(
+        "我想去米兰旅行3天",
+        "4月12日晚上有AC米兰和乌迪内斯的比赛，作为米兰球迷，我一定要去现场观看"
+      );
+      assert.deepEqual(merged.destinations || [], ["米兰"]);
+      assert.equal((merged.destinations || []).includes("现场观看"), false);
+      assert.equal(merged.destination, "米兰");
     },
   },
   {

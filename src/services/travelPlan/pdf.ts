@@ -1,5 +1,4 @@
 import fs from "node:fs";
-import path from "node:path";
 import PDFDocument from "pdfkit";
 
 import { config } from "../../server/config.js";
@@ -7,9 +6,12 @@ import { buildTravelPlanText, type TravelPlanState } from "./state.js";
 
 const FONT_CANDIDATES = [
   process.env.CI_PDF_FONT_PATH || "",
-  "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
   "/usr/share/fonts/opentype/noto/NotoSansCJKsc-Regular.otf",
+  "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
   "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc",
+  "/usr/share/fonts/truetype/noto/NotoSansCJKsc-Regular.otf",
+  "/usr/share/fonts/truetype/noto/NotoSansSC-Regular.otf",
+  "/usr/share/fonts/truetype/wqy/wqy-microhei.ttc",
   "/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc",
   "/usr/share/fonts/truetype/arphic/ukai.ttc",
   "/System/Library/Fonts/PingFang.ttc",
@@ -17,12 +19,35 @@ const FONT_CANDIDATES = [
   "/Library/Fonts/Arial Unicode.ttf",
 ].filter(Boolean);
 
-function pickChineseFontPath(): string | null {
+function listExistingFontPaths(): string[] {
+  const out: string[] = [];
   for (const p of FONT_CANDIDATES) {
     try {
-      if (p && fs.existsSync(p) && fs.statSync(p).isFile()) return p;
+      if (p && fs.existsSync(p) && fs.statSync(p).isFile()) out.push(p);
     } catch {
       // ignore
+    }
+  }
+  return out;
+}
+
+function applyChineseFont(doc: PDFKit.PDFDocument): string | null {
+  const files = listExistingFontPaths();
+  if (!files.length) return null;
+  // 优先尝试 ttf/otf，避免部分 ttc 在 pdfkit 子集化阶段报错导致 PDF 损坏/导出失败。
+  const prefer = files
+    .slice()
+    .sort((a, b) => {
+      const rank = (x: string) =>
+        /\.ttf$/i.test(x) ? 0 : /\.otf$/i.test(x) ? 1 : /\.ttc$/i.test(x) ? 2 : 3;
+      return rank(a) - rank(b);
+    });
+  for (const p of prefer) {
+    try {
+      doc.font(p);
+      return p;
+    } catch {
+      // try next candidate
     }
   }
   return null;
@@ -40,7 +65,6 @@ export async function renderTravelPlanPdf(params: {
 }): Promise<Buffer> {
   const plan = params.plan;
   const text = buildTravelPlanText(plan);
-  const fontPath = pickChineseFontPath();
 
   const doc = new PDFDocument({
     size: "A4",
@@ -55,8 +79,10 @@ export async function renderTravelPlanPdf(params: {
     },
   });
 
-  if (fontPath) {
-    doc.font(fontPath);
+  const fontPath = applyChineseFont(doc);
+  if (!fontPath) {
+    // fallback to built-in font; PDF remains readable though CJK glyphs may be limited
+    doc.font("Helvetica");
   }
 
   const chunks: Buffer[] = [];

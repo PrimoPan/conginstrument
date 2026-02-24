@@ -742,8 +742,18 @@ export function buildSlotStateMachine(params: {
       ? Math.round(Number(params.signals.budgetRemainingCny))
       : 0;
   const remainingBudget = Math.max(remainingByCalc, remainingBySignal);
-  if (totalBudgetForRemaining > 0 && spentBudgetForRemaining > 0) {
+  if (totalBudgetForRemaining > 0) {
     const remainingImportance = clamp01(params.signals.budgetImportance, 0.86);
+    const remainingEvidence =
+      spentBudgetForRemaining > 0
+        ? cleanStatement(
+            `${params.signals.budgetEvidence || `${totalBudgetForRemaining}元`}；${params.signals.budgetSpentEvidence || `${spentBudgetForRemaining}元`}`,
+            80
+          )
+        : cleanStatement(
+            `${params.signals.budgetEvidence || `${totalBudgetForRemaining}元`}；尚未记录已花预算`,
+            80
+          );
     nodes.push({
       slotKey: "slot:budget_remaining",
       type: "constraint",
@@ -753,12 +763,7 @@ export function buildSlotStateMachine(params: {
       confidence: 0.9,
       importance: remainingImportance,
       tags: ["budget", "remaining"],
-      evidenceIds: [
-        cleanStatement(
-          `${params.signals.budgetEvidence || `${totalBudgetForRemaining}元`}；${params.signals.budgetSpentEvidence || `${spentBudgetForRemaining}元`}`,
-          80
-        ),
-      ].filter(Boolean),
+      evidenceIds: [remainingEvidence].filter(Boolean),
       sourceMsgIds: ["latest_user"],
       key: "slot:budget_remaining",
       motifType: "hypothesis",

@@ -3,7 +3,7 @@ import type { CDG, GraphPatch } from "../core/graph.js";
 import { sanitizeGraphPatchStrict } from "./patchGuard.js";
 import {
   buildTravelIntentStatement,
-  extractIntentSignalsWithRecency,
+  extractIntentSignals,
   mergeIntentSignals,
   type IntentSignals,
 } from "./graphUpdater/intentSignals.js";
@@ -155,7 +155,14 @@ async function buildSignals(params: {
   const historyUserText = mergeTextSegments(historyUserTexts);
   const signalText = mergeTextSegments([...historyUserTexts, params.userText]);
 
-  const textSignals = extractIntentSignalsWithRecency(historyUserText, params.userText);
+  // 按轮次顺序累计历史信号，避免把历史增量（例如“再加5000预算”）在后续轮次重复累计。
+  let accumulatedHistorySignals: IntentSignals = {};
+  for (const turnText of historyUserTexts) {
+    const turnSignals = extractIntentSignals(turnText, { historyMode: true });
+    accumulatedHistorySignals = mergeIntentSignals(accumulatedHistorySignals, turnSignals);
+  }
+  const latestSignals = extractIntentSignals(params.userText);
+  const textSignals = mergeIntentSignals(accumulatedHistorySignals, latestSignals);
   let signals = textSignals;
 
   if (USE_FUNCTION_SLOT_EXTRACTION) {

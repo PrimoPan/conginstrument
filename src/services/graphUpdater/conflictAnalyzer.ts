@@ -1,4 +1,5 @@
 import { cleanStatement } from "./text.js";
+import { isLikelyDestinationCandidate, normalizeDestination } from "./intentSignals.js";
 
 export type LimitingFactorInput = {
   text: string;
@@ -51,7 +52,13 @@ function dedupeConflicts(items: ConflictInsight[]): ConflictInsight[] {
 
 export function analyzeConstraintConflicts(input: ConflictAnalyzeInput): ConflictInsight[] {
   const out: ConflictInsight[] = [];
-  const destinations = (input.destinations || []).filter(Boolean);
+  const destinations = Array.from(
+    new Set(
+      (input.destinations || [])
+        .map((x) => normalizeDestination(x || ""))
+        .filter((x) => x && isLikelyDestinationCandidate(x))
+    )
+  ).slice(0, 8);
   const limiting = input.limitingFactors || [];
   const hardLimiting = limiting.filter((x) => x.hard);
 
