@@ -203,6 +203,18 @@ const cases: Case[] = [
     },
   },
   {
+    name: "spoken phrase '一个人去米兰' should normalize to destination 米兰 only",
+    run: () => {
+      const s = extractIntentSignals(
+        "我想一个人去米兰玩三天，已经买了机票。4月10日到4月12日，4月13日离开，预算大概5000元人民币，酒店也订好了"
+      );
+      assert.deepEqual(s.destinations || [], ["米兰"]);
+      assert.equal(s.durationDays, 3);
+      const segCities = (s.cityDurations || []).map((x) => x.city);
+      assert.deepEqual(segCities, ["米兰"]);
+    },
+  },
+  {
     name: "duration should stay 3 days when later sentence has no new duration",
     run: () => {
       const merged = extractIntentSignalsWithRecency(

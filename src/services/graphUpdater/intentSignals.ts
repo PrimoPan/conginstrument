@@ -1255,6 +1255,15 @@ export function normalizeDestination(raw: string): string {
   let s = cleanStatement(raw, 24);
   s = s.replace(/^(在|于|到|去|从|飞到|前往|抵达)\s*/i, "");
   s = s.replace(/^(我想|想|想去|想到|想逛|逛一逛|逛逛|逛|游览|游玩|探索|体验|顺带|顺便|顺路|顺道)\s*/i, "");
+  s = s.replace(
+    /^(?:我|我们)?\s*(?:一个人|两个人|三个人|[0-9一二三四五六七八九十两]{1,2}\s*个?人|独自|单人|solo|一家[三四五六七八九十0-9]*口|全家)(?:一起)?\s*去\s*/i,
+    ""
+  );
+  s = s.replace(
+    /^(?:一个人|两个人|三个人|[0-9一二三四五六七八九十两]{1,2}\s*个?人|独自|单人|solo|一家[三四五六七八九十0-9]*口|全家)\s*/i,
+    ""
+  );
+  s = s.replace(/^(?:我|我们)\s*去\s*/i, "");
   s = s.replace(/^(的|在|于)\s*/i, "");
   s = s.replace(/(这座城市|这座城|这座|城市|城区|城)$/i, "");
   s = s.replace(/(之外|之内|以内|以内地区)$/i, "");
@@ -1303,6 +1312,8 @@ export function isLikelyDestinationCandidate(x: string): boolean {
   if (/(人民币|预算|经费|花费|费用|准备|打算|计划|安排|行程)/i.test(s)) return false;
   if (/[A-Za-z]/.test(s) && /[\u4e00-\u9fff]/.test(s)) return false;
   if (/^[A-Za-z]+$/.test(s) && s.length <= 2) return false;
+  if (/(一个人|两个人|三个人|[0-9一二三四五六七八九十两]{1,2}个?人|独自|单人|全家|一家)/i.test(s)) return false;
+  if (/^(?:我|我们)(?:去)?/.test(s)) return false;
   if (/(其中|其中有|其余|其他时候|海地区|该地区)/.test(s)) return false;
   if (s.endsWith("地区") && s.length <= 4) return false;
   if (/^(现场|现场观看|现场观赛|观看|观赏)$/.test(s)) return false;
