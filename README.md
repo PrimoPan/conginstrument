@@ -92,6 +92,7 @@ curl http://localhost:3001/healthz
 | `CI_WEATHER_MAX_DAYS` | 否 | `10` | 预报窗口上限（Open-Meteo 最多 16 天） |
 | `CI_WEATHER_GEO_ENDPOINT` | 否 | `https://geocoding-api.open-meteo.com/v1/search` | 天气地理编码 API |
 | `CI_WEATHER_FORECAST_ENDPOINT` | 否 | `https://api.open-meteo.com/v1/forecast` | 天气预报 API |
+| `CI_FX_<CCY>_TO_CNY` | 否 | 内置默认值 | 外币折算人民币汇率覆盖（用于“买80欧元”等支出扣减）。示例：`CI_FX_EUR_TO_CNY=8`、`CI_FX_USD_TO_CNY=7.2` |
 | `CORS_ALLOW_ALL` | 否 | `1` | 是否允许全部 Origin（`1`=允许，`0`=仅白名单） |
 | `CORS_ORIGINS` | 否 | 空 | CORS 白名单，逗号分隔，如 `http://localhost:3000,http://your.server:6688` |
 | `CI_ALLOW_DELETE` | 否 | `0` | 是否允许 remove_node/remove_edge |

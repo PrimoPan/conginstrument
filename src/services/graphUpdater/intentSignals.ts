@@ -708,6 +708,20 @@ function pickBudgetDeltaFromText(text: string): { delta: number; evidence: strin
       parser: (raw) => Number(parseBudgetAmountToken(raw) || 0),
     },
     {
+      re: /(?:又|再|另外|额外|追加|补充|增添了?|新增了?)\s*([0-9]+(?:\.[0-9]+)?)\s*万(?:元|人民币)?(?:预算|经费|花费|费用)?/gi,
+      sign: 1,
+      parser: (raw) => Math.round(Number(raw) * 10000),
+    },
+    {
+      re: /(?:又|再|另外|额外|追加|补充|增添了?|新增了?)\s*([0-9]{2,9})\s*(?:元|块|人民币)?(?:预算|经费|花费|费用)?/gi,
+      sign: 1,
+    },
+    {
+      re: /(?:又|再|另外|额外|追加|补充|增添了?|新增了?)\s*([0-9一二两三四五六七八九十百千万\.]{1,12}(?:万|千)[0-9一二两三四五六七八九十百千]{0,4}|[零一二两三四五六七八九十百千]{2,8})\s*(?:元|块|人民币)?(?:预算|经费|花费|费用)?/gi,
+      sign: 1,
+      parser: (raw) => Number(parseBudgetAmountToken(raw) || 0),
+    },
+    {
       re: /(?:再|又|额外|另外|追加|多给|增加了?|加了?|上调了?|提高了?|提升了?)\s*([0-9]+(?:\.[0-9]+)?)\s*万(?:元|人民币)?(?:预算|经费|花费|费用)?/gi,
       sign: 1,
       parser: (raw) => Math.round(Number(raw) * 10000),
@@ -766,6 +780,13 @@ function pickBudgetDeltaFromText(text: string): { delta: number; evidence: strin
 function pickBudgetSpentDeltaFromText(text: string): { delta: number; evidence: string } | null {
   const t = String(text || "").replace(/,/g, "");
   if (!t) return null;
+  const looksLikeQuestion = (ctx: string) => {
+    const s = cleanStatement(ctx, 140);
+    if (!s) return false;
+    const q = /[？?]|多少钱|多少欧|多少元|票价|价格|预算多少|贵吗|合适吗/.test(s);
+    const commit = /(那|就|确定|锁定|下单|付款|支付|买了?|订了?|定了?|我选|就选|就买|就定)/.test(s);
+    return q && !commit;
+  };
 
   const defs: Array<{ re: RegExp; parser?: (raw: string) => number }> = [
     {
@@ -785,6 +806,8 @@ function pickBudgetSpentDeltaFromText(text: string): { delta: number; evidence: 
       const value = def.parser ? def.parser(m[1]) : Number(m[1]);
       if (!Number.isFinite(value) || value <= 0) continue;
       const index = Number(m.index) || 0;
+      const near = t.slice(Math.max(0, index - 10), Math.min(t.length, index + 44));
+      if (looksLikeQuestion(near)) continue;
       const cand: BudgetDeltaMatch = {
         delta: Math.round(value),
         evidence: cleanStatement(m[0] || m[1], 48),
@@ -802,10 +825,69 @@ function pickBudgetSpentDeltaFromText(text: string): { delta: number; evidence: 
     const cny = fxToCny(amount, m[2]);
     if (!cny || cny <= 0) continue;
     const index = Number(m.index) || 0;
+    const near = t.slice(Math.max(0, index - 10), Math.min(t.length, index + 46));
+    if (looksLikeQuestion(near)) continue;
     const cand: BudgetDeltaMatch = {
       delta: Math.round(cny),
       evidence: cleanStatement(`${m[0]}（约${Math.round(cny)}元）`, 64),
       index,
+    };
+    if (!best || cand.index >= best.index) best = cand;
+  }
+
+  const commitmentSpendRe =
+    /(?:那|就|我|我们|先|决定|确定|最终|直接)?\s*(?:买|买了|购买|订|订了|定了|下单|支付|付款|付了?|选|就选|就买|就定|锁定)(?:了)?[^\n，。,；;]{0,16}?([0-9一二两三四五六七八九十百千万\.]{1,14}(?:万|千)?[0-9一二两三四五六七八九十百千]{0,6}|[0-9]{2,9})\s*(欧元|eur|€|美元|usd|\$|英镑|gbp|£|港币|港元|hkd|日元|jpy|yen|円|元|块|人民币|rmb|cny)/gi;
+  for (const m of t.matchAll(commitmentSpendRe)) {
+    if (!m?.[1] || !m?.[2]) continue;
+    const idx = Number(m.index) || 0;
+    const near = t.slice(Math.max(0, idx - 12), Math.min(t.length, idx + 52));
+    if (looksLikeQuestion(near)) continue;
+    const token = m[1];
+    const unit = m[2];
+    let cny = Number(parseBudgetAmountToken(token) || 0);
+    if (!cny || cny <= 0) continue;
+    if (!/(元|块|人民币|rmb|cny)/i.test(unit)) {
+      const fxCny = fxToCny(cny, unit);
+      if (!fxCny || fxCny <= 0) continue;
+      cny = fxCny;
+    }
+    const cand: BudgetDeltaMatch = {
+      delta: Math.round(cny),
+      evidence: cleanStatement(
+        /(元|块|人民币|rmb|cny)/i.test(unit)
+          ? `${m[0]}`
+          : `${m[0]}（约${Math.round(cny)}元）`,
+        64
+      ),
+      index: idx,
+    };
+    if (!best || cand.index >= best.index) best = cand;
+  }
+  const categoryCommittedBudgetRe =
+    /(?:酒店|住宿|球票|门票|比赛|看球|观赛|购物|买包|买鞋|餐饮|吃饭|交通|打车|地铁|火车|演出|活动|导游)[^\n，。,；;]{0,10}?(?:预算|费用|花费|开销|成本)?[^\n，。,；;]{0,6}?(?:定在|控制在|锁定|确定|就按|按|定为)\s*([0-9一二两三四五六七八九十百千万\.]{1,14}(?:万|千)?[0-9一二两三四五六七八九十百千]{0,6}|[0-9]{2,9})\s*(欧元|eur|€|美元|usd|\$|英镑|gbp|£|港币|港元|hkd|日元|jpy|yen|円|元|块|人民币|rmb|cny)/gi;
+  for (const m of t.matchAll(categoryCommittedBudgetRe)) {
+    if (!m?.[1] || !m?.[2]) continue;
+    const idx = Number(m.index) || 0;
+    const near = t.slice(Math.max(0, idx - 12), Math.min(t.length, idx + 56));
+    if (looksLikeQuestion(near)) continue;
+    const token = m[1];
+    const unit = m[2];
+    let cny = Number(parseBudgetAmountToken(token) || 0);
+    if (!cny || cny <= 0) continue;
+    if (!/(元|块|人民币|rmb|cny)/i.test(unit)) {
+      const fxCny = fxToCny(cny, unit);
+      if (!fxCny || fxCny <= 0) continue;
+      cny = fxCny;
+    }
+    const cand: BudgetDeltaMatch = {
+      delta: Math.round(cny),
+      evidence: cleanStatement(
+        /(元|块|人民币|rmb|cny)/i.test(unit)
+          ? `${m[0]}`
+          : `${m[0]}（约${Math.round(cny)}元）`,
+        64
+      ),
+      index: idx,
     };
     if (!best || cand.index >= best.index) best = cand;
   }
@@ -2141,12 +2223,16 @@ export function extractIntentSignals(userText: string, opts?: { historyMode?: bo
 
   const budget = pickBudgetFromText(text);
   if (budget) {
+    const hasAbsoluteBudgetCue = /(?:总预算|预算上限|预算总额|一共|总共|合计|总计|现在预算|预算变成|预算为|预算是|调整为|改成|改到|调到|提高到|增加到|提升到|上调到|下调到|达到|控制在|不超过|上限为|上限是)/i.test(
+      text
+    );
     const hasOnlyDeltaCue =
       !!budgetDelta &&
-      !/(总预算|预算上限|一共|总共|合计|总计|现在预算|预算变成|预算为|调整为|改成|改到|调到|提高到|增加到|提升到|上调到|下调到|达到)/i.test(
-        text
-      );
-    if (!hasOnlyDeltaCue) {
+      !hasAbsoluteBudgetCue;
+    const hasSpentCommitmentOnlyCue =
+      !!budgetSpentDelta &&
+      !hasAbsoluteBudgetCue;
+    if (!hasOnlyDeltaCue && !hasSpentCommitmentOnlyCue) {
       out.budgetCny = budget.value;
       out.budgetEvidence = budget.evidence;
     }

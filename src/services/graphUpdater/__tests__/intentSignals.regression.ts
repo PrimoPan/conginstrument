@@ -61,6 +61,16 @@ const cases: Case[] = [
     },
   },
   {
+    name: "budget delta colloquial phrase: 增添了5000预算",
+    run: () => {
+      const merged = extractIntentSignalsWithRecency(
+        "我预算5000元",
+        "我父亲又跟我增添了5000预算"
+      );
+      assert.equal(merged.budgetCny, 10000);
+    },
+  },
+  {
     name: "budget spent absolute should be parsed",
     run: () => {
       const s = extractIntentSignals("我酒店已经花了3000元");
@@ -117,6 +127,37 @@ const cases: Case[] = [
         if (prevRate == null) delete process.env.CI_FX_EUR_TO_CNY;
         else process.env.CI_FX_EUR_TO_CNY = prevRate;
       }
+    },
+  },
+  {
+    name: "question-like foreign price should not be treated as spent commitment",
+    run: () => {
+      const prevRate = process.env.CI_FX_EUR_TO_CNY;
+      process.env.CI_FX_EUR_TO_CNY = "8";
+      try {
+        const merged = extractIntentSignalsWithRecency(
+          "总预算10000元",
+          "球票80欧元可以吗？"
+        );
+        assert.equal(merged.budgetCny, 10000);
+        assert.equal(merged.budgetSpentCny, undefined);
+        assert.equal(merged.budgetRemainingCny, undefined);
+      } finally {
+        if (prevRate == null) delete process.env.CI_FX_EUR_TO_CNY;
+        else process.env.CI_FX_EUR_TO_CNY = prevRate;
+      }
+    },
+  },
+  {
+    name: "category committed budget should be deducted from remaining",
+    run: () => {
+      const merged = extractIntentSignalsWithRecency(
+        "总预算10000元",
+        "酒店预算就按3000元定在市中心"
+      );
+      assert.equal(merged.budgetCny, 10000);
+      assert.equal(merged.budgetSpentCny, 3000);
+      assert.equal(merged.budgetRemainingCny, 7000);
     },
   },
   {
