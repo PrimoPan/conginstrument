@@ -25,6 +25,11 @@ function slug(input: string): string {
 function canonicalCity(raw: string): string {
   let s = normalizeDestination(raw || "");
   if (!s) return "";
+  s = s
+    .replace(/^(?:我(?:和[^，。；\s]{0,8})?|我们(?:一家[三四五六七八九十]口)?|一个人|独自|自己|和父母|跟父母|带父母|陪父母|与父母|父母|家人|全家)\s*(?:去|到|前往|飞到|抵达)\s*/i, "")
+    .replace(/^(?:去|到|前往|飞到|抵达)\s*/i, "")
+    .replace(/(?:旅游|旅行|游玩|玩|出行)$/i, "")
+    .trim();
   s = s.replace(/(前|后)\s*[0-9一二三四五六七八九十两]{0,2}\s*天?$/i, "").trim();
   s = s.replace(/^(在|于|去|到|前往|飞到|抵达)\s*/i, "").trim();
   s = s.replace(/^的+/, "").replace(/的+$/g, "");

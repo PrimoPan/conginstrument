@@ -32,6 +32,8 @@ export type ConflictAnalyzeInput = {
 
 const LUXURY_LODGING_RE = /五星|豪华|高档|奢华|五星级|luxury|five\s*star/i;
 const HIGH_INTENSITY_SCENIC_RE = /徒步|爬山|登山|高强度|长距离|暴走|越野|探险|hiking|trekking/i;
+const DESTINATION_NOISE_RE =
+  /(一个人|独自|自己|我们|我和|父母|家人|全家|去|前往|抵达|飞到|旅游|旅行|游玩|玩|现场观看|看球|比赛|球赛|预算|人民币|安全一点|地方吧)/i;
 
 function clamp01(x: any, fallback = 0.72) {
   const n = Number(x);
@@ -50,13 +52,27 @@ function dedupeConflicts(items: ConflictInsight[]): ConflictInsight[] {
   return Array.from(out.values());
 }
 
+function normalizeDestinationForConflict(raw: string): string {
+  let s = normalizeDestination(raw || "");
+  if (!s) return "";
+  s = s
+    .replace(/^(?:我(?:和[^，。；\s]{0,8})?|我们(?:一家[三四五六七八九十]口)?|一个人|独自|自己|和父母|跟父母|带父母|陪父母|与父母|父母|家人|全家)\s*(?:去|到|前往|飞到|抵达)\s*/i, "")
+    .replace(/^(?:去|到|前往|飞到|抵达)\s*/i, "")
+    .replace(/(?:旅游|旅行|游玩|玩|出行)$/i, "")
+    .trim();
+  s = normalizeDestination(s);
+  if (!s || DESTINATION_NOISE_RE.test(s)) return "";
+  if (!isLikelyDestinationCandidate(s)) return "";
+  return s;
+}
+
 export function analyzeConstraintConflicts(input: ConflictAnalyzeInput): ConflictInsight[] {
   const out: ConflictInsight[] = [];
   const destinations = Array.from(
     new Set(
       (input.destinations || [])
-        .map((x) => normalizeDestination(x || ""))
-        .filter((x) => x && isLikelyDestinationCandidate(x))
+        .map((x) => normalizeDestinationForConflict(x || ""))
+        .filter(Boolean)
     )
   ).slice(0, 8);
   const limiting = input.limitingFactors || [];

@@ -133,7 +133,12 @@ export async function renderTravelPlanPdf(params: {
   } else {
     for (const d of plan.dayPlans) {
       doc.moveDown(0.3);
-      doc.fontSize(12).fillColor("#0f172a").text(`第${d.day}天${d.city ? `（${d.city}）` : ""}：${d.title || "行程"}`, {
+      const datePart = d.dateLabel
+        ? `（${d.dateLabel}${d.city ? `，${d.city}` : ""}）`
+        : d.city
+          ? `（${d.city}）`
+          : "";
+      doc.fontSize(12).fillColor("#0f172a").text(`第${d.day}天${datePart}：${d.title || "行程"}`, {
         lineGap: 2,
       });
       for (const item of d.items || []) {
@@ -142,7 +147,12 @@ export async function renderTravelPlanPdf(params: {
     }
   }
 
-  sectionTitle(doc, "自然语言版本");
+  if (plan.narrativeText) {
+    sectionTitle(doc, "详细旅行建议");
+    doc.fontSize(10.5).fillColor("#111827").text(plan.narrativeText, { lineGap: 3 });
+  }
+
+  sectionTitle(doc, "文本版本");
   doc.fontSize(10.5).fillColor("#111827").text(text, { lineGap: 3 });
 
   doc.end();

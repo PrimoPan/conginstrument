@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import {
   extractIntentSignals,
   extractIntentSignalsWithRecency,
+  mergeIntentSignals,
 } from "../intentSignals.js";
 import { analyzeConstraintConflicts } from "../conflictAnalyzer.js";
 
@@ -296,6 +297,33 @@ const cases: Case[] = [
         destinations: s.destinations,
       });
       assert.equal(conflicts.some((x) => x.key === "duration_destination_density"), false);
+    },
+  },
+  {
+    name: "noise destination phrase should not trigger duration-destination conflict",
+    run: () => {
+      const conflicts = analyzeConstraintConflicts({
+        totalDays: 3,
+        destinations: ["米兰", "一个人去米兰"],
+      });
+      assert.equal(conflicts.some((x) => x.key === "duration_destination_density"), false);
+    },
+  },
+  {
+    name: "history budget delta should not be re-applied when merged with function-slot budget",
+    run: () => {
+      const textSignals = extractIntentSignalsWithRecency(
+        [
+          "我想去米兰旅行3天，预算10000元",
+          "我父亲又给了我5000预算",
+        ].join("\n"),
+        "那我买一张150欧元的票吧"
+      );
+      const merged = mergeIntentSignals(
+        { budgetCny: 15000, budgetEvidence: "function-slot" },
+        textSignals
+      );
+      assert.equal(merged.budgetCny, 15000);
     },
   },
   {

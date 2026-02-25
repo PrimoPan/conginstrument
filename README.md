@@ -828,6 +828,13 @@ src/services/llm.ts          # turn orchestration
 - 预算结构：`totalCny / spentCny / remainingCny`
 - 总天数 `totalDays`
 - 关键约束 `constraints[]`
-- 按天行程 `dayPlans[]`
+- 按天行程 `dayPlans[]`（支持 `dateLabel`，例如 `4月10日`）
+- 详细自然语言计划 `narrativeText`（优先选取“按天行程信息最完整”的 assistant 回答）
 
 该结构用于导出 PDF 与后续“基于当前计划继续建议”，默认不在主对话界面完整展示。
+
+补充说明（2026-02）：
+
+- 预算增量（如“又给我5000预算”）按“事件”处理，不会在后续轮次重复叠加。
+- 目的地清洗会过滤“一个人去米兰/去XX旅游”等短语噪声，避免触发伪冲突提示。
+- PDF 导出优先展示可执行自然语言方案与按天细节，不再依赖模板化占位行程。

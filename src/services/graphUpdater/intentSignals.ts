@@ -694,6 +694,15 @@ function pickBudgetDeltaFromText(text: string): { delta: number; evidence: strin
     parser?: (raw: string) => number;
   }> = [
     {
+      re: /(?:又|再|另外|额外|追加|补充)?\s*(?:父亲|母亲|家人|朋友|老板|公司)?\s*(?:又)?\s*(?:给了?|给到|给|跟我)\s*(?:我|我们)?\s*(?:增添了?|新增了?|增加了?|加了?)\s*([0-9]+(?:\.[0-9]+)?)\s*万(?:元|人民币)?(?:的)?(?:预算|经费|花费|费用)?/gi,
+      sign: 1,
+      parser: (raw) => Math.round(Number(raw) * 10000),
+    },
+    {
+      re: /(?:又|再|另外|额外|追加|补充)?\s*(?:父亲|母亲|家人|朋友|老板|公司)?\s*(?:又)?\s*(?:给了?|给到|给|跟我)\s*(?:我|我们)?\s*(?:增添了?|新增了?|增加了?|加了?)\s*([0-9]{2,9})\s*(?:元|块|人民币)?(?:的)?(?:预算|经费|花费|费用)?/gi,
+      sign: 1,
+    },
+    {
       re: /(?:又|再|另外|额外|追加|补充)\s*(?:给了?|给到|给)\s*(?:我|我们)?\s*([0-9]+(?:\.[0-9]+)?)\s*万(?:元|人民币)?(?:的)?(?:预算|经费|花费|费用)/gi,
       sign: 1,
       parser: (raw) => Math.round(Number(raw) * 10000),
@@ -2324,6 +2333,9 @@ export function extractIntentSignals(userText: string, opts?: { historyMode?: bo
 
 function mergeSignalsWithLatest(history: IntentSignals, latest: IntentSignals): IntentSignals {
   const out: IntentSignals = { ...history };
+  // delta 是“事件”，不是“状态”：避免历史增量在后续轮次被重复叠加。
+  out.budgetDeltaCny = undefined;
+  out.budgetSpentDeltaCny = undefined;
   out.hasTemporalAnchor = !!history.hasTemporalAnchor;
   out.hasDurationUpdateCue = !!history.hasDurationUpdateCue;
   out.hasExplicitTotalCue = !!history.hasExplicitTotalCue;
