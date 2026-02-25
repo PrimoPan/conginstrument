@@ -48,6 +48,7 @@ export async function generateTurn(params: {
   graph: CDG;
   userText: string;
   recentTurns: Array<{ role: "user" | "assistant"; content: string }>;
+  stateContextUserTurns?: string[];
   systemPrompt?: string;
 }): Promise<{ assistant_text: string; graph_patch: GraphPatch }> {
   const safeRecent = normalizeRecentTurns(params.recentTurns);
@@ -79,6 +80,7 @@ export async function generateTurn(params: {
       graph: params.graph,
       userText: params.userText,
       recentTurns: safeRecent,
+      stateContextUserTurns: params.stateContextUserTurns || [],
       assistantText: assistant_text,
       systemPrompt: params.systemPrompt,
     });
@@ -95,6 +97,7 @@ export async function generateTurnStreaming(params: {
   graph: CDG;
   userText: string;
   recentTurns: Array<{ role: "user" | "assistant"; content: string }>;
+  stateContextUserTurns?: string[];
   systemPrompt?: string;
   onToken: (token: string) => void;
   signal?: AbortSignal;
@@ -140,6 +143,7 @@ export async function generateTurnStreaming(params: {
       graph: params.graph,
       userText: params.userText,
       recentTurns: safeRecent,
+      stateContextUserTurns: params.stateContextUserTurns || [],
       assistantText: assistant_text,
       systemPrompt: params.systemPrompt,
     });

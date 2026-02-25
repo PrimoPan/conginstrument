@@ -3,7 +3,7 @@ import { fileURLToPath } from "node:url";
 import PDFDocument from "pdfkit";
 
 import { config } from "../../server/config.js";
-import { buildTravelPlanText, type TravelPlanState } from "./state.js";
+import { type TravelPlanState } from "./state.js";
 
 const BUNDLED_CJK_FONT = fileURLToPath(
   new URL("../../../assets/fonts/NotoSansSC-chinese-simplified-400.woff", import.meta.url)
@@ -25,11 +25,14 @@ const FONT_CANDIDATES = [
   "/Library/Fonts/Arial Unicode.ttf",
 ].filter(Boolean);
 
+const FONT_EXT_ALLOWED_RE = /\.(ttf|otf|ttc)$/i;
+
 function listExistingFontPaths(): string[] {
   const out: string[] = [];
   for (const p of FONT_CANDIDATES) {
     try {
-      if (p && fs.existsSync(p) && fs.statSync(p).isFile()) out.push(p);
+      if (!p || !FONT_EXT_ALLOWED_RE.test(p)) continue;
+      if (fs.existsSync(p) && fs.statSync(p).isFile()) out.push(p);
     } catch {
       // ignore
     }
@@ -40,12 +43,12 @@ function listExistingFontPaths(): string[] {
 function applyChineseFont(doc: PDFKit.PDFDocument): string | null {
   const files = listExistingFontPaths();
   if (!files.length) return null;
-  // 优先尝试 woff/ttf/otf，避免部分 ttc 在 pdfkit 子集化阶段报错导致 PDF 损坏/导出失败。
+  // 只使用 ttf/otf/ttc，避免 woff 在部分 PDF 阅读器出现乱码。
   const prefer = files
     .slice()
     .sort((a, b) => {
       const rank = (x: string) =>
-        /\.woff2?$/i.test(x) ? 0 : /\.ttf$/i.test(x) ? 1 : /\.otf$/i.test(x) ? 2 : /\.ttc$/i.test(x) ? 3 : 4;
+        /\.ttf$/i.test(x) ? 0 : /\.otf$/i.test(x) ? 1 : /\.ttc$/i.test(x) ? 2 : 3;
       return rank(a) - rank(b);
     });
   for (const p of prefer) {
@@ -65,12 +68,15 @@ function sectionTitle(doc: PDFKit.PDFDocument, text: string) {
   doc.moveDown(0.2);
 }
 
+function hasDayStructuredText(text: string): boolean {
+  return /第\s*[一二三四五六七八九十两0-9]{1,3}\s*天|day\s*[0-9]{1,2}/i.test(String(text || ""));
+}
+
 export async function renderTravelPlanPdf(params: {
   plan: TravelPlanState;
   conversationId: string;
 }): Promise<Buffer> {
   const plan = params.plan;
-  const text = buildTravelPlanText(plan);
 
   const doc = new PDFDocument({
     size: "A4",
@@ -118,17 +124,17 @@ export async function renderTravelPlanPdf(params: {
     if (plan.budget.totalCny != null) doc.fontSize(11).fillColor("#111827").text(`总预算：${plan.budget.totalCny}元`, { lineGap: 2 });
     if (plan.budget.spentCny != null) doc.fontSize(11).fillColor("#111827").text(`已花预算：${plan.budget.spentCny}元`, { lineGap: 2 });
     if (plan.budget.remainingCny != null) doc.fontSize(11).fillColor("#111827").text(`剩余预算：${plan.budget.remainingCny}元`, { lineGap: 2 });
-  }
-
-  if (plan.constraints?.length) {
-    sectionTitle(doc, "关键约束");
-    for (const c of plan.constraints.slice(0, 12)) {
-      doc.fontSize(11).fillColor("#111827").text(`• ${c}`, { lineGap: 2 });
+    if (plan.budget.pendingCny != null && plan.budget.pendingCny > 0) {
+      doc.fontSize(11).fillColor("#92400e").text(`待确认支出：${plan.budget.pendingCny}元`, { lineGap: 2 });
     }
   }
 
-  sectionTitle(doc, "按天行程");
-  if (!plan.dayPlans?.length) {
+  sectionTitle(doc, "可执行行程");
+  const executableText = String(plan.exportNarrative || plan.narrativeText || "").trim();
+  const narrativeContainsDays = hasDayStructuredText(executableText);
+  if (narrativeContainsDays && executableText.length > 40) {
+    doc.fontSize(10.8).fillColor("#111827").text(executableText, { lineGap: 3 });
+  } else if (!plan.dayPlans?.length) {
     doc.fontSize(11).fillColor("#111827").text("暂无按天计划，请继续对话补全。", { lineGap: 3 });
   } else {
     for (const d of plan.dayPlans) {
@@ -147,13 +153,32 @@ export async function renderTravelPlanPdf(params: {
     }
   }
 
-  if (plan.narrativeText) {
-    sectionTitle(doc, "详细旅行建议");
-    doc.fontSize(10.5).fillColor("#111827").text(plan.narrativeText, { lineGap: 3 });
+  if (plan.budgetLedger?.length) {
+    sectionTitle(doc, "预算台账（事件流）");
+    const events = plan.budgetLedger.slice(-20);
+    for (const ev of events) {
+      const amountPart = ev.amountCny != null ? `${ev.amountCny}元` : "待确认";
+      const line = `• [${ev.type}] ${amountPart} 证据：${ev.evidence}`;
+      doc.fontSize(10.5).fillColor("#111827").text(line, { lineGap: 2 });
+    }
   }
 
-  sectionTitle(doc, "文本版本");
-  doc.fontSize(10.5).fillColor("#111827").text(text, { lineGap: 3 });
+  if (plan.constraints?.length) {
+    sectionTitle(doc, "关键约束");
+    for (const c of plan.constraints.slice(0, 12)) {
+      doc.fontSize(11).fillColor("#111827").text(`• ${c}`, { lineGap: 2 });
+    }
+  }
+
+  if (plan.evidenceAppendix?.length) {
+    sectionTitle(doc, "附录（证据片段）");
+    for (const e of plan.evidenceAppendix.slice(0, 20)) {
+      doc
+        .fontSize(10)
+        .fillColor("#334155")
+        .text(`• [${e.source}] ${e.title}：${e.content}`, { lineGap: 2 });
+    }
+  }
 
   doc.end();
   return done;

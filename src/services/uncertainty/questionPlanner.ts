@@ -155,6 +155,49 @@ function normalizeForMatch(s: string): string {
   return cleanText(s, 400).toLowerCase().replace(/\s+/g, "");
 }
 
+function hasHardnessDecision(text: string): boolean {
+  return /(硬约束|可协商偏好|可协商|软约束|偏好|不是硬约束)/i.test(cleanText(text, 200));
+}
+
+function normalizeLimitingStatement(statement: string): string {
+  return cleanText(statement || "", 120)
+    .replace(/^限制因素[:：]\s*/i, "")
+    .replace(/^“|”$/g, "")
+    .trim();
+}
+
+function isLimitingFactorResolved(
+  target: UncertaintyTarget,
+  recentTurns: Array<{ role: "user" | "assistant"; content: string }>
+): boolean {
+  const phrase = normalizeLimitingStatement(target.statement);
+  if (!phrase) return false;
+
+  const recentUsers = (recentTurns || [])
+    .filter((x) => x.role === "user")
+    .slice(-8)
+    .map((x) => cleanText(x.content || "", 240))
+    .filter(Boolean);
+  const recentAssistants = (recentTurns || [])
+    .filter((x) => x.role === "assistant")
+    .slice(-6)
+    .map((x) => cleanText(x.content || "", 240))
+    .filter(Boolean);
+
+  const explicitByPhrase = recentUsers.some(
+    (u) => hasHardnessDecision(u) && (u.includes(phrase) || phrase.includes(cleanText(u, 40)))
+  );
+  if (explicitByPhrase) return true;
+
+  const askedRecently = recentAssistants.some(
+    (a) => /限制因素/.test(a) && (a.includes(phrase) || phrase.includes(cleanText(a, 40)))
+  );
+  const lastUser = recentUsers[recentUsers.length - 1] || "";
+  if (askedRecently && hasHardnessDecision(lastUser)) return true;
+
+  return false;
+}
+
 function wasAskedRecently(question: string, recentTurns: Array<{ role: "user" | "assistant"; content: string }>): boolean {
   const q = normalizeForMatch(question);
   if (!q) return false;
@@ -248,15 +291,18 @@ export function planUncertaintyQuestion(params: {
   }
 
   const sorted = candidates.sort((a, b) => b.score - a.score).slice(0, 6);
+  const unresolvedSorted = sorted.filter(
+    (x) => !(x.slotFamily === "limiting_factor" && isLimitingFactorResolved(x, params.recentTurns))
+  );
   let pickedQuestion: string | null = null;
-  for (const c of sorted) {
+  for (const c of unresolvedSorted) {
     const q = questionForTarget(c, slots);
     if (!wasAskedRecently(q, params.recentTurns)) {
       pickedQuestion = q;
       break;
     }
   }
-  if (!pickedQuestion && sorted.length) pickedQuestion = questionForTarget(sorted[0], slots);
+  if (!pickedQuestion && unresolvedSorted.length) pickedQuestion = questionForTarget(unresolvedSorted[0], slots);
 
   const rationale = sorted.length
     ? sorted

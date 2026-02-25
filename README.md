@@ -95,10 +95,10 @@ curl http://localhost:3001/healthz
 | `CI_FX_<CCY>_TO_CNY` | 否 | 内置默认值 | 外币折算人民币汇率覆盖（用于“买80欧元”等支出扣减）。示例：`CI_FX_EUR_TO_CNY=8`、`CI_FX_USD_TO_CNY=7.2` |
 | `CORS_ALLOW_ALL` | 否 | `1` | 是否允许全部 Origin（`1`=允许，`0`=仅白名单） |
 | `CORS_ORIGINS` | 否 | 空 | CORS 白名单，逗号分隔，如 `http://localhost:3000,http://your.server:6688` |
-| `CI_ALLOW_DELETE` | 否 | `0` | 是否允许 remove_node/remove_edge |
+| `CI_ALLOW_DELETE` | 否 | `1` | 是否允许 remove_node/remove_edge（默认开启，用于清理旧噪声 slot 节点与边；可设 `0` 禁用） |
 | `CI_DEBUG_LLM` | 否 | `0` | LLM 与 patch 调试日志 |
 | `CI_DATE_RANGE_BOUNDARY_MODE` | 否 | `auto` | 日期跨度边界策略：`auto`（会议偏 exclusive，旅游偏 inclusive）/`inclusive`/`exclusive` |
-| `CI_PDF_FONT_PATH` | 否 | 空 | PDF 导出中文字体路径（最高优先级）。未设置时默认使用仓库内置字体 `assets/fonts/NotoSansSC-chinese-simplified-400.woff`；若内置文件缺失会返回导出错误（避免生成乱码 PDF） |
+| `CI_PDF_FONT_PATH` | 否 | 空 | PDF 导出中文字体路径（最高优先级，建议 `.ttf/.otf/.ttc`）。系统会自动探测 Noto/WenQuanYi/PingFang 等字体；若无可用 CJK 字体会返回错误（避免乱码 PDF） |
 
 ---
 
@@ -825,11 +825,15 @@ src/services/llm.ts          # turn orchestration
 
 - 摘要 `summary`
 - 目的地 `destinations[]`
-- 预算结构：`totalCny / spentCny / remainingCny`
+- 预算结构：`totalCny / spentCny / remainingCny / pendingCny`
+- 预算账本：`budgetLedger[]`（`budget_set / budget_adjust / expense_commit / expense_refund / expense_pending`）
+- 预算汇总：`budgetSummary`
 - 总天数 `totalDays`
 - 关键约束 `constraints[]`
 - 按天行程 `dayPlans[]`（支持 `dateLabel`，例如 `4月10日`）
 - 详细自然语言计划 `narrativeText`（优先选取“按天行程信息最完整”的 assistant 回答）
+- 导出自然语言 `exportNarrative`（去重、去确认问句、优先可执行行程）
+- 证据附录 `evidenceAppendix[]`
 
 该结构用于导出 PDF 与后续“基于当前计划继续建议”，默认不在主对话界面完整展示。
 

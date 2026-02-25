@@ -15,6 +15,7 @@ import { sanitizeIntentSignals } from "./graphUpdater/signalSanitizer.js";
 import { cleanStatement, mergeTextSegments } from "./graphUpdater/text.js";
 import { makeTempId } from "./graphUpdater/common.js";
 import { enrichPatchWithMotifFoundation } from "./motif/motifGrounding.js";
+import { buildBudgetLedgerFromUserTurns } from "./travelPlan/budgetLedger.js";
 
 const DEBUG = process.env.CI_DEBUG_LLM === "1";
 function dlog(...args: any[]) {
@@ -134,13 +135,19 @@ async function buildSignals(params: {
   graph: CDG;
   userText: string;
   recentTurns: Array<{ role: "user" | "assistant"; content: string }>;
+  stateContextUserTurns?: string[];
   systemPrompt?: string;
 }): Promise<IntentSignals> {
   const recentTurns = params.recentTurns || [];
-  const recentUserTexts = recentTurns
+  const fallbackRecentUserTexts = recentTurns
     .filter((t) => t.role === "user")
     .map((t) => String(t.content || ""))
     .slice(-8);
+  const stateContextUserTurns = (params.stateContextUserTurns || [])
+    .map((x) => String(x || "").trim())
+    .filter(Boolean)
+    .slice(-160);
+  const recentUserTexts = stateContextUserTurns.length ? stateContextUserTurns : fallbackRecentUserTexts;
   const historyUserTexts = recentUserTexts.slice();
   const tailTurn = recentTurns[recentTurns.length - 1];
   if (
@@ -152,8 +159,7 @@ async function buildSignals(params: {
     historyUserTexts.pop();
   }
 
-  const historyUserText = mergeTextSegments(historyUserTexts);
-  const signalText = mergeTextSegments([...historyUserTexts, params.userText]);
+  const signalText = mergeTextSegments([...historyUserTexts.slice(-16), params.userText]);
 
   // 按轮次顺序累计历史信号，避免把历史增量（例如“再加5000预算”）在后续轮次重复累计。
   let accumulatedHistorySignals: IntentSignals = {};
@@ -210,6 +216,36 @@ async function buildSignals(params: {
 
   signals = sanitizeIntentSignals(signals);
 
+  const budgetLedger = buildBudgetLedgerFromUserTurns(
+    [...historyUserTexts, params.userText].map((text, i) => ({
+      text,
+      turnId: `u_${i + 1}`,
+    }))
+  );
+  if (budgetLedger.summary.totalCny != null) {
+    signals.budgetCny = Math.max(100, Math.round(Number(budgetLedger.summary.totalCny)));
+    signals.budgetEvidence =
+      budgetLedger.latestTotalEvidence || signals.budgetEvidence || `${signals.budgetCny}元`;
+    signals.budgetImportance = Math.max(Number(signals.budgetImportance) || 0, 0.9);
+  }
+  if (budgetLedger.summary.spentCny > 0) {
+    signals.budgetSpentCny = Math.max(0, Math.round(Number(budgetLedger.summary.spentCny)));
+    signals.budgetSpentEvidence =
+      budgetLedger.latestSpentEvidence || signals.budgetSpentEvidence || `${signals.budgetSpentCny}元`;
+    signals.budgetImportance = Math.max(Number(signals.budgetImportance) || 0, 0.88);
+  }
+  if (budgetLedger.summary.remainingCny != null) {
+    signals.budgetRemainingCny = Math.max(0, Math.round(Number(budgetLedger.summary.remainingCny)));
+  }
+  if (budgetLedger.summary.pendingCny > 0) {
+    signals.budgetPendingCny = Math.max(0, Math.round(Number(budgetLedger.summary.pendingCny)));
+    signals.budgetPendingEvidence =
+      budgetLedger.latestPendingEvidence || signals.budgetPendingEvidence || `${signals.budgetPendingCny}元`;
+  } else {
+    signals.budgetPendingCny = undefined;
+    signals.budgetPendingEvidence = undefined;
+  }
+
   const canonicalIntent = buildTravelIntentStatement(signals, signalText);
   if (canonicalIntent && !signals.destinationEvidence) {
     signals.destinationEvidence = canonicalIntent;
@@ -221,6 +257,7 @@ export async function generateGraphPatch(params: {
   graph: CDG;
   userText: string;
   recentTurns: Array<{ role: "user" | "assistant"; content: string }>;
+  stateContextUserTurns?: string[];
   assistantText: string;
   systemPrompt?: string;
 }): Promise<GraphPatch> {

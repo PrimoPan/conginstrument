@@ -97,8 +97,10 @@ export type IntentSignals = {
   budgetSpentCny?: number;
   budgetSpentDeltaCny?: number;
   budgetRemainingCny?: number;
+  budgetPendingCny?: number;
   budgetEvidence?: string;
   budgetSpentEvidence?: string;
+  budgetPendingEvidence?: string;
   budgetImportance?: number;
   healthConstraint?: string;
   healthEvidence?: string;
@@ -2616,6 +2618,12 @@ function mergeSignalsWithLatest(history: IntentSignals, latest: IntentSignals): 
     out.budgetRemainingCny = Math.max(0, Math.round(Number(out.budgetCny) - Number(out.budgetSpentCny)));
   } else if (latest.budgetRemainingCny != null) {
     out.budgetRemainingCny = Math.max(0, Math.round(Number(latest.budgetRemainingCny)));
+  }
+  if (latest.budgetPendingCny != null) {
+    out.budgetPendingCny = Math.max(0, Math.round(Number(latest.budgetPendingCny)));
+  }
+  if (latest.budgetPendingEvidence) {
+    out.budgetPendingEvidence = latest.budgetPendingEvidence;
   }
   if (latest.budgetImportance != null) {
     out.budgetImportance = clampImportance(

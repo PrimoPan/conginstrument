@@ -482,6 +482,7 @@ export function buildSlotStateMachine(params: {
   let peopleSlotKey: string | null = null;
   let budgetSlotKey: string | null = null;
   let budgetSpentSlotKey: string | null = null;
+  let budgetPendingSlotKey: string | null = null;
   let durationTotalSlotKey: string | null = null;
   let lodgingSlotKey: string | null = null;
   let scenicSlotKey: string | null = null;
@@ -726,6 +727,34 @@ export function buildSlotStateMachine(params: {
       pushEdge(edges, "slot:budget_spent", "slot:goal", "determine", 0.86);
     }
   }
+  if (params.signals.budgetPendingCny != null) {
+    const pending = Number(params.signals.budgetPendingCny);
+    const normalizedPending = Number.isFinite(pending) && pending > 0 ? Math.round(pending) : 0;
+    if (normalizedPending > 0) {
+      const pendingImportance = clamp01(params.signals.budgetImportance, 0.7);
+      nodes.push({
+        slotKey: "slot:budget_pending",
+        type: "constraint",
+        layer: "requirement",
+        strength: "soft",
+        statement: `待确认预算: ${normalizedPending}元`,
+        confidence: 0.8,
+        importance: pendingImportance,
+        tags: ["budget", "pending"],
+        evidenceIds: [params.signals.budgetPendingEvidence || `${normalizedPending}元`].filter(Boolean),
+        sourceMsgIds: ["latest_user"],
+        key: "slot:budget_pending",
+        motifType: "hypothesis",
+        claim: `待确认支出约${normalizedPending}元`,
+        evidence: motifEvidence(params.signals.budgetPendingEvidence || `${normalizedPending}元`),
+        linkedIntentIds: ["slot:goal"],
+        revisionHistory: [{ at: now, action: "updated", by: "system", reason: "slot_state_machine" }],
+        priority: pendingImportance,
+      });
+      budgetPendingSlotKey = "slot:budget_pending";
+      pushEdge(edges, "slot:budget_pending", "slot:goal", "determine", 0.76);
+    }
+  }
 
   const totalBudgetForRemaining =
     Number.isFinite(Number(params.signals.budgetCny)) && Number(params.signals.budgetCny) > 0
@@ -777,6 +806,7 @@ export function buildSlotStateMachine(params: {
     pushEdge(edges, "slot:budget_remaining", "slot:goal", "constraint", 0.92);
     if (budgetSlotKey) pushEdge(edges, budgetSlotKey, "slot:budget_remaining", "determine", 0.9);
     if (budgetSpentSlotKey) pushEdge(edges, budgetSpentSlotKey, "slot:budget_remaining", "determine", 0.9);
+    if (budgetPendingSlotKey) pushEdge(edges, budgetPendingSlotKey, "slot:budget_remaining", "determine", 0.72);
   }
 
   const limitingFactors = collectLimitingFactors(params.signals);

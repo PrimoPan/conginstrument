@@ -1,5 +1,9 @@
 import type { CDG, ConceptNode } from "../../core/graph.js";
 import { isLikelyDestinationCandidate, normalizeDestination } from "../graphUpdater/intentSignals.js";
+import {
+  buildBudgetLedgerFromUserTurns,
+  type BudgetEvent,
+} from "./budgetLedger.js";
 
 export type TravelPlanDay = {
   day: number;
@@ -20,8 +24,22 @@ export type TravelPlanState = {
     totalCny?: number;
     spentCny?: number;
     remainingCny?: number;
+    pendingCny?: number;
+  };
+  budgetLedger?: BudgetEvent[];
+  budgetSummary?: {
+    totalCny?: number;
+    spentCny?: number;
+    remainingCny?: number;
+    pendingCny?: number;
   };
   narrativeText?: string;
+  exportNarrative?: string;
+  evidenceAppendix?: Array<{
+    title: string;
+    content: string;
+    source: "dialogue" | "budget" | "graph";
+  }>;
   dayPlans: TravelPlanDay[];
   source: {
     turnCount: number;
@@ -82,11 +100,21 @@ function parseDays(raw: string): number | undefined {
 }
 
 function nodeByKey(graph: CDG, key: string): ConceptNode | undefined {
-  return (graph.nodes || []).find((n) => String((n as any).key || "") === key);
+  return (graph.nodes || [])
+    .filter((n) => String((n as any).key || "") === key)
+    .sort((a, b) => {
+      const statusRank = (x: ConceptNode) =>
+        x.status === "confirmed" ? 3 : x.status === "proposed" ? 2 : x.status === "disputed" ? 1 : 0;
+      const rankDiff = statusRank(b) - statusRank(a);
+      if (rankDiff !== 0) return rankDiff;
+      return (Number(b.confidence) || 0) - (Number(a.confidence) || 0);
+    })[0];
 }
 
 const DAY_HEADER_RE =
   /(第\s*[一二三四五六七八九十两0-9]{1,3}\s*天|day\s*[0-9]{1,2}|[0-9]{1,2}[\.、]\s*第\s*[一二三四五六七八九十两0-9]{1,3}\s*天)\s*[:：\-]?/gi;
+const CONFIRMATION_QUESTION_RE =
+  /(请确认|是否是硬约束|是否为硬约束|还是可协商偏好|你希望优先满足哪一项|是否允许微调|这条信息是否是硬约束)/i;
 
 const DESTINATION_NOISE_RE =
   /(一个人|独自|自己|我们|我和|父母|家人|全家|去|前往|抵达|飞到|旅游|旅行|游玩|玩|现场观看|看球|比赛|球赛|预算|人民币|安全一点|地方吧)/i;
@@ -180,8 +208,11 @@ function parseDayBlocksFromText(text: string): TravelPlanDay[] {
     const cur = headers[i];
     const next = headers[i + 1];
     const rawBody = src.slice(cur.bodyStart, next ? next.start : src.length).trim();
-    const items = splitItineraryItems(rawBody);
-    const firstSentence = clean(rawBody.split(/[。；;\n\r]/)[0] || "", 64);
+    const body = rawBody
+      .replace(/(?:请问|你觉得|是否需要|是否有|有其他问题|还需要).{0,120}(?:吗|？|\?)?$/i, "")
+      .trim();
+    const items = splitItineraryItems(body).filter((x) => !shouldDropQuestionLikeSentence(x));
+    const firstSentence = clean(body.split(/[。；;\n\r]/)[0] || "", 64);
     const title = clean(
       firstSentence
         .replace(/\s*[0-9]{1,2}[\.、]\s*.+$/g, "")
@@ -338,6 +369,7 @@ function buildSummary(params: {
 function parseCityDurations(graph: CDG): Array<{ city: string; days: number }> {
   const out: Array<{ city: string; days: number }> = [];
   for (const n of graph.nodes || []) {
+    if (n.status === "rejected") continue;
     const s = clean(n.statement, 120);
     const m = s.match(/^(?:城市时长|停留时长)[:：]\s*(.+?)\s+([0-9]{1,3})\s*天$/);
     if (!m?.[1] || !m?.[2]) continue;
@@ -353,6 +385,83 @@ function dedupe<T>(arr: T[]): T[] {
   return Array.from(new Set(arr as any)) as any;
 }
 
+function shouldDropQuestionLikeSentence(s: string): boolean {
+  const v = clean(s, 200);
+  if (!v) return true;
+  if (CONFIRMATION_QUESTION_RE.test(v)) return true;
+  if (/^(请问|你觉得|是否|还有什么|需要调整|有其他问题吗)/.test(v)) return true;
+  return false;
+}
+
+function normalizeConstraintStatement(s: string): string {
+  let out = clean(s, 100);
+  if (!out) return "";
+  if (CONFIRMATION_QUESTION_RE.test(out)) return "";
+  out = out.replace(
+    /^限制因素[:：]\s*限制因素[“"']?\s*(.+?)\s*[”"']?\s*是硬约束$/i,
+    "限制因素: $1（硬约束）"
+  );
+  out = out.replace(
+    /^限制因素[“"']?\s*(.+?)\s*[”"']?\s*是硬约束$/i,
+    "限制因素: $1（硬约束）"
+  );
+  out = out.replace(
+    /^限制因素[“"']?\s*(.+?)\s*[”"']?\s*是可协商偏好$/i,
+    "限制因素: $1（可协商偏好）"
+  );
+  return clean(out, 100);
+}
+
+function dedupeParagraphs(text: string, maxLen = 3600): string {
+  const src = String(text || "").replace(/\r/g, "");
+  if (!src.trim()) return "";
+  const parts = src
+    .split(/\n{1,}/)
+    .map((x) => clean(x, 260))
+    .filter(Boolean)
+    .filter((x) => !shouldDropQuestionLikeSentence(x));
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const p of parts) {
+    const key = p.replace(/[。；;，,\s]+/g, "").toLowerCase();
+    if (!key || seen.has(key)) continue;
+    seen.add(key);
+    out.push(p);
+  }
+  return clean(out.join("\n"), maxLen);
+}
+
+function buildFallbackNarrativeFromDayPlans(dayPlans: TravelPlanDay[]): string {
+  if (!dayPlans.length) return "";
+  const lines: string[] = [];
+  for (const day of dayPlans) {
+    const datePart = day.dateLabel
+      ? `（${day.dateLabel}${day.city ? `，${day.city}` : ""}）`
+      : day.city
+        ? `（${day.city}）`
+        : "";
+    lines.push(`第${day.day}天${datePart}：${clean(day.title || "行程安排", 64)}`);
+    for (const item of day.items || []) {
+      lines.push(`- ${clean(item, 140)}`);
+    }
+  }
+  return dedupeParagraphs(lines.join("\n"), 4200);
+}
+
+function buildExportNarrative(plan: {
+  summary: string;
+  narrativeText?: string;
+  dayPlans: TravelPlanDay[];
+}): string {
+  const narrative = dedupeParagraphs(String(plan.narrativeText || ""), 4600);
+  const hasStructuredDayPlan = /第\s*[一二三四五六七八九十两0-9]{1,3}\s*天|day\s*[0-9]{1,2}/i.test(narrative);
+  if (hasStructuredDayPlan && narrative.length >= 80) return narrative;
+
+  const fallback = buildFallbackNarrativeFromDayPlans(plan.dayPlans || []);
+  if (fallback) return fallback;
+  return dedupeParagraphs(plan.summary || "", 800);
+}
+
 export function buildTravelPlanState(params: {
   graph: CDG;
   turns: Array<{ createdAt?: Date | string; userText: string; assistantText: string }>;
@@ -361,10 +470,13 @@ export function buildTravelPlanState(params: {
   const graph = params.graph;
   const turns = params.turns || [];
 
-  const goalNode = (graph.nodes || []).find((n) => n.type === "goal");
+  const goalNode = (graph.nodes || [])
+    .filter((n) => n.type === "goal" && n.status !== "rejected")
+    .sort((a, b) => (Number(b.importance) || 0) - (Number(a.importance) || 0))[0];
   const goalStatement = clean(goalNode?.statement || "", 120) || "制定旅行计划";
 
   const destinationNodes = (graph.nodes || [])
+    .filter((n) => n.status !== "rejected")
     .filter((n) => /^目的地[:：]/.test(clean(n.statement, 120)))
     .map((n) => normalizeDestinationLabel(clean(String(n.statement || "").split(/[:：]/)[1] || "", 30)))
     .filter(Boolean);
@@ -377,24 +489,46 @@ export function buildTravelPlanState(params: {
   const budgetNode = nodeByKey(graph, "slot:budget");
   const spentNode = nodeByKey(graph, "slot:budget_spent");
   const remainNode = nodeByKey(graph, "slot:budget_remaining");
+  const pendingNode = nodeByKey(graph, "slot:budget_pending");
 
   const totalBudget = parseMoney((clean(budgetNode?.statement || "", 80).match(/预算(?:上限)?[:：]\s*([0-9]{1,12})\s*元?/) || [])[1] || "");
   const spentBudget = parseMoney((clean(spentNode?.statement || "", 80).match(/已花预算[:：]\s*([0-9]{1,12})\s*元?/) || [])[1] || "");
   let remainingBudget = parseMoney((clean(remainNode?.statement || "", 80).match(/(?:剩余预算|可用预算)[:：]\s*([0-9]{1,12})\s*元?/) || [])[1] || "");
+  const pendingBudget = parseMoney((clean(pendingNode?.statement || "", 80).match(/(?:待确认预算|待确认支出)[:：]\s*([0-9]{1,12})\s*元?/) || [])[1] || "");
   if (remainingBudget == null && totalBudget != null && spentBudget != null) {
     remainingBudget = Math.max(0, totalBudget - spentBudget);
   }
 
+  const budgetLedger = buildBudgetLedgerFromUserTurns(
+    turns.map((t, i) => ({
+      text: String(t.userText || ""),
+      turnId: `turn_${i + 1}`,
+      createdAt: t.createdAt ? new Date(t.createdAt as any).toISOString() : undefined,
+    }))
+  );
+  const ledgerTotal = budgetLedger.summary.totalCny;
+  const ledgerSpent = budgetLedger.summary.spentCny;
+  const ledgerRemaining = budgetLedger.summary.remainingCny;
+  const ledgerPending = budgetLedger.summary.pendingCny;
+
   const constraints = (graph.nodes || [])
+    .filter((n) => n.status !== "rejected")
     .filter((n) => n.type === "constraint")
-    .map((n) => clean(n.statement, 90))
-    .filter((s) => s && !/^预算(?:上限)?[:：]/.test(s) && !/^已花预算[:：]/.test(s) && !/^(?:剩余预算|可用预算)[:：]/.test(s) && !/^总行程时长[:：]/.test(s))
-    .slice(0, 10);
+    .map((n) => normalizeConstraintStatement(n.statement))
+    .filter(
+      (s) =>
+        s &&
+        !/^预算(?:上限)?[:：]/.test(s) &&
+        !/^已花预算[:：]/.test(s) &&
+        !/^(?:剩余预算|可用预算|待确认预算|待确认支出)[:：]/.test(s) &&
+        !/^总行程时长[:：]/.test(s)
+    );
+  const normalizedConstraints = dedupe(constraints).slice(0, 10);
 
   const cityDurations = parseCityDurations(graph);
 
   const itineraryText = pickBestItineraryAssistantText(turns);
-  const narrativeText = extractNarrativeText(itineraryText);
+  const narrativeText = dedupeParagraphs(extractNarrativeText(itineraryText), 3600);
   let dayPlans = parseDayBlocksFromText(itineraryText);
   if (!dayPlans.length) {
     dayPlans = buildFallbackDayPlans({
@@ -422,32 +556,83 @@ export function buildTravelPlanState(params: {
     goalStatement,
     destinations,
     totalDays,
-    totalBudget,
-    spentBudget,
-    remainingBudget,
-    constraints,
+    totalBudget: ledgerTotal ?? totalBudget,
+    spentBudget: ledgerSpent ?? spentBudget,
+    remainingBudget: ledgerRemaining ?? remainingBudget,
+    constraints: normalizedConstraints,
   });
 
   const lastTurnAt = turns[turns.length - 1]?.createdAt
     ? new Date(turns[turns.length - 1].createdAt as any).toISOString()
     : params.previous?.source?.lastTurnAt;
 
+  const effectiveBudget = {
+    totalCny: ledgerTotal ?? totalBudget,
+    spentCny: ledgerSpent ?? spentBudget,
+    remainingCny: ledgerRemaining ?? remainingBudget,
+    pendingCny: ledgerPending ?? pendingBudget,
+  };
+  const evidenceAppendix: Array<{ title: string; content: string; source: "dialogue" | "budget" | "graph" }> = [];
+  for (const ev of budgetLedger.events.slice(-10)) {
+    evidenceAppendix.push({
+      title: `预算事件 · ${ev.type}`,
+      content: `${ev.evidence}${ev.amountCny != null ? `（${ev.amountCny}元）` : ""}`,
+      source: "budget",
+    });
+  }
+  for (const c of normalizedConstraints.slice(0, 6)) {
+    evidenceAppendix.push({
+      title: "约束证据",
+      content: c,
+      source: "graph",
+    });
+  }
+  for (const t of turns.slice(-8)) {
+    const u = clean(t.userText || "", 140);
+    if (!u || shouldDropQuestionLikeSentence(u)) continue;
+    evidenceAppendix.push({
+      title: "用户原句",
+      content: u,
+      source: "dialogue",
+    });
+  }
+  const appendixMap = new Map<string, { title: string; content: string; source: "dialogue" | "budget" | "graph" }>();
+  for (const e of evidenceAppendix) {
+    const key = `${e.source}::${clean(e.title, 60)}::${clean(e.content, 180)}`;
+    if (!appendixMap.has(key)) appendixMap.set(key, e);
+  }
+  const dedupAppendix = Array.from(appendixMap.values()).slice(0, 20);
+
+  const exportNarrative = buildExportNarrative({
+    summary,
+    narrativeText,
+    dayPlans,
+  });
+
   return {
     version: Math.max(1, Number(graph.version) || 1),
     updatedAt: new Date().toISOString(),
     summary,
     destinations,
-    constraints,
+    constraints: normalizedConstraints,
     totalDays,
     budget:
-      totalBudget != null || spentBudget != null || remainingBudget != null
+      effectiveBudget.totalCny != null ||
+      effectiveBudget.spentCny != null ||
+      effectiveBudget.remainingCny != null ||
+      effectiveBudget.pendingCny != null
         ? {
-            totalCny: totalBudget,
-            spentCny: spentBudget,
-            remainingCny: remainingBudget,
+            totalCny: effectiveBudget.totalCny,
+            spentCny: effectiveBudget.spentCny,
+            remainingCny: effectiveBudget.remainingCny,
+            pendingCny: effectiveBudget.pendingCny,
           }
         : undefined,
+    budgetSummary: effectiveBudget,
+    budgetLedger: budgetLedger.events,
     narrativeText,
+    exportNarrative,
+    evidenceAppendix: dedupAppendix,
     dayPlans,
     source: {
       turnCount: turns.length,
@@ -475,6 +660,7 @@ export function buildTravelPlanText(plan: TravelPlanState): string {
     if (b.totalCny != null) lines.push(`- 总预算：${b.totalCny}元`);
     if (b.spentCny != null) lines.push(`- 已花预算：${b.spentCny}元`);
     if (b.remainingCny != null) lines.push(`- 剩余预算：${b.remainingCny}元`);
+    if (b.pendingCny != null && b.pendingCny > 0) lines.push(`- 待确认支出：${b.pendingCny}元`);
   }
 
   if (plan.constraints?.length) {
@@ -484,23 +670,37 @@ export function buildTravelPlanText(plan: TravelPlanState): string {
     }
   }
 
-  if (plan.narrativeText) {
+  const narrativeHasDay = /第\s*[一二三四五六七八九十两0-9]{1,3}\s*天|day\s*[0-9]{1,2}/i.test(
+    String(plan.exportNarrative || "")
+  );
+
+  if (plan.exportNarrative) {
     lines.push("");
-    lines.push("详细建议：");
-    lines.push(plan.narrativeText);
+    lines.push("可执行行程：");
+    lines.push(plan.exportNarrative);
   }
 
-  lines.push("");
-  lines.push("按天行程：");
-  if (!plan.dayPlans?.length) {
-    lines.push("- 暂无按天行程，请继续对话补全。");
-  } else {
-    for (const day of plan.dayPlans) {
-      const datePart = day.dateLabel ? `（${day.dateLabel}${day.city ? `，${day.city}` : ""}）` : day.city ? `（${day.city}）` : "";
-      lines.push(`第${day.day}天${datePart}：${day.title || "行程安排"}`);
-      for (const item of day.items || []) {
-        lines.push(`  - ${item}`);
+  if (!narrativeHasDay) {
+    lines.push("");
+    lines.push("按天行程：");
+    if (!plan.dayPlans?.length) {
+      lines.push("- 暂无按天行程，请继续对话补全。");
+    } else {
+      for (const day of plan.dayPlans) {
+        const datePart = day.dateLabel ? `（${day.dateLabel}${day.city ? `，${day.city}` : ""}）` : day.city ? `（${day.city}）` : "";
+        lines.push(`第${day.day}天${datePart}：${day.title || "行程安排"}`);
+        for (const item of day.items || []) {
+          lines.push(`  - ${item}`);
+        }
       }
+    }
+  }
+
+  if (plan.evidenceAppendix?.length) {
+    lines.push("");
+    lines.push("附录（证据片段）：");
+    for (const e of plan.evidenceAppendix.slice(0, 20)) {
+      lines.push(`- [${e.source}] ${e.title}：${e.content}`);
     }
   }
 

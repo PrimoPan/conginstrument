@@ -1,7 +1,7 @@
 import type { CDG, ConceptNode, GraphPatch, PatchOp } from "../../core/graph.js";
 import { makeTempId } from "./common.js";
 import type { SlotGraphState, SlotNodeSpec } from "./slotTypes.js";
-import { normalizeDestination } from "./intentSignals.js";
+import { isLikelyDestinationCandidate, normalizeDestination } from "./intentSignals.js";
 import { cleanStatement } from "./text.js";
 
 function slug(input: string): string {
@@ -19,15 +19,26 @@ function parseSlotKeyFromStatement(node: ConceptNode): string | null {
   if (node.type === "goal") return "slot:goal";
 
   let m = s.match(/^目的地[:：]\s*(.+)$/);
-  if (m?.[1]) return `slot:destination:${slug(normalizeDestination(m[1]))}`;
+  if (m?.[1]) {
+    const city = normalizeDestination(m[1]);
+    if (!city || !isLikelyDestinationCandidate(city)) return null;
+    const cityKey = slug(city);
+    return cityKey ? `slot:destination:${cityKey}` : null;
+  }
 
   m = s.match(/^(?:城市时长|停留时长)[:：]\s*(.+?)\s+[0-9]{1,3}\s*天$/);
-  if (m?.[1]) return `slot:duration_city:${slug(normalizeDestination(m[1]))}`;
+  if (m?.[1]) {
+    const city = normalizeDestination(m[1]);
+    if (!city || !isLikelyDestinationCandidate(city)) return null;
+    const cityKey = slug(city);
+    return cityKey ? `slot:duration_city:${cityKey}` : null;
+  }
 
   if (/^总行程时长[:：]\s*[0-9]{1,3}\s*天$/.test(s)) return "slot:duration_total";
   if (/^预算(?:上限)?[:：]/.test(s)) return "slot:budget";
   if (/^已花预算[:：]/.test(s)) return "slot:budget_spent";
   if (/^(?:剩余预算|可用预算)[:：]/.test(s)) return "slot:budget_remaining";
+  if (/^(?:待确认预算|待确认支出)[:：]/.test(s)) return "slot:budget_pending";
   if (/^同行人数[:：]/.test(s)) return "slot:people";
   if (/^健康约束[:：]/.test(s)) return "slot:health";
   if (/^语言约束[:：]/.test(s)) return "slot:language";
@@ -97,17 +108,30 @@ export function compileSlotStateToPatch(params: {
   state: SlotGraphState;
 }): GraphPatch {
   const existingByKey = new Map<string, ConceptNode>();
+  const existingGroups = new Map<string, ConceptNode[]>();
+  const staleDuplicateNodeIds = new Set<string>();
   for (const n of params.graph.nodes || []) {
     const key = getNodeSlotKey(n);
     if (!key) continue;
-    if (!existingByKey.has(key)) {
-      existingByKey.set(key, n);
-      continue;
-    }
-    const old = existingByKey.get(key)!;
-    if ((Number(n.confidence) || 0) >= (Number(old.confidence) || 0)) {
-      existingByKey.set(key, n);
-    }
+    const list = existingGroups.get(key) || [];
+    list.push(n);
+    existingGroups.set(key, list);
+  }
+  for (const [key, list] of existingGroups.entries()) {
+    const sorted = list
+      .slice()
+      .sort((a, b) => {
+        const statusRank = (x: ConceptNode) =>
+          x.status === "confirmed" ? 3 : x.status === "proposed" ? 2 : x.status === "disputed" ? 1 : 0;
+        const rankDiff = statusRank(b) - statusRank(a);
+        if (rankDiff !== 0) return rankDiff;
+        const confDiff = (Number(b.confidence) || 0) - (Number(a.confidence) || 0);
+        if (confDiff !== 0) return confDiff;
+        return (Number(b.importance) || 0) - (Number(a.importance) || 0);
+      });
+    const primary = sorted[0];
+    existingByKey.set(key, primary);
+    for (let i = 1; i < sorted.length; i += 1) staleDuplicateNodeIds.add(sorted[i].id);
   }
 
   const ops: PatchOp[] = [];
@@ -154,11 +178,16 @@ export function compileSlotStateToPatch(params: {
   }
 
   const desiredSlots = new Set(params.state.nodes.map((x) => x.slotKey));
-  for (const [slotKey, node] of existingByKey.entries()) {
-    if (!slotKey.startsWith("slot:")) continue;
-    if (desiredSlots.has(slotKey)) continue;
-    if (slotKey === "slot:goal") continue;
-    if (node.status === "rejected" && (Number(node.importance) || 0) <= 0.35) continue;
+  const touchedNodeIds = new Set<string>();
+  const removedEdgeIds = new Set<string>();
+
+  const markNodeAsStale = (node: ConceptNode) => {
+    if (touchedNodeIds.has(node.id)) return;
+    if (!node.locked) {
+      ops.push({ op: "remove_node", id: node.id });
+      touchedNodeIds.add(node.id);
+      return;
+    }
     const nextTags = Array.from(
       new Set([...(Array.isArray(node.tags) ? node.tags : []), "stale_slot", "auto_cleaned"])
     ).slice(0, 8);
@@ -173,6 +202,32 @@ export function compileSlotStateToPatch(params: {
         tags: nextTags,
       } as any,
     });
+    touchedNodeIds.add(node.id);
+  };
+  for (const nodeId of staleDuplicateNodeIds) {
+    const node = (params.graph.nodes || []).find((x) => x.id === nodeId);
+    if (!node) continue;
+    markNodeAsStale(node);
+    for (const e of params.graph.edges || []) {
+      if ((e.from === nodeId || e.to === nodeId) && !removedEdgeIds.has(e.id)) {
+        ops.push({ op: "remove_edge", id: e.id });
+        removedEdgeIds.add(e.id);
+      }
+    }
+  }
+
+  for (const [slotKey, node] of existingByKey.entries()) {
+    if (!slotKey.startsWith("slot:")) continue;
+    if (desiredSlots.has(slotKey)) continue;
+    if (slotKey === "slot:goal") continue;
+    if (node.status === "rejected" && (Number(node.importance) || 0) <= 0.35) continue;
+    markNodeAsStale(node);
+    for (const e of params.graph.edges || []) {
+      if ((e.from === node.id || e.to === node.id) && !removedEdgeIds.has(e.id)) {
+        ops.push({ op: "remove_edge", id: e.id });
+        removedEdgeIds.add(e.id);
+      }
+    }
   }
 
   const existingEdgeSig = new Set<string>();

@@ -87,6 +87,33 @@ function isAbstractPlacePhrase(name: string): boolean {
   return false;
 }
 
+function normalizeConstraintConfirmationText(raw: string): {
+  text: string;
+  hard?: boolean;
+  importance?: number;
+} | null {
+  const s = cleanStatement(raw || "", 160);
+  if (!s) return null;
+  const qLike = /请确认|是否|吗[？?]?$/i.test(s);
+  if (qLike) return null;
+
+  const m = s.match(
+    /(?:限制因素[“"'「『]?\s*)?(.+?)(?:[”"'」』])?\s*(?:是|属于|按|作为)?\s*(硬约束|可协商偏好|可协商|软约束|偏好)/i
+  );
+  if (!m?.[1] || !m?.[2]) return null;
+  const core = cleanStatement(m[1], 120)
+    .replace(/^限制因素[:：]?\s*/i, "")
+    .replace(/^“|”$/g, "")
+    .trim();
+  if (!core) return null;
+  const hard = /硬约束/i.test(m[2]);
+  return {
+    text: core,
+    hard,
+    importance: hard ? 0.88 : 0.72,
+  };
+}
+
 function toDerivedConstraint(raw: string) {
   const s = cleanStatement(raw || "", 80);
   if (!s) return null;
@@ -170,7 +197,8 @@ export function sanitizeIntentSignals(input: IntentSignals): IntentSignals {
   if (out.genericConstraints?.length) {
     const map = new Map<string, NonNullable<IntentSignals["genericConstraints"]>[number]>();
     for (const c of out.genericConstraints) {
-      const text = cleanStatement(c?.text || "", 120);
+      const normalizedConfirm = normalizeConstraintConfirmationText(c?.text || "");
+      const text = cleanStatement(normalizedConfirm?.text || c?.text || "", 120);
       if (!text) continue;
       const key = text.toLowerCase();
       const prev = map.get(key);
@@ -178,9 +206,14 @@ export function sanitizeIntentSignals(input: IntentSignals): IntentSignals {
         text,
         evidence: cleanStatement(c?.evidence || text, 80),
         kind: c?.kind || "other",
-        hard: !!c?.hard,
+        hard: normalizedConfirm?.hard ?? !!c?.hard,
         severity: c?.severity,
-        importance: Math.max(Number(c?.importance) || 0, Number(prev?.importance) || 0) || undefined,
+        importance:
+          Math.max(
+            Number(normalizedConfirm?.importance) || 0,
+            Number(c?.importance) || 0,
+            Number(prev?.importance) || 0
+          ) || undefined,
       } as NonNullable<IntentSignals["genericConstraints"]>[number];
       if (!prev) {
         map.set(key, cur);

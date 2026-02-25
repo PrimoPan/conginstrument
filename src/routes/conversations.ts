@@ -83,8 +83,24 @@ async function loadRecentTurnsForPlan(params: {
   return collections.turns
     .find({ conversationId: params.conversationId, userId: params.userId })
     .sort({ createdAt: 1 })
-    .limit(Math.max(1, Math.min(params.limit || 60, 240)))
+    .limit(Math.max(1, Math.min(params.limit || 120, 320)))
     .toArray();
+}
+
+async function loadRecentUserTextsForState(params: {
+  conversationId: ObjectId;
+  userId: ObjectId;
+  limit?: number;
+}) {
+  const docs = await collections.turns
+    .find({ conversationId: params.conversationId, userId: params.userId })
+    .sort({ createdAt: -1 })
+    .limit(Math.max(8, Math.min(params.limit || 120, 320)))
+    .toArray();
+  return docs
+    .reverse()
+    .map((t) => String(t.userText || "").trim())
+    .filter(Boolean);
 }
 
 async function computeTravelPlanState(params: {
@@ -96,7 +112,7 @@ async function computeTravelPlanState(params: {
   const turns = await loadRecentTurnsForPlan({
     conversationId: params.conversationId,
     userId: params.userId,
-    limit: 80,
+    limit: 160,
   });
   return buildTravelPlanState({
     graph: params.graph,
@@ -507,7 +523,7 @@ convRouter.get("/:id/travel-plan/export.pdf", async (req: AuthedRequest, res) =>
     const conv = await collections.conversations.findOne({ _id: oid, userId });
     if (!conv) return res.status(404).json({ error: "conversation not found" });
 
-    const turns = await loadRecentTurnsForPlan({ conversationId: oid, userId, limit: 120 });
+    const turns = await loadRecentTurnsForPlan({ conversationId: oid, userId, limit: 240 });
     if (!turns.length) {
       return res.status(400).json({ error: "no conversation turns yet, cannot export plan" });
     }
@@ -592,6 +608,11 @@ convRouter.post("/:id/turn", async (req: AuthedRequest, res) => {
       { role: "user" as const, content: t.userText },
       { role: "assistant" as const, content: t.assistantText },
     ]);
+  const stateContextUserTurns = await loadRecentUserTextsForState({
+    conversationId: oid,
+    userId,
+    limit: 140,
+  });
 
   const preModel = buildCognitiveModel({
     graph,
@@ -641,6 +662,7 @@ convRouter.post("/:id/turn", async (req: AuthedRequest, res) => {
     graph,
     userText,
     recentTurns,
+    stateContextUserTurns,
     systemPrompt: conv.systemPrompt,
   });
 
@@ -718,6 +740,11 @@ convRouter.post("/:id/turn/stream", async (req: AuthedRequest, res) => {
       { role: "user" as const, content: t.userText },
       { role: "assistant" as const, content: t.assistantText },
     ]);
+  const stateContextUserTurns = await loadRecentUserTextsForState({
+    conversationId: oid,
+    userId,
+    limit: 140,
+  });
 
   const preModel = buildCognitiveModel({
     graph,
@@ -806,6 +833,7 @@ convRouter.post("/:id/turn/stream", async (req: AuthedRequest, res) => {
       graph,
       userText,
       recentTurns,
+      stateContextUserTurns,
       systemPrompt: conv.systemPrompt,
       signal: ac.signal,
       onToken: (token) => {
@@ -871,6 +899,7 @@ convRouter.post("/:id/turn/stream", async (req: AuthedRequest, res) => {
           graph,
           userText,
           recentTurns,
+          stateContextUserTurns,
           systemPrompt: conv.systemPrompt,
         });
 

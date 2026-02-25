@@ -12,8 +12,8 @@ const ALLOWED_EDGE_TYPES = new Set(["enable", "constraint", "determine", "confli
 const ALLOWED_SEVERITY = new Set(["low", "medium", "high", "critical"]);
 const ALLOWED_MOTIF_TYPES = new Set(["belief", "hypothesis", "expectation", "cognitive_step"]);
 
-// 默认只允许增/改/加边；删除要显式开开关
-const ALLOW_DELETE = process.env.CI_ALLOW_DELETE === "1";
+// 默认允许删除（用于确定性编译器清理旧噪声节点/边）；可通过 CI_ALLOW_DELETE=0 关闭。
+const ALLOW_DELETE = process.env.CI_ALLOW_DELETE !== "0";
 const ALLOWED_OPS = new Set([
   "add_node",
   "update_node",

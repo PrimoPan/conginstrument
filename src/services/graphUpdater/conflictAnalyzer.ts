@@ -66,15 +66,30 @@ function normalizeDestinationForConflict(raw: string): string {
   return s;
 }
 
+function compactDestinationsForConflict(list: string[]): string[] {
+  const sorted = list
+    .slice()
+    .map((x) => normalizeDestinationForConflict(x))
+    .filter(Boolean)
+    .sort((a, b) => a.length - b.length);
+  if (!sorted.length) return [];
+
+  const out: string[] = [];
+  for (const cur of sorted) {
+    const isNearDuplicate = out.some((k) => {
+      if (k === cur) return true;
+      const short = k.length <= cur.length ? k : cur;
+      const long = k.length > cur.length ? k : cur;
+      return short.length >= 2 && long.includes(short);
+    });
+    if (!isNearDuplicate) out.push(cur);
+  }
+  return Array.from(new Set(out)).slice(0, 8);
+}
+
 export function analyzeConstraintConflicts(input: ConflictAnalyzeInput): ConflictInsight[] {
   const out: ConflictInsight[] = [];
-  const destinations = Array.from(
-    new Set(
-      (input.destinations || [])
-        .map((x) => normalizeDestinationForConflict(x || ""))
-        .filter(Boolean)
-    )
-  ).slice(0, 8);
+  const destinations = compactDestinationsForConflict(input.destinations || []);
   const limiting = input.limitingFactors || [];
   const hardLimiting = limiting.filter((x) => x.hard);
 
