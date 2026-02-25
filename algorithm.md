@@ -1,454 +1,454 @@
-# CDG Algorithm Notes
+# CogInstrument 建图算法说明（当前实现）
 
-This document summarizes the current graph-construction and graph-optimization pipeline implemented in:
+> 更新时间：2026-02-25
+> 
+> 本文档以当前代码为准，覆盖“对话 -> 信号 -> 槽位状态机 -> 图编译 -> 拓扑重平衡 -> 旅行计划导出”的完整链路。
 
-- `src/core/graph.ts`
-- `src/services/graphUpdater.ts`
+## 0. 代码锚点（Source of Truth）
 
-The goal is to keep the intent graph stable, connected, sparse, and explainable across multi-turn dialogue.
+核心文件：
 
-## 1) Graph Definition
+- `/Users/primopan/UISTcoginstrument/app/conginstrument/src/routes/conversations.ts`
+- `/Users/primopan/UISTcoginstrument/app/conginstrument/src/services/llm.ts`
+- `/Users/primopan/UISTcoginstrument/app/conginstrument/src/services/graphUpdater.ts`
+- `/Users/primopan/UISTcoginstrument/app/conginstrument/src/services/graphUpdater/intentSignals.ts`
+- `/Users/primopan/UISTcoginstrument/app/conginstrument/src/services/graphUpdater/slotFunctionCall.ts`
+- `/Users/primopan/UISTcoginstrument/app/conginstrument/src/services/graphUpdater/signalSanitizer.ts`
+- `/Users/primopan/UISTcoginstrument/app/conginstrument/src/services/travelPlan/budgetLedger.ts`
+- `/Users/primopan/UISTcoginstrument/app/conginstrument/src/services/graphUpdater/slotStateMachine.ts`
+- `/Users/primopan/UISTcoginstrument/app/conginstrument/src/services/graphUpdater/conflictAnalyzer.ts`
+- `/Users/primopan/UISTcoginstrument/app/conginstrument/src/services/graphUpdater/slotGraphCompiler.ts`
+- `/Users/primopan/UISTcoginstrument/app/conginstrument/src/services/motif/motifGrounding.ts`
+- `/Users/primopan/UISTcoginstrument/app/conginstrument/src/services/patchGuard.ts`
+- `/Users/primopan/UISTcoginstrument/app/conginstrument/src/core/graph/patchApply.ts`
+- `/Users/primopan/UISTcoginstrument/app/conginstrument/src/core/graph/common.ts`
+- `/Users/primopan/UISTcoginstrument/app/conginstrument/src/core/graph/topology.ts`
+- `/Users/primopan/UISTcoginstrument/app/conginstrument/src/services/travelPlan/state.ts`
+- `/Users/primopan/UISTcoginstrument/app/conginstrument/src/services/travelPlan/pdf.ts`
 
-Let the concept dependency graph be:
+---
 
-$$
-G=(V,E)
-$$
+## 1. 端到端流水线
 
-- $V$: concept nodes (goal, constraint, preference, fact, belief, question)
-- $E$: directed edges with type in \{enable, constraint, determine, conflicts\_with\}
+当前系统分成两段：
 
-Each node $v \in V$ has attributes:
+1. `槽位状态机`：把用户语言转成结构化 slots（goal/destination/duration/budget/...）
+2. `图编译器 + 拓扑器`：把 slots 编译成 patch，再做全图去重、纠错、稀疏化和连通修复
 
-- `confidence` $c_v \in [0,1]$
-- `importance` $i_v \in [0,1]$
-- optional `severity` in \{low, medium, high, critical\}
+```text
+user turn
+  -> assistant text (短窗口)
+  -> graphUpdater.generateGraphPatch
+       -> signal extraction (deterministic + optional function-call)
+       -> geo resolve
+       -> signal sanitizer
+       -> budget ledger replay (长窗口)
+       -> slot state machine
+       -> slot graph compiler (patch)
+       -> motif grounding + strict patch sanitize
+  -> applyPatchWithGuards
+       -> apply ops
+       -> structured node pruning
+       -> slot singleton compaction
+       -> topology rebalance (A* + Tarjan + reduction + repair)
+  -> persist graph + concepts/motifs/contexts + travelPlanState
+```
 
-Each edge $e=(u\to v)$ has `confidence` $c_e \in [0,1]$ and edge type.
+---
 
-## 2) High-Level Pipeline
+## 2. 输入窗口策略（短上下文 + 长状态）
 
-For each patch update, the backend runs:
+当前不是单一窗口。
 
-1. patch sanitization + normalization
-2. singleton slot compaction (deduplicate same slot nodes)
-3. geo normalization (MCP bridge optional, Nominatim fallback)
-4. signal sanitizer pass (destination/sub-location canonicalization + dedup + duration reconciliation)
-4.5 limiting-factor unification (health/language/diet/religion/logistics -> unified `限制因素` constraint family)
-4.6 conflict extraction pass (budget-duration-destination-preference-limiting-factor inconsistencies)
-5. root-goal selection and root unification
-6. structured skeleton edge construction (primary/secondary/limiting-factor slots)
-7. A*-style anchor search for non-slot nodes
-8. root fan-in control (sparsification)
-9. Tarjan SCC cycle breaking
-10. approximate transitive reduction
-11. connectivity repair to keep all nodes connected to root
+- 回答生成窗口：最近 10 轮 user/assistant（低成本、保证对话流畅）
+- 建图/预算状态窗口：长窗口用户轮（默认最多 140~160 条）
 
-## 3) Slot Compaction (same-slot dedup)
+实现位置：`/Users/primopan/UISTcoginstrument/app/conginstrument/src/routes/conversations.ts`
 
-For nodes in the same slot, winner selection is lexicographic by:
+意义：
 
-1. touched in latest patch
-2. confirmed status
-3. confidence
-4. importance
-5. numeric hint in statement (budget/day/people)
-6. stable id fallback
+- 避免“预算增量在后轮丢失”
+- 避免总时长/目的地只看最近几句导致回退
 
-This ensures replacement behavior like "budget 10000 -> budget 15000" keeps the newer/better slot representative.
+---
 
-## 4) Root Goal Selection
+## 3. 信号提取（IntentSignals）
 
-Among goal nodes, choose a single root by priority:
+实现位置：
 
-1. touched in latest patch
-2. confirmed status
-3. importance
-4. confidence
-5. shorter statement (prefer canonical concise goal)
+- `extractIntentSignals`: `/Users/primopan/UISTcoginstrument/app/conginstrument/src/services/graphUpdater/intentSignals.ts`
+- `extractIntentSignalsByFunctionCall`: `/Users/primopan/UISTcoginstrument/app/conginstrument/src/services/graphUpdater/slotFunctionCall.ts`
+- merge逻辑：`/Users/primopan/UISTcoginstrument/app/conginstrument/src/services/graphUpdater.ts`
 
-All other goal nodes are removed and their incident edges are removed.
+### 3.1 规则解析（deterministic）
 
-## 5) A*-Style Anchor Assignment
+提取字段包括：
 
-For each non-slot node $x$, choose a best anchor node $a$ (often slot node or root).
+- 目的地、城市时长、总时长、关键日、子地点
+- 预算上限、预算增量、已花预算、已花增量、剩余预算
+- 同行人数、健康/语言/泛化约束
+- 景点偏好、活动偏好、住宿偏好
 
-### 5.1 Objective
+### 3.2 Function-call 槽位提取（可开关）
 
-$$
-a^*=\arg\min_{a \in \mathcal{A}} \left(g(a)+h(x,a)\right)
-$$
+`CI_GRAPH_USE_FUNCTION_SLOTS != 0` 时启用。
 
-- $g(a)$: path travel cost from root to anchor in current graph skeleton
-- $h(x,a)$: semantic-slot heuristic penalty
+- function-call 结果用于补齐语义
+- 规则解析在关键标量上仍有优先权（例如用户明确说“玩3天”）
 
-### 5.2 Edge travel cost
+当前保护逻辑：若检测到直接时长表达，且 function-call 时长与规则时长冲突，会回退到规则时长。
 
-$$
-\text{travelCost}(e)=b_{\text{type}} + 0.35 \cdot (1-c_e)
-$$
+### 3.3 地理归一化 + 清洗
 
-where
+`signalSanitizer` 做三类关键处理：
 
-- $b_{\text{determine}}=1.08$
-- $b_{\text{enable}}=0.95$
-- $b_{\text{constraint}}=0.88$
+1. 目的地去噪与规范化（过滤“安全一点的地方”“一个人去米兰”这类伪地名）
+2. 子地点父子归并（子地点不升级为平级目的地）
+3. 时长重整（城市分段、会议时段、显式总时长之间求一致）
 
-### 5.3 Heuristic penalty
+---
 
-$$
-h(x,a)=\left(1-\text{Jaccard}(T_x,T_a)\right)+\Delta_{\text{slot}}+\Delta_{\text{type}}+\Delta_{\text{risk}}
-$$
+## 4. 预算状态机（Budget Ledger）
 
-- $T_x, T_a$: token sets from mixed CN/EN tokenization + n-grams
-- $\Delta_{\text{slot}}$: slot distance penalty
-- $\Delta_{\text{type}}=-0.06$ if same type else $+0.06$
-- $\Delta_{\text{risk}}=0.2$ if health/risk text is attached to non-health slot
+实现位置：`/Users/primopan/UISTcoginstrument/app/conginstrument/src/services/travelPlan/budgetLedger.ts`
 
-Slot distance penalty examples:
+### 4.1 事件类型
 
-- same slot: 0
-- budget-lodging / destination-scenic_preference: 0.12
-- health-duration: 0.18
-- unknown slot pair: 0.22
-- general mismatch: 0.32
+- `budget_set`：设置总预算
+- `budget_adjust`：预算增减
+- `expense_commit`：已确认支出
+- `expense_refund`：退款/返还
+- `expense_pending`：待确认支出（不计入已花）
 
-## 6) Adaptive Topology Tuning (self-balancing)
+### 4.2 记账口径（当前实现）
 
-Graph sparsity parameter is automatically adapted from density + cyclicity.
+- 仅用户确认支出进入 `expense_commit`
+- “帮我扣掉/预留”但未确认金额时进入 `expense_pending`
+- 外币入账使用汇率快照（默认内置，可由环境变量覆盖）
 
-### 6.1 Density and cycle ratio
+### 4.3 重放方程
 
-$$
-\rho=\frac{|E|}{|V|\log_2(|V|+1)}
-$$
+```text
+total := undefined
+spent := 0
+pending := 0
 
-$$
-r_{\text{cyc}}=\frac{\#\text{nodes in SCC cycles}}{|V|}
-$$
+for ev in events (chronological):
+  if ev.type == budget_set:
+     total = ev.amount
+  if ev.type == budget_adjust:
+     total = (total ?? 0) + ev.amount
+  if ev.type == expense_commit:
+     spent = ev.mode==absolute ? ev.amount : spent + ev.amount
+  if ev.type == expense_refund:
+     spent = max(spent - ev.amount, 0)
+  if ev.type == expense_pending:
+     pending += ev.amount
 
-### 6.2 Adaptive coefficient
+remaining = total is defined ? max(total - spent, 0) : undefined
+```
 
-$$
-\lambda=\text{clip}\left(0.38 + 0.24\tanh(\rho-1) + 0.36r_{\text{cyc}},\ 0,\ 1\right)
-$$
+账本结果会强覆盖图信号中的预算标量，避免“5000 + 5000 未落图”问题。
 
-### 6.3 Derived runtime controls
+---
 
-$$
-\text{maxRootIncoming}=\text{clip}_{[4,10]}(\text{round}(9-4\lambda))
-$$
+## 5. 槽位状态机（Slot State Machine）
 
-$$
-\text{maxAStarSteps}=\text{clip}_{[20,96]}\left(\text{round}\left(30 + |V|\cdot(0.28 + (1-\lambda)\cdot0.35)\right)\right)
-$$
+实现位置：`/Users/primopan/UISTcoginstrument/app/conginstrument/src/services/graphUpdater/slotStateMachine.ts`
 
-$$
-\text{transitiveCutoff}=\text{clip}_{[0.48,0.9]}(0.72-0.18\lambda)
-$$
+状态机输出：
 
-This is the current "auto-balance" mechanism for clutter control.
+- `nodes: SlotNodeSpec[]`
+- `edges: SlotEdgeSpec[]`
 
-## 7) Root Fan-In Control
+### 5.1 目标节点
 
-When root incoming edges exceed `maxRootIncoming`, optional non-primary edges are pruned by score ranking (keep high-value first), using slot priority + node importance/confidence/severity.
+始终生成 `slot:goal`，并把总时长强行对齐到 `DurationState.totalDays`，避免“意图6天/总时长3天”分叉显示。
 
-This prevents "starburst root" and over-connected center clutter.
+### 5.2 时长共识（DurationState）
 
-## 8) Tarjan SCC Cycle Breaking
+候选集合：
 
-After edge construction, run Tarjan SCC on structural edges (excluding `conflicts_with`).
+- `explicit_total`（用户显式总时长）
+- `city_sum`（城市分段求和）
+- `max_segment`（最大分段）
 
-For each cyclic SCC, remove one weakest edge:
+采用加权中位数并加规则修正：
 
-$$
-e^*=\arg\min_{e \in SCC} S_{\text{keep}}(e)
-$$
+```text
+totalDays = weightedMedian(explicit_total, city_sum, max_segment)
 
-with keep score:
+if multi-city + has travel segments:
+  prefer city_sum when totalDays underestimates
 
-$$
-S_{\text{keep}}(e)=w_{\text{type}} + 0.9c_e + 0.65\bar{i}_e + 0.32\mathbf{1}_{\text{touched}} + 0.26\mathbf{1}_{\text{toRoot}} + 0.32\mathbf{1}_{\text{risk}}
-$$
+if explicit_total is huge outlier and not explicit-total cue:
+  fallback to city_sum
+```
 
-- $w_{\text{determine}}=0.12,\ w_{\text{enable}}=0.44,\ w_{\text{constraint}}=0.92$
-- $\bar{i}_e$: average endpoint importance
+这一步用于压制“14天幽灵值”等异常总时长。
 
-This process repeats until no cycle SCC remains or max rounds reached.
+### 5.3 预算相关 slots
 
-## 9) Approximate Transitive Reduction
+当前生成 4 类预算槽位：
 
-For candidate edge $e=(u\to v)$, remove it if:
+- `slot:budget`（预算上限）
+- `slot:budget_spent`（已花预算）
+- `slot:budget_pending`（待确认支出）
+- `slot:budget_remaining`（剩余预算）
 
-1. there exists alternate path $u \leadsto v$ without $e$
-2. root reachability is still preserved after removing $e$
-3. edge is low-value under current adaptive threshold
+计算式：
 
-Formally:
+```text
+remaining = max(totalBudget - spentBudget, 0)
+remainingNode uses max(remainingByCalc, remainingBySignal)
+```
 
-$$
-\exists P_{u\to v}^{\neg e}
-\land
-\text{Reach}_{G\setminus\{e\}}(u,\text{root})
-\land
-S_{\text{keep}}(e)<\tau(\lambda)
-\Rightarrow
-e \text{ removed}
-$$
+并建立依赖边：
 
-where:
+- `budget -> budget_remaining (determine)`
+- `budget_spent -> budget_remaining (determine)`
+- `budget_pending -> budget_remaining (determine)`
+- `budget_remaining -> goal (constraint)`
 
-$$
-\tau(\lambda)=0.92+0.5(1-\lambda)
-$$
+### 5.4 限制因素统一
 
-Additional practical guards:
+健康/语言/饮食/宗教/安全/法律等统一入 `限制因素` 家族，输出 slot 前缀：
 
-- do not remove strong root-binding non-determine edges
-- do not remove edges touched in latest patch
+- `slot:constraint:limiting:<kind>:<text>`
 
-## 10) Connectivity Repair
+并按 hard/soft 选择 `constraint` 或 `determine` 连到 `goal`。
 
-After reduction, for every node $v\neq root$:
+### 5.5 关键日与子地点
 
-$$
-\neg \text{Reach}(v,root)\Rightarrow \text{add}(v\to root)
-$$
+- 关键日（例如看球、汇报）输出 risk 层 `constraint`
+- 若关键日带城市且命中目的地，连到该目的地；否则连到 goal
+- 子地点优先连到父目的地，不上提为平级主目的地
 
-Edge type is inferred by node semantics (`constraint`/`enable`/`determine`).
+---
 
-This enforces no isolated nodes in final DAG-like structure.
+## 6. 冲突分析（Conflict Analyzer）
 
-## 11) Domain Generalization Beyond Travel
+实现位置：`/Users/primopan/UISTcoginstrument/app/conginstrument/src/services/graphUpdater/conflictAnalyzer.ts`
 
-Although current slots include travel-typical slots, the optimization core is domain-agnostic:
+### 6.1 目的地冲突 guard（误报修复核心）
 
-- A* anchor search depends on graph structure + token similarity, not only travel templates
-- Tarjan SCC and transitive reduction are purely graph-theoretic
-- adaptive $\lambda$ is data-driven by graph density/cycles
+冲突计算前先做：
 
-Extra generic hints are included for non-travel tasks:
+- canonical 归一化
+- 噪声短语剔除
+- 近重复压缩
 
-- resource/cost constraints
-- timeline/deadline constraints
-- stakeholder/entity signals
-- risk/compliance/safety signals
+只有当 `destinations.length >= 2` 时才允许触发 `duration_destination_density`。
 
-## 12) Complexity (current implementation)
+### 6.2 当前冲突规则
 
-- Tarjan SCC: $O(|V|+|E|)$
-- each path existence check (BFS): $O(|V|+|E|)$
-- transitive reduction loop: roughly $O(|E|(|V|+|E|))$ worst-case
-- A* per node: bounded by `maxAStarSteps`
+- `budget_lodging`：预算 vs 豪华住宿
+- `duration_destination_density`：目的地数量 vs 总时长
+- `mobility_scenic_conflict`：高强度偏好 vs 行动/健康限制
+- `too_many_hard_constraints`：硬约束过多且时长过短
 
-In practice, graph sizes in this project are small-to-medium, so latency remains acceptable.
+冲突节点统一生成 `slot:conflict:*`，并建立：
 
-## 13) Automatic Noise Slot Cleanup (new)
+- `conflict -> goal (constraint)`
+- `conflict -> related_slots (conflicts_with)`
 
-To prevent stale noisy slots from surviving across turns, the graph-application stage now runs automatic cleanup:
+---
 
-1. **Lexical invalidation** for structured nodes (`目的地`, `城市时长`)
-2. **Duration outlier pruning** for inconsistent `总行程时长`
+## 7. Slot 图编译器（Patch Compiler）
 
-### 13.1 Lexical invalidation rule
+实现位置：`/Users/primopan/UISTcoginstrument/app/conginstrument/src/services/graphUpdater/slotGraphCompiler.ts`
 
-For destination/city-duration city token $z$, remove node if:
+### 7.1 主节点选举
 
-$$
-\text{Noise}(z)=1
-$$
+对同一 slotKey 的历史节点做分组，选主节点：
 
-where `Noise` is triggered by:
+- 优先 confirmed
+- 然后 confidence
+- 再 importance
 
-- stopword/noise lexicon match (e.g., currency, planning verbs, discourse markers)
-- malformed suffix/prefix (e.g., dangling 前/后)
-- conjunction-packed pseudo-place (e.g., "A和B" as one city token)
-- long narrative fragment instead of place name
+### 7.2 冗余节点清理
 
-### 13.2 Duration consistency + outlier rollback
+- 冗余节点：优先 `remove_node` + 断边
+- 锁定节点：降级为 rejected + `stale_slot/auto_cleaned` 标签
 
-Let valid city segments be $\{(c_i,d_i)\}_{i=1}^{k}$ and:
+### 7.3 目标槽位对齐
 
-$$
-S_{\text{all}}=\sum_{i=1}^{k} d_i,\quad
-S_{\text{travel}}=\sum_{i\in \mathcal{T}} d_i,\quad
-M=\max_i d_i
-$$
+当前状态机没有产出的旧 slot 会被标记 stale/移除，避免旧噪声残留污染后续回合。
 
-Define preferred total:
+---
 
-$$
-P=
-\begin{cases}
-S_{\text{all}}, & |\{c_i\}| \ge 2\\
-S_{\text{travel}}, & S_{\text{travel}}>0\\
-M, & \text{otherwise}
-\end{cases}
-$$
+## 8. Motif Grounding + Patch Guard
 
-For current total-duration slot value $T$, detect outliers:
+实现位置：
 
-$$
-\text{HighOutlier}(T)=\left[T>\max(P+3,\lceil1.45P\rceil)\right]
-$$
+- `/Users/primopan/UISTcoginstrument/app/conginstrument/src/services/motif/motifGrounding.ts`
+- `/Users/primopan/UISTcoginstrument/app/conginstrument/src/services/patchGuard.ts`
 
-$$
-\text{LowOutlier}(T)=\left[T<\max(M,\lfloor0.72P\rfloor)\right]
-$$
+流程：
 
-Rollback rule:
+```text
+rawPatch
+  -> enrichPatchWithMotifFoundation
+  -> sanitizeGraphPatchStrict
+```
 
-$$
-(\text{HighOutlier}(T)\ \lor\ \text{LowOutlier}(T))
-\Rightarrow
-T \leftarrow P
-$$
+补齐字段：
 
-This directly suppresses stale inflated totals (e.g., historical `14天`) when segmented evidence indicates `7天` or `8天`.
+- `motifType`
+- `claim`
+- `priority`
+- `revisionHistory`
 
-## 14) Limiting-Factor Unification (new)
+Patch Guard 负责：
 
-To keep graph semantics stable, hard constraints from different sources are mapped into one common node family:
+- op 白名单
+- node/edge 类型白名单
+- 分数字段 clamp
+- 结构化字段归一化
 
-- health
-- language
-- diet
-- religion
-- legal/safety/mobility/logistics/other
+---
 
-All are rendered as:
+## 9. Patch 应用后的拓扑重平衡（核心图论部分）
 
-$$
-\text{statement} = \text{"限制因素: "} + \text{text}
-$$
+实现位置：
 
-### 14.1 Merge by normalized text
+- `/Users/primopan/UISTcoginstrument/app/conginstrument/src/core/graph/patchApply.ts`
+- `/Users/primopan/UISTcoginstrument/app/conginstrument/src/core/graph/topology.ts`
 
-For raw constraint candidates $\mathcal{C}$, group by normalized text key $k=\text{norm}(c.\text{text})$:
+应用顺序：
 
-$$
-L_k = \{c \in \mathcal{C} \mid \text{norm}(c.\text{text}) = k\}
-$$
+1. patch 执行（含临时 id 重写）
+2. `pruneInvalidStructuredNodes`
+3. `pruneNoisyDurationOutliers`
+4. `compactSingletonSlots`
+5. `rebalanceIntentTopology`
 
-Merged limiting-factor attributes:
+### 9.1 Root 选择与骨架约束
 
-$$
-i_k = \max_{c \in L_k} i_c,\quad
-h_k = \max_{c \in L_k} h_c
-$$
+- 保留单一 goal root
+- Primary slots（people/destination/duration_total/budget）优先成为结构主干
+- duration/budget 等硬约束作为“主动脉”约束后续分支
 
-where $i_c$ is importance and $h_c \in \{0,1\}$ is hard/soft indicator.
+### 9.2 A*-style anchor（非 slot 节点挂载）
 
-Severity merges by rank:
+代价：
 
-$$
-\sigma_k = \max_{c \in L_k} \sigma_c,\quad
-\text{rank}(\text{critical})>\text{rank}(\text{high})>\text{rank}(\text{medium})
-$$
+```text
+travelCost(edge) = typeBias(edge.type) + 0.35 * (1 - edge.confidence)
 
-This gives one consistent constraint family in the graph while preserving detailed tags (`health/language/diet/religion/...`) for explanation.
+typeBias(determine)=1.08
+typeBias(enable)=0.95
+typeBias(constraint)=0.88
 
-## 15) Conflict-Aware Constraint Graph (new)
+semanticPenalty = lexical(1-Jaccard)
+                + slotDistancePenalty
+                + typePenalty
+                + riskPenalty
 
-After slot construction, the system adds conflict nodes and `conflicts_with` edges.
+score(anchor) = g(root->anchor) + semanticPenalty
+```
 
-Let slot set be $\mathcal{S}$ and conflict hypotheses be $\mathcal{Q}$.
-For each $q\in\mathcal{Q}$, create node $v_q$ and connect:
+用于把非结构化节点挂到最合理锚点，而不是全部回根。
 
-$$
-v_q \to v_{\text{goal}} \quad (\text{type}=\text{constraint})
-$$
+### 9.3 自适应稀疏参数
 
-and for related slots $s\in R(q)$:
+```text
+density   = |E| / (|V| * log2(|V|+1))
+cycleRate = (#nodes in SCC cycles) / |V|
 
-$$
-v_q \to v_s \quad (\text{type}=\text{conflicts\_with})
-$$
+lambda = clip(0.38 + 0.24*tanh(density - 1) + 0.36*cycleRate, 0, 1)
 
-### 15.1 Conflict score template
+maxRootIncoming = clip(round(9 - 4*lambda), 4, 10)
+maxAStarSteps   = clip(round(30 + |V|*(0.28 + (1-lambda)*0.35)), 20, 96)
+transitiveCutoff= clip(0.72 - 0.18*lambda, 0.48, 0.9)
+```
 
-$$
-\text{score}(q)=\alpha \cdot \hat{i}_q + \beta \cdot \hat{\sigma}_q + \gamma \cdot \hat{h}_q
-$$
+### 9.4 Tarjan 去环 + 近似传递约简
 
-- $\hat{i}_q$: normalized importance
-- $\hat{\sigma}_q$: normalized severity rank
-- $\hat{h}_q$: hard-constraint indicator
+Tarjan SCC 后，按 keep score 最低边优先删除：
 
-Current implementation uses rule-triggered $\text{score}(q)$ proxies for:
+```text
+keepScore(edge) = typeScore
+                + 0.9*edge.confidence
+                + 0.65*avg(node.importance)
+                + touchedBonus
+                + toRootBonus
+                + riskBonus
+```
 
-- budget vs luxury lodging
-- destination count vs total duration density
-- high-intensity preference vs mobility/health limits
-- too many hard limits under short schedule
+随后做 transitive reduction（带 root reachability 保护），最后修复断连节点：
 
-### 15.2 Example: budget-lodging inconsistency
+```text
+if node cannot reach root:
+   add node -> root with inferred edge type
+```
 
-Given total budget $B$, duration $D$, people count $P$:
+---
 
-$$
-b_{\text{ppd}}=\frac{B}{\max(1,D)\cdot\max(1,P)}
-$$
+## 10. 旅行计划隐式状态与 PDF 导出
 
-If lodging preference is luxury and $b_{\text{ppd}}<\tau$ (dynamic threshold), trigger conflict node.
+实现位置：
 
-This adds explicit machine-readable tension, instead of silently overwriting one slot by another.
+- `/Users/primopan/UISTcoginstrument/app/conginstrument/src/services/travelPlan/state.ts`
+- `/Users/primopan/UISTcoginstrument/app/conginstrument/src/services/travelPlan/pdf.ts`
 
-## 16) Current Limitations
+### 10.1 状态源
 
-- transitive reduction is approximate (not exact minimum equivalent graph)
-- heuristic weights are hand-tuned, not learned end-to-end
-- slot schema is still partially travel-biased in extraction layer
+`travelPlanState` 预算字段以 ledger 重放结果优先：
 
-These are acceptable for current interactive planning, and leave room for future learned weighting or GNN-based scoring.
+- `budgetSummary.totalCny`
+- `budgetSummary.spentCny`
+- `budgetSummary.remainingCny`
+- `budgetSummary.pendingCny`
 
-## 17) Uncertainty-Driven Clarification Flow (new)
+并保留 `budgetLedger[]` 作为证据链。
 
-To align with proactive disambiguation in the paper, each turn now computes node-level uncertainty and asks one targeted question.
+### 10.2 去噪与去重
 
-Node uncertainty score:
+- 确认模板问句过滤（例如“请确认是否硬约束”）
+- 段落 hash 去重
+- 约束表述规范化（避免“限制因素: 限制因素…”重复）
 
-`U(v) = w1*(1-c_v) + w2*status(v) + w3*edgeUncertainty(v) + w4*evidenceGap(v) + w5*layerWeight(v)`
+### 10.3 PDF 结构
 
-where:
+当前导出固定结构：
 
-- `c_v`: node confidence
-- `status(v)`: proposed/disputed nodes receive positive penalty; confirmed receives slight discount
-- `edgeUncertainty(v)`: boosted by low-confidence `constraint`/`conflicts_with` edges
-- `evidenceGap(v)`: positive penalty when no `evidenceIds`
-- `layerWeight(v)`: `risk` / `requirement` prioritized over lower-impact layers
+1. 摘要
+2. 概览
+3. 可执行行程
+4. 预算台账（事件流）
+5. 关键约束
+6. 附录（证据片段）
 
-Question selection:
+---
 
-`q* = argmax_{q in Q(U_top)} novelty(q, recent_turns)`
+## 11. 配置项（与算法行为相关）
 
-- `Q(U_top)`: template candidates generated from top uncertain slot family (duration/budget/destination/critical_day/limiting_factor)
-- `novelty`: repetition guard against last 3-4 assistant turns
+- `CI_GRAPH_USE_FUNCTION_SLOTS`：是否启用 function-call 槽位抽取
+- `CI_GRAPH_MODEL`：图抽取模型
+- `CI_ALLOW_DELETE`：是否允许 remove_node/remove_edge 在 apply 阶段生效
+- `CI_DATE_RANGE_BOUNDARY_MODE`：日期区间边界策略（auto/inclusive/exclusive）
+- `CI_FX_<CUR>_TO_CNY`：汇率覆盖（如 EUR/USD/GBP）
+- `CI_PDF_FONT_PATH`：PDF CJK 字体路径
 
-This avoids generic questions and pushes one high-impact clarification per turn.
+> 注意：`patchGuard` 与 `applyPatchWithGuards` 都会影响删除行为；生产建议统一配置 `CI_ALLOW_DELETE`，避免行为歧义。
 
-## 18) Motif Foundation Layer (new)
+---
 
-Before strict patch sanitization, the system now grounds motif metadata on patch ops:
+## 12. 当前已覆盖的关键 bug（对照）
 
-1. infer `motifType` if missing (`expectation/hypothesis/belief/cognitive_step`)
-2. derive concise `claim` from statement if missing
-3. align `priority` with `importance` when absent
-4. append minimal `revisionHistory` record for traceability
+1. **预算不更新**：通过 ledger 重放修复（总预算、已花、剩余分槽位）
+2. **“两个目的地三天”误报**：通过目的地 canonical + 去噪 + `<2目的地` guard 修复
+3. **旧节点污染**：slot compiler stale 清理 + core 层二次去噪
+4. **总时长跳变（如 14 天）**：duration consensus + outlier pruning 修复
+5. **导出重复/不可读**：exportNarrative 去重 + 结构化 PDF 修复
 
-Patch pipeline:
+---
 
-`rawPatch -> motifGrounding -> sanitizeGraphPatchStrict -> applyPatchWithGuards`
+## 13. 后续增强建议（与当前代码兼容）
 
-Additionally, motif catalog aggregation groups semantically equivalent nodes:
+1. 把 `expense_pending -> expense_commit` 做显式确认状态迁移（当前仍偏规则驱动）
+2. 冲突节点增加 `resolvedBy=user/system`，支持前端一键消歧
+3. 目的地层引入更稳定的地理层级缓存（city/region/venue）
+4. PDF 增加“精简版/附录版”导出选项
 
-`key = motifType + ":" + normalize(claim)`
-
-For each key:
-
-- count
-- average confidence
-- average importance
-- representative node id
-
-This is the base layer for next-step motif transfer and conflict explanation panels.
