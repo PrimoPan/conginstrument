@@ -98,7 +98,7 @@ curl http://localhost:3001/healthz
 | `CI_ALLOW_DELETE` | 否 | `0` | 是否允许 remove_node/remove_edge |
 | `CI_DEBUG_LLM` | 否 | `0` | LLM 与 patch 调试日志 |
 | `CI_DATE_RANGE_BOUNDARY_MODE` | 否 | `auto` | 日期跨度边界策略：`auto`（会议偏 exclusive，旅游偏 inclusive）/`inclusive`/`exclusive` |
-| `CI_PDF_FONT_PATH` | 否 | 空 | PDF 导出中文字体路径（优先）；为空时会尝试系统常见 CJK 字体 |
+| `CI_PDF_FONT_PATH` | 否 | 空 | PDF 导出中文字体路径（最高优先级）。未设置时默认使用仓库内置字体 `assets/fonts/NotoSansSC-chinese-simplified-400.woff`；若内置文件缺失会返回导出错误（避免生成乱码 PDF） |
 
 ---
 

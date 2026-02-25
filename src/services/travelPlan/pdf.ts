@@ -1,10 +1,16 @@
 import fs from "node:fs";
+import { fileURLToPath } from "node:url";
 import PDFDocument from "pdfkit";
 
 import { config } from "../../server/config.js";
 import { buildTravelPlanText, type TravelPlanState } from "./state.js";
 
+const BUNDLED_CJK_FONT = fileURLToPath(
+  new URL("../../../assets/fonts/NotoSansSC-chinese-simplified-400.woff", import.meta.url)
+);
+
 const FONT_CANDIDATES = [
+  BUNDLED_CJK_FONT,
   process.env.CI_PDF_FONT_PATH || "",
   "/usr/share/fonts/opentype/noto/NotoSansCJKsc-Regular.otf",
   "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
@@ -34,12 +40,12 @@ function listExistingFontPaths(): string[] {
 function applyChineseFont(doc: PDFKit.PDFDocument): string | null {
   const files = listExistingFontPaths();
   if (!files.length) return null;
-  // 优先尝试 ttf/otf，避免部分 ttc 在 pdfkit 子集化阶段报错导致 PDF 损坏/导出失败。
+  // 优先尝试 woff/ttf/otf，避免部分 ttc 在 pdfkit 子集化阶段报错导致 PDF 损坏/导出失败。
   const prefer = files
     .slice()
     .sort((a, b) => {
       const rank = (x: string) =>
-        /\.ttf$/i.test(x) ? 0 : /\.otf$/i.test(x) ? 1 : /\.ttc$/i.test(x) ? 2 : 3;
+        /\.woff2?$/i.test(x) ? 0 : /\.ttf$/i.test(x) ? 1 : /\.otf$/i.test(x) ? 2 : /\.ttc$/i.test(x) ? 3 : 4;
       return rank(a) - rank(b);
     });
   for (const p of prefer) {
@@ -81,8 +87,9 @@ export async function renderTravelPlanPdf(params: {
 
   const fontPath = applyChineseFont(doc);
   if (!fontPath) {
-    // fallback to built-in font; PDF remains readable though CJK glyphs may be limited
-    doc.font("Helvetica");
+    throw new Error(
+      "No usable CJK font found for PDF export. Set CI_PDF_FONT_PATH or keep bundled font file."
+    );
   }
 
   const chunks: Buffer[] = [];

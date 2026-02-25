@@ -497,59 +497,67 @@ convRouter.get("/:id/turns", async (req: AuthedRequest, res) => {
 
 // 导出当前旅行计划 PDF（含中文自然语言与按天行程）
 convRouter.get("/:id/travel-plan/export.pdf", async (req: AuthedRequest, res) => {
-  const userId = req.userId!;
-  const id = req.params.id;
+  try {
+    const userId = req.userId!;
+    const id = req.params.id;
 
-  const oid = parseObjectId(id);
-  if (!oid) return res.status(400).json({ error: "invalid conversation id" });
+    const oid = parseObjectId(id);
+    if (!oid) return res.status(400).json({ error: "invalid conversation id" });
 
-  const conv = await collections.conversations.findOne({ _id: oid, userId });
-  if (!conv) return res.status(404).json({ error: "conversation not found" });
+    const conv = await collections.conversations.findOne({ _id: oid, userId });
+    if (!conv) return res.status(404).json({ error: "conversation not found" });
 
-  const turns = await loadRecentTurnsForPlan({ conversationId: oid, userId, limit: 120 });
-  if (!turns.length) {
-    return res.status(400).json({ error: "no conversation turns yet, cannot export plan" });
-  }
-
-  const graph: CDG = {
-    id: String(conv.graph?.id || id),
-    version: Number(conv.graph?.version || 0),
-    nodes: Array.isArray(conv.graph?.nodes) ? conv.graph.nodes : [],
-    edges: Array.isArray(conv.graph?.edges) ? conv.graph.edges : [],
-  };
-  const travelPlanState = buildTravelPlanState({
-    graph,
-    turns: turns.map((t) => ({
-      createdAt: t.createdAt,
-      userText: t.userText,
-      assistantText: t.assistantText,
-    })),
-    previous: (conv as any).travelPlanState || null,
-  });
-
-  const now = new Date();
-  await collections.conversations.updateOne(
-    { _id: oid, userId },
-    {
-      $set: {
-        travelPlanState,
-        updatedAt: now,
-      },
+    const turns = await loadRecentTurnsForPlan({ conversationId: oid, userId, limit: 120 });
+    if (!turns.length) {
+      return res.status(400).json({ error: "no conversation turns yet, cannot export plan" });
     }
-  );
 
-  const pdf = await renderTravelPlanPdf({
-    plan: travelPlanState,
-    conversationId: id,
-  });
-  const filename = defaultTravelPlanFileName(id);
-  res.setHeader("Content-Type", "application/pdf");
-  res.setHeader("Content-Length", String(pdf.length));
-  res.setHeader(
-    "Content-Disposition",
-    `attachment; filename=\"travel-plan.pdf\"; filename*=UTF-8''${encodeURIComponent(filename)}`
-  );
-  return res.status(200).send(pdf);
+    const graph: CDG = {
+      id: String(conv.graph?.id || id),
+      version: Number(conv.graph?.version || 0),
+      nodes: Array.isArray(conv.graph?.nodes) ? conv.graph.nodes : [],
+      edges: Array.isArray(conv.graph?.edges) ? conv.graph.edges : [],
+    };
+    const travelPlanState = buildTravelPlanState({
+      graph,
+      turns: turns.map((t) => ({
+        createdAt: t.createdAt,
+        userText: t.userText,
+        assistantText: t.assistantText,
+      })),
+      previous: (conv as any).travelPlanState || null,
+    });
+
+    const now = new Date();
+    await collections.conversations.updateOne(
+      { _id: oid, userId },
+      {
+        $set: {
+          travelPlanState,
+          updatedAt: now,
+        },
+      }
+    );
+
+    const pdf = await renderTravelPlanPdf({
+      plan: travelPlanState,
+      conversationId: id,
+    });
+    const filename = defaultTravelPlanFileName(id);
+    res.setHeader("Content-Type", "application/pdf");
+    res.setHeader("Content-Length", String(pdf.length));
+    res.setHeader(
+      "Content-Disposition",
+      `attachment; filename=\"travel-plan.pdf\"; filename*=UTF-8''${encodeURIComponent(filename)}`
+    );
+    return res.status(200).send(pdf);
+  } catch (err: any) {
+    return res.status(500).json({
+      error:
+        err?.message ||
+        "travel plan pdf export failed",
+    });
+  }
 });
 
 // ==========================
