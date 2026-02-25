@@ -281,6 +281,36 @@ function parseBudgetAmountToken(raw: string): number | null {
   return cn && cn > 0 ? cn : null;
 }
 
+const FX_TO_CNY_DEFAULT: Record<string, number> = {
+  EUR: 7.9,
+  USD: 7.2,
+  GBP: 9.2,
+  HKD: 0.92,
+  JPY: 0.048,
+};
+
+function normalizeForeignCurrency(raw: string): keyof typeof FX_TO_CNY_DEFAULT | "" {
+  const s = String(raw || "").trim().toLowerCase();
+  if (!s) return "";
+  if (s === "eur" || s === "€" || s === "欧元") return "EUR";
+  if (s === "usd" || s === "$" || s === "美元") return "USD";
+  if (s === "gbp" || s === "£" || s === "英镑") return "GBP";
+  if (s === "hkd" || s === "港币" || s === "港元") return "HKD";
+  if (s === "jpy" || s === "yen" || s === "円" || s === "日元") return "JPY";
+  return "";
+}
+
+function fxToCny(amount: number, currency: string): number | null {
+  if (!Number.isFinite(amount) || amount <= 0) return null;
+  const code = normalizeForeignCurrency(currency);
+  if (!code) return null;
+  const envKey = `CI_FX_${code}_TO_CNY`;
+  const envRate = Number(process.env[envKey]);
+  const rate = Number.isFinite(envRate) && envRate > 0 ? envRate : FX_TO_CNY_DEFAULT[code];
+  if (!Number.isFinite(rate) || rate <= 0) return null;
+  return Math.max(1, Math.round(amount * rate));
+}
+
 function parseBoundaryMode(raw: string): DateRangeBoundaryMode {
   const v = String(raw || "").trim().toLowerCase();
   if (v === "inclusive" || v === "exclusive" || v === "auto") return v;
@@ -664,6 +694,20 @@ function pickBudgetDeltaFromText(text: string): { delta: number; evidence: strin
     parser?: (raw: string) => number;
   }> = [
     {
+      re: /(?:又|再|另外|额外|追加|补充)\s*(?:给了?|给到|给)\s*(?:我|我们)?\s*([0-9]+(?:\.[0-9]+)?)\s*万(?:元|人民币)?(?:的)?(?:预算|经费|花费|费用)/gi,
+      sign: 1,
+      parser: (raw) => Math.round(Number(raw) * 10000),
+    },
+    {
+      re: /(?:又|再|另外|额外|追加|补充)\s*(?:给了?|给到|给)\s*(?:我|我们)?\s*([0-9]{2,9})\s*(?:元|块|人民币)?(?:的)?(?:预算|经费|花费|费用)/gi,
+      sign: 1,
+    },
+    {
+      re: /(?:又|再|另外|额外|追加|补充)\s*(?:给了?|给到|给)\s*(?:我|我们)?\s*([0-9一二两三四五六七八九十百千万\.]{1,12}(?:万|千)[0-9一二两三四五六七八九十百千]{0,4}|[零一二两三四五六七八九十百千]{2,8})\s*(?:元|块|人民币)?(?:的)?(?:预算|经费|花费|费用)/gi,
+      sign: 1,
+      parser: (raw) => Number(parseBudgetAmountToken(raw) || 0),
+    },
+    {
       re: /(?:再|又|额外|另外|追加|多给|增加了?|加了?|上调了?|提高了?|提升了?)\s*([0-9]+(?:\.[0-9]+)?)\s*万(?:元|人民币)?(?:预算|经费|花费|费用)?/gi,
       sign: 1,
       parser: (raw) => Math.round(Number(raw) * 10000),
@@ -748,6 +792,22 @@ function pickBudgetSpentDeltaFromText(text: string): { delta: number; evidence: 
       };
       if (!best || cand.index >= best.index) best = cand;
     }
+  }
+  const foreignSpendRe =
+    /(?:买|买了|购买|购入|下单|订|订了|订票|买票|购票|支付|付款|付了?|刷卡|出票)[^\n，。,；;]{0,14}?([0-9]+(?:\.[0-9]+)?)\s*(欧元|eur|€|美元|usd|\$|英镑|gbp|£|港币|港元|hkd|日元|jpy|yen|円)(?:\s*(?:的|左右|约|大概))?/gi;
+  for (const m of t.matchAll(foreignSpendRe)) {
+    if (!m?.[1] || !m?.[2]) continue;
+    const amount = Number(m[1]);
+    if (!Number.isFinite(amount) || amount <= 0) continue;
+    const cny = fxToCny(amount, m[2]);
+    if (!cny || cny <= 0) continue;
+    const index = Number(m.index) || 0;
+    const cand: BudgetDeltaMatch = {
+      delta: Math.round(cny),
+      evidence: cleanStatement(`${m[0]}（约${Math.round(cny)}元）`, 64),
+      index,
+    };
+    if (!best || cand.index >= best.index) best = cand;
   }
   return best ? { delta: best.delta, evidence: best.evidence } : null;
 }

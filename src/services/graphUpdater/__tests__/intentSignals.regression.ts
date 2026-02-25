@@ -4,6 +4,7 @@ import {
   extractIntentSignals,
   extractIntentSignalsWithRecency,
 } from "../intentSignals.js";
+import { analyzeConstraintConflicts } from "../conflictAnalyzer.js";
 
 type Case = {
   name: string;
@@ -50,6 +51,16 @@ const cases: Case[] = [
     },
   },
   {
+    name: "budget delta colloquial giver phrase: 给了我5000预算",
+    run: () => {
+      const merged = extractIntentSignalsWithRecency(
+        "我预算5000元",
+        "我父亲又给了我5000预算"
+      );
+      assert.equal(merged.budgetCny, 10000);
+    },
+  },
+  {
     name: "budget spent absolute should be parsed",
     run: () => {
       const s = extractIntentSignals("我酒店已经花了3000元");
@@ -87,6 +98,25 @@ const cases: Case[] = [
       );
       assert.equal(merged.budgetSpentCny, 3500);
       assert.equal(merged.budgetRemainingCny, 6500);
+    },
+  },
+  {
+    name: "foreign currency purchase should update spent and remaining budget",
+    run: () => {
+      const prevRate = process.env.CI_FX_EUR_TO_CNY;
+      process.env.CI_FX_EUR_TO_CNY = "8";
+      try {
+        const merged = extractIntentSignalsWithRecency(
+          "总预算10000元",
+          "那买80欧元的吧"
+        );
+        assert.equal(merged.budgetCny, 10000);
+        assert.equal(merged.budgetSpentCny, 640);
+        assert.equal(merged.budgetRemainingCny, 9360);
+      } finally {
+        if (prevRate == null) delete process.env.CI_FX_EUR_TO_CNY;
+        else process.env.CI_FX_EUR_TO_CNY = prevRate;
+      }
     },
   },
   {
@@ -212,6 +242,19 @@ const cases: Case[] = [
       assert.equal(s.durationDays, 3);
       const segCities = (s.cityDurations || []).map((x) => x.city);
       assert.deepEqual(segCities, ["米兰"]);
+    },
+  },
+  {
+    name: "single destination should not trigger duration-destination density conflict",
+    run: () => {
+      const s = extractIntentSignals(
+        "我想一个人去米兰玩三天，已经买了机票。4月10日到4月12日，4月13日离开，预算大概5000元人民币"
+      );
+      const conflicts = analyzeConstraintConflicts({
+        totalDays: s.durationDays,
+        destinations: s.destinations,
+      });
+      assert.equal(conflicts.some((x) => x.key === "duration_destination_density"), false);
     },
   },
   {
