@@ -1,14 +1,13 @@
-# CogInstrument Graph Algorithms (Implementation Spec)
+# CogInstrument Backend Algorithms (English Spec)
 
 Last updated: 2026-02-26
 
-This document describes the current backend algorithm pipeline used in production code.
-It focuses on the two-stage graph engine, motif logic, budget state machine, and topology optimization.
+This document defines the current production algorithm for Concept–Motif–Context modeling, graph compilation, conflict control, and planning export.
 
-## 1. Source-of-Truth Files
+## 1. Scope and Source Modules
 
-- `/Users/primopan/UISTcoginstrument/app/conginstrument/src/routes/conversations.ts`
-- `/Users/primopan/UISTcoginstrument/app/conginstrument/src/services/llm.ts`
+Primary implementation files:
+
 - `/Users/primopan/UISTcoginstrument/app/conginstrument/src/services/graphUpdater.ts`
 - `/Users/primopan/UISTcoginstrument/app/conginstrument/src/services/graphUpdater/intentSignals.ts`
 - `/Users/primopan/UISTcoginstrument/app/conginstrument/src/services/graphUpdater/slotFunctionCall.ts`
@@ -16,57 +15,57 @@ It focuses on the two-stage graph engine, motif logic, budget state machine, and
 - `/Users/primopan/UISTcoginstrument/app/conginstrument/src/services/graphUpdater/slotStateMachine.ts`
 - `/Users/primopan/UISTcoginstrument/app/conginstrument/src/services/graphUpdater/conflictAnalyzer.ts`
 - `/Users/primopan/UISTcoginstrument/app/conginstrument/src/services/graphUpdater/slotGraphCompiler.ts`
+- `/Users/primopan/UISTcoginstrument/app/conginstrument/src/services/motif/conceptMotifs.ts`
+- `/Users/primopan/UISTcoginstrument/app/conginstrument/src/services/motif/motifLinks.ts`
+- `/Users/primopan/UISTcoginstrument/app/conginstrument/src/services/motif/reasoningView.ts`
 - `/Users/primopan/UISTcoginstrument/app/conginstrument/src/services/travelPlan/budgetLedger.ts`
-- `/Users/primopan/UISTcoginstrument/app/conginstrument/src/services/motif/motifGrounding.ts`
-- `/Users/primopan/UISTcoginstrument/app/conginstrument/src/services/patchGuard.ts`
-- `/Users/primopan/UISTcoginstrument/app/conginstrument/src/core/graph/patchApply.ts`
-- `/Users/primopan/UISTcoginstrument/app/conginstrument/src/core/graph/topology.ts`
 - `/Users/primopan/UISTcoginstrument/app/conginstrument/src/services/travelPlan/state.ts`
 - `/Users/primopan/UISTcoginstrument/app/conginstrument/src/services/travelPlan/pdf.ts`
+- `/Users/primopan/UISTcoginstrument/app/conginstrument/src/core/graph/patchApply.ts`
+- `/Users/primopan/UISTcoginstrument/app/conginstrument/src/core/graph/topology.ts`
 
-## 2. End-to-End Runtime Pipeline
+## 2. End-to-End Runtime
 
-1. User turn arrives.
-2. Assistant text is generated using short recent context.
-3. Graph patch is generated from deterministic + function-call signals.
-4. Slot state machine compiles canonical slot state.
-5. Slot graph compiler resolves duplicates and stale nodes.
-6. Motif grounding enriches semantic metadata.
-7. Patch guard sanitizes operations.
-8. Patch is applied with topology rebalance.
-9. Graph + Concept + Motif + Context + TravelPlanState are persisted.
+For each turn:
 
-## 3. Context Windows
+1. Parse deterministic signals + function-call slots.
+2. Sanitize and merge signals.
+3. Build slot-state machine output.
+4. Compile slot graph with stale-node cleanup.
+5. Reconcile concepts from graph.
+6. Reconcile motifs from concept graph.
+7. Reconcile motif links and reasoning view.
+8. Apply patch guard and topology rebalance.
+9. Persist conversation, graph, concepts, motifs, contexts, travel plan state.
 
-- **Short context**: for assistant response fluency (typically latest ~10 turns).
-- **Long user context**: for state reconstruction (typically 80-160 user turns).
+## 3. Concept–Motif–Context Data Semantics
 
-This prevents budget/duration rollbacks caused by short-window truncation.
+## 3.1 Concept
 
-## 4. Signal Layer
+Atomic cognitive unit:
 
-Signals are merged from:
+- `belief`
+- `constraint`
+- `preference`
+- `factual assertion`
 
-- Deterministic parser (`intentSignals.ts`)
-- Function-call slot extraction (`slotFunctionCall.ts`)
+## 3.2 Motif
 
-Merge policy:
+Reusable dependency pattern built from concepts:
 
-- Deterministic parser is authoritative for scalar stability (budget, duration).
-- Function-call extraction fills structural gaps.
+- `enable` (direct/mediated causation)
+- `constraint` (confounding-style restriction)
+- `determine` (intervention/commitment)
 
-Then `signalSanitizer.ts` performs:
+## 3.3 Context
 
-- destination canonicalization and noise filtering
-- sub-location parent remapping
-- duration reconciliation between total and segmented evidence
-- confirmation statement normalization
+Task situation composed by motif instances and linked concept instantiations.
 
-## 5. Budget Ledger State Machine
+## 4. Budget Ledger State Machine
 
-Implemented in `budgetLedger.ts`.
+Budget is event-sourced and replayed; no direct scalar overwrite.
 
-### 5.1 Event Types
+Event types:
 
 - `budget_set`
 - `budget_adjust`
@@ -74,300 +73,378 @@ Implemented in `budgetLedger.ts`.
 - `expense_refund`
 - `expense_pending`
 
-### 5.2 Accounting Policy
-
-- Only **user-confirmed** spending contributes to committed cost.
-- Unconfirmed deductions stay pending.
-- FX conversion stores a snapshot rate per event for reproducibility.
-
-### 5.3 Replay Equations
+State variables:
 
 $$
-\text{total}_0 = \varnothing,\quad
-\text{spent}_0 = 0,\quad
+\text{total}_0 = \varnothing
+$$
+
+$$
+\text{spent}_0 = 0
+$$
+
+$$
 \text{pending}_0 = 0
 $$
 
-For each event `e_t` in chronological order:
+Replay update:
 
 $$
 \text{total}_{t+1} =
 \begin{cases}
-e_t.\text{amount} & \text{if } e_t.\text{type}=\texttt{budget\_set}\\
-(\text{total}_t \text{ or } 0) + e_t.\text{amount} & \text{if } e_t.\text{type}=\texttt{budget\_adjust}\\
-\text{total}_t & \text{otherwise}
+e_t.\text{amount}, & e_t=\texttt{budget\_set}\\
+(\text{total}_t \text{ or } 0) + e_t.\text{amount}, & e_t=\texttt{budget\_adjust}\\
+\text{total}_t, & \text{otherwise}
 \end{cases}
 $$
 
 $$
 \text{spent}_{t+1} =
 \begin{cases}
-e_t.\text{amount} & \text{if } e_t.\text{type}=\texttt{expense\_commit}\land e_t.\text{mode}=\texttt{absolute}\\
-\text{spent}_t + e_t.\text{amount} & \text{if } e_t.\text{type}=\texttt{expense\_commit}\land e_t.\text{mode}=\texttt{incremental}\\
-\max(\text{spent}_t - e_t.\text{amount}, 0) & \text{if } e_t.\text{type}=\texttt{expense\_refund}\\
-\text{spent}_t & \text{otherwise}
+e_t.\text{amount}, & e_t=\texttt{expense\_commit}\land \texttt{mode}=\texttt{absolute}\\
+\text{spent}_t + e_t.\text{amount}, & e_t=\texttt{expense\_commit}\land \texttt{mode}=\texttt{incremental}\\
+\max(\text{spent}_t - e_t.\text{amount}, 0), & e_t=\texttt{expense\_refund}\\
+\text{spent}_t, & \text{otherwise}
 \end{cases}
 $$
 
 $$
 \text{pending}_{t+1} =
 \begin{cases}
-\text{pending}_t + e_t.\text{amount} & \text{if } e_t.\text{type}=\texttt{expense\_pending}\\
-\text{pending}_t & \text{otherwise}
+\text{pending}_t + e_t.\text{amount}, & e_t=\texttt{expense\_pending}\\
+\text{pending}_t, & \text{otherwise}
 \end{cases}
 $$
 
 $$
-\text{remaining}=
+\text{remaining} =
 \begin{cases}
-\max(\text{total}-\text{spent}, 0) & \text{if total is defined}\\
-\varnothing & \text{otherwise}
+\max(\text{total}-\text{spent}, 0), & \text{if total is defined}\\
+\varnothing, & \text{otherwise}
 \end{cases}
 $$
 
-## 6. Slot State Machine
+Hard policy:
 
-Implemented in `slotStateMachine.ts`.
+- Only user-confirmed spending enters `expense_commit`.
+- Suggested costs stay pending until user commitment.
+- FX conversion records rate snapshot as event evidence.
 
-Output:
+## 5. Duration and Destination Stability
 
-- canonical slot nodes
-- canonical slot edges
-
-### 6.1 Duration Consensus
-
-Candidates:
-
-- explicit total duration
-- city segment sum
-- maximum segment duration
+Consensus duration:
 
 $$
-d^\* = \operatorname{WeightedMedian}\!\left(d_{\text{explicit}}, d_{\text{city-sum}}, d_{\text{max-seg}}\right)
+d^\* = \operatorname{WeightedMedian}
+\left(
+d_{\text{explicit}},
+d_{\text{city-sum}},
+d_{\text{max-segment}}
+\right)
 $$
 
-Rule corrections:
-
-- If multi-city travel exists and consensus underestimates coverage, prefer `d_city-sum`.
-- If explicit total is an outlier without explicit-total cue, downgrade it.
-
-### 6.2 Budget Slot Family
-
-Current slot family:
-
-- `slot:budget`
-- `slot:budget_spent`
-- `slot:budget_pending`
-- `slot:budget_remaining`
+Conflict guard:
 
 $$
-b_{\text{remaining}} = \max\!\left(b_{\text{total}}-b_{\text{spent}},\,0\right)
+|D_{\text{canonical}}| < 2 \Rightarrow
+\text{skip } \texttt{duration\_destination\_density}
 $$
 
-If both derived and weak textual remaining signals exist:
+Destination canonicalization suppresses noise phrases (safety wording, procedural text, non-place action verbs).
+
+## 6. Motif Reconciliation and Minimality
+
+## 6.1 Motif Generation
+
+Two-stage generation:
+
+1. Pair motifs from concept edges.
+2. Triad motifs from shared anchors.
+3. Aggregate into pattern motifs.
+
+Pattern signature:
 
 $$
-b_{\text{remaining}}^{\text{final}} = \max\!\left(b_{\text{remaining}}^{\text{calc}},\, b_{\text{remaining}}^{\text{signal}}\right)
-$$
-
-### 6.3 Unified Limiting Factors
-
-Health/language/diet/religion/safety/legal/logistics are normalized into one constraint family:
-
-- `slot:constraint:limiting:<kind>:<detail>`
-
-This avoids category fragmentation and improves portability beyond travel scenarios.
-
-## 7. Conflict Analyzer
-
-Implemented in `conflictAnalyzer.ts`.
-
-### 7.1 False-Positive Guard
-
-Duration-density conflict is blocked when canonical destination count is less than 2:
-
-$$
-|D_{\text{canonical}}| < 2 \Rightarrow \text{skip duration-density conflict emission}
-$$
-
-### 7.2 Active Rules
-
-- budget vs luxury lodging mismatch
-- destination density vs total duration
-- high-intensity preference vs mobility/health constraints
-- hard-constraint overload under short duration
-
-## 8. Slot Graph Compiler
-
-Implemented in `slotGraphCompiler.ts`.
-
-For each slot group:
-
-1. winner election by status rank, confidence, importance
-2. stale node cleanup
-3. stale edge detachment
-4. alignment to latest slot state
-
-## 9. Motif Grounding + Patch Guard
-
-Implemented in:
-
-- `motifGrounding.ts`
-- `patchGuard.ts`
-
-Patch chain:
-
-$$
-\text{rawPatch}
+\sigma(m)=
+\texttt{motifType}
+\;|\;
+\texttt{dependencyClass}
+\;|\;
+\texttt{sourceFamilies}
 \rightarrow
-\text{motifFoundation}
-\rightarrow
-\text{strictSanitization}
-\rightarrow
-\text{safePatch}
+\texttt{anchorFamily}
 $$
 
-Auto-enriched motif fields include `motifType`, `claim`, `priority`, and `revisionHistory`.
-
-## 10. Topology Rebalancer (Graph-Theoretic Core)
-
-Implemented in:
-
-- `patchApply.ts`
-- `core/graph/topology.ts`
-
-Execution order:
-
-1. prune invalid structured nodes
-2. prune noisy duration outliers
-3. compact singleton slot duplicates
-4. run topology rebalance
-
-### 10.1 A*-Style Anchor Assignment
-
-For non-slot nodes, anchor assignment minimizes travel + heuristic cost:
+## 6.2 Motif Priority
 
 $$
-a^\* = \arg\min_{a \in \mathcal{A}} \left[g(x,a) + h(x,a)\right]
+P(m)=c_m+b_{\text{rel}}(m)+b_{\text{type}}(m)
+$$
+
+Where:
+
+$$
+b_{\text{rel}}=
+\begin{cases}
+0.03 & \text{constraint}\\
+0.02 & \text{determine}\\
+0.01 & \text{enable}\\
+0 & \text{other}
+\end{cases}
+$$
+
+$$
+b_{\text{type}}=
+\begin{cases}
+0.015 & \text{pair}\\
+0 & \text{triad}
+\end{cases}
+$$
+
+## 6.3 Status Inference (5-state model)
+
+States:
+
+- `active`
+- `uncertain`
+- `deprecated`
+- `disabled`
+- `cancelled`
+
+Status baseline:
+
+$$
+c_m < 0.7 \Rightarrow \texttt{uncertain}
+$$
+
+$$
+\texttt{relation}=\texttt{conflicts\_with} \Rightarrow \texttt{deprecated}
+$$
+
+$$
+\text{all related concepts paused} \Rightarrow \texttt{disabled}
+$$
+
+Otherwise active, unless user-resolved lock keeps prior decision.
+
+## 6.4 Red Conflict Gate (strict)
+
+`deprecated` is reserved for real semantic contradiction only.
+
+For motifs \(m_i, m_j\) sharing anchor:
+
+$$
+\text{PotentialConflict}(m_i,m_j)=
+\left[
+\{\texttt{constraint},\texttt{determine}\}\subseteq R
+\;\lor\;
+\{\texttt{constraint},\texttt{enable}\}\subseteq R
+\right]
+$$
+
+$$
+\text{ExplicitConflict}(m_i,m_j)=
+(\text{negation polarity differs})
+\;\lor\;
+(\text{explicit conflict lexicon hit})
+$$
+
+$$
+\neg \text{ExplicitConflict} \Rightarrow
+\text{loser status}=\texttt{cancelled}
+$$
+
+$$
+\text{ExplicitConflict} \Rightarrow
+\text{loser status}=\texttt{deprecated}
+$$
+
+## 6.5 Soft Pruning Policy
+
+Soft reasons must never remain red:
+
+- `redundant_with:*`
+- `subsumed_by:*`
+- `density_pruned:*`
+- `relation_shadowed_by:*`
+
+Mapping rule:
+
+$$
+\texttt{deprecated} \land \texttt{softReason}
+\Rightarrow \texttt{cancelled}
+$$
+
+## 6.6 Active Motif Density Cap
+
+Per anchor concept:
+
+$$
+N_{\text{active}}(a)\le 3
+$$
+
+Overflow motifs are soft-pruned and cancelled.
+
+## 7. Motif Links and Reasoning Graph
+
+Motif link types:
+
+- `supports`
+- `depends_on`
+- `conflicts`
+- `refines`
+
+The motif reasoning canvas visualizes:
+
+- motif internal structure (concept chain + dependency)
+- motif status changes
+- motif-to-motif structural propagation used by LLM reasoning
+
+## 8. Topology Optimization (A* + Tarjan + Adaptive Control)
+
+## 8.1 A*-style Anchor Assignment
+
+$$
+a^\*=
+\arg\min_{a\in\mathcal{A}}
+\left[
+g(x,a)+h(x,a)
+\right]
 $$
 
 Edge travel cost:
 
 $$
-\operatorname{travelCost}(e)=b_{\text{type}(e)} + 0.35\cdot\left(1-c_e\right)
+\operatorname{travelCost}(e)=
+b_{\text{type}(e)} + 0.35\cdot(1-c_e)
 $$
 
-With:
+$$
+b_{\texttt{determine}}=1.08
+$$
 
 $$
-b_{\texttt{determine}}=1.08,\quad
-b_{\texttt{enable}}=0.95,\quad
+b_{\texttt{enable}}=0.95
+$$
+
+$$
 b_{\texttt{constraint}}=0.88
 $$
 
-Heuristic term:
+Heuristic:
 
 $$
-h(x,a)=\left(1-\operatorname{Jaccard}(T_x,T_a)\right)+\Delta_{\text{slot}}+\Delta_{\text{type}}+\Delta_{\text{risk}}
+h(x,a)=
+\left(1-\operatorname{Jaccard}(T_x,T_a)\right)
+\;+\;
+\Delta_{\text{slot}}
+\;+\;
+\Delta_{\text{type}}
+\;+\;
+\Delta_{\text{risk}}
 $$
 
-Final score:
+## 8.2 Adaptive Control
 
 $$
-\operatorname{score}(a)=g(x,a)+h(x,a)
-$$
-
-### 10.2 Adaptive Topology Control
-
-Graph density and cycle pressure control rebalancing aggressiveness:
-
-$$
-\rho=\frac{|E|}{|V|\cdot\log_2(|V|+1)},\qquad
-\kappa=\frac{|V_{\text{SCC-cycle}}|}{|V|}
-$$
-
-$$
-\lambda=\operatorname{clip}\!\left(0.38+0.24\tanh(\rho-1)+0.36\kappa,\ 0,\ 1\right)
-$$
-
-Derived runtime controls:
-
-$$
-\text{maxRootIncoming}=\operatorname{clip}\!\left(\operatorname{round}(9-4\lambda),\ 4,\ 10\right)
+\rho=
+\frac{|E|}
+{|V|\cdot\log_2(|V|+1)}
 $$
 
 $$
-\text{maxAStarSteps}=\operatorname{clip}\!\left(\operatorname{round}\!\left(30+|V|\cdot(0.28+(1-\lambda)\cdot0.35)\right),\ 20,\ 96\right)
+\kappa=
+\frac{|V_{\text{SCC-cycle}}|}{|V|}
 $$
 
 $$
-\text{transitiveCutoff}=\operatorname{clip}(0.72-0.18\lambda,\ 0.48,\ 0.9)
+\lambda=
+\operatorname{clip}
+\left(
+0.38 + 0.24\tanh(\rho-1)+0.36\kappa,\;
+0,\;1
+\right)
 $$
 
-### 10.3 Tarjan SCC Cycle Breaking
+Runtime controls:
 
-Tarjan SCC is run on structural edges (excluding `conflicts_with`).
+$$
+\text{maxRootIncoming}=
+\operatorname{clip}
+\left(
+\operatorname{round}(9-4\lambda),\;
+4,\;10
+\right)
+$$
 
-For each cyclic SCC, the weakest edge by keep score is removed:
+$$
+\text{maxAStarSteps}=
+\operatorname{clip}
+\left(
+\operatorname{round}
+\left(
+30+|V|\cdot(0.28+(1-\lambda)\cdot0.35)
+\right),\;
+20,\;96
+\right)
+$$
+
+$$
+\text{transitiveCutoff}=
+\operatorname{clip}(0.72-0.18\lambda,\;0.48,\;0.90)
+$$
+
+## 8.3 Tarjan SCC Cycle Breaking
+
+Cycles are detected with Tarjan SCC (excluding `conflicts_with`).
+
+Weakest removable edge per SCC:
 
 $$
 \operatorname{keepScore}(e)=
-s_{\text{type}}(e)+0.9\,c_e+0.65\,\overline{i}_e+b_{\text{touch}}+b_{\text{root}}+b_{\text{risk}}
+s_{\text{type}}(e)
+ + 0.9\,c_e
+ + 0.65\,\overline{i}_e
+ + b_{\text{touch}}
+ + b_{\text{root}}
+ + b_{\text{risk}}
 $$
 
-Iteration continues until acyclic or max-iteration limit.
+Edges with lower keep score are removed first until acyclic or iteration limit.
 
-### 10.4 Approximate Transitive Reduction + Connectivity Repair
+## 9. PDF Export Strategy
 
-Edge `u -> v` is removable only when:
-
-1. alternate path `u =>* v` still exists
-2. root reachability is preserved
-3. keep score is below adaptive cutoff
-
-Disconnected node repair:
-
-$$
-\neg \operatorname{Reach}(n,\text{root}) \Rightarrow \text{add inferred edge } n \to \text{root}
-$$
-
-## 11. TravelPlan State + PDF Export
-
-Implemented in `travelPlan/state.ts` and `travelPlan/pdf.ts`.
-
-Export structure:
+Export sections:
 
 1. Summary
 2. Executable itinerary (day-by-day)
-3. Budget ledger
+3. Budget ledger trace
 4. Key constraints
-5. Evidence appendix (deduplicated)
+5. Evidence appendix
 
-Deduplication includes:
+Deduplication:
 
-- repeated paragraph hash removal
-- repeated confirmation-question suppression
+$$
+\text{drop paragraph } p_i
+\iff
+\operatorname{hash}(p_i)\in H_{\text{seen}}
+$$
 
-## 12. Runtime Flags
+Confirmation-prompt suppression excludes repeated system clarification templates from final narrative.
 
-- `CI_GRAPH_USE_FUNCTION_SLOTS`
-- `CI_GRAPH_MODEL`
-- `CI_ALLOW_DELETE`
-- `CI_DATE_RANGE_BOUNDARY_MODE`
-- `CI_FX_<CUR>_TO_CNY`
-- `CI_PDF_FONT_PATH`
+## 10. Regression Requirements (must pass)
 
-## 13. Covered Failure Modes
+Minimum non-regression set:
 
-1. Budget delta loss (`5000 + 5000` not reflected)
-2. Single-destination false conflict (`2 destinations / 3 days`)
-3. Stale slot duplication across rounds
-4. Duration outlier explosions
-5. Repeated/noisy export text blocks
+1. Budget delta replay stability (e.g., \(5000+5000=10000\)).
+2. Spent and remaining budgets stay ledger-consistent.
+3. Single destination never triggers destination-density conflict.
+4. Duplicate semantic motifs do not appear as red+green contradiction.
+5. Soft-pruned motifs become `cancelled`, not `deprecated`.
+6. Active motifs per anchor remain capped.
 
-## 14. Next Strengthening Targets
+## 11. Known Next Steps
 
-1. explicit pending-to-commit transition by event ID
-2. conflict resolution provenance (`resolvedBy`, `resolvedAt`)
-3. stronger geo hierarchy cache for venue-to-city grounding
-4. export modes: concise executive vs appendix-rich trace
+1. Stronger motif-level intervention simulation (`do(X)` probes before commitment).
+2. Better motif scope control (global vs local context application).
+3. Cross-domain ontology calibration for non-travel tasks.

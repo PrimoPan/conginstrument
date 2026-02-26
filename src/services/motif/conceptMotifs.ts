@@ -43,7 +43,7 @@ export type ConceptMotif = {
   updatedAt: string;
 };
 
-const MAX_ACTIVE_MOTIFS_PER_ANCHOR = 4;
+const MAX_ACTIVE_MOTIFS_PER_ANCHOR = 3;
 
 function cleanText(input: any, max = 200): string {
   return String(input ?? "")
@@ -768,6 +768,10 @@ function hasNegationSignal(text: string): boolean {
   return /(不|不能|不要|避免|别|禁止|must not|cannot|avoid|no )/i.test(cleanText(text, 180));
 }
 
+function hasExplicitConflictSignal(text: string): boolean {
+  return /(冲突|矛盾|互斥|incompatible|contradict|conflict|versus|vs\.)/i.test(cleanText(text, 200));
+}
+
 function applyRelationConflictDeprecation(motifs: ConceptMotif[], conceptById: Map<string, ConceptItem>): ConceptMotif[] {
   const candidates = motifs.filter(
     (m) =>
@@ -798,12 +802,22 @@ function applyRelationConflictDeprecation(motifs: ConceptMotif[], conceptById: M
       const familyOverlap = arraysIntersect(srcA, srcB);
       const negA = hasNegationSignal(a.title) || hasNegationSignal(a.description);
       const negB = hasNegationSignal(b.title) || hasNegationSignal(b.description);
-      if (!familyOverlap && negA === negB) continue;
+      if (!familyOverlap) continue;
+
+      const explicitConflict =
+        negA !== negB ||
+        hasExplicitConflictSignal(a.title) ||
+        hasExplicitConflictSignal(a.description) ||
+        hasExplicitConflictSignal(b.title) ||
+        hasExplicitConflictSignal(b.description);
 
       const winner = motifPriorityScore(a) >= motifPriorityScore(b) ? a : b;
       const loser = winner.id === a.id ? b : a;
       if (loser.resolved) continue;
-      patch.set(loser.id, { status: "deprecated", reason: `relation_conflict_with:${winner.id}` });
+      patch.set(loser.id, {
+        status: explicitConflict ? "deprecated" : "cancelled",
+        reason: explicitConflict ? `relation_conflict_with:${winner.id}` : `relation_shadowed_by:${winner.id}`,
+      });
     }
   }
 
@@ -896,6 +910,32 @@ function capActiveMotifsPerAnchor(motifs: ConceptMotif[]): ConceptMotif[] {
   );
 }
 
+function isSoftPruneReason(reason: string): boolean {
+  const r = cleanText(reason, 180).toLowerCase();
+  return (
+    r.startsWith("redundant_with:") ||
+    r.startsWith("subsumed_by:") ||
+    r.startsWith("density_pruned:") ||
+    r.startsWith("relation_shadowed_by:")
+  );
+}
+
+function convertSoftDeprecationsToCancelled(motifs: ConceptMotif[]): ConceptMotif[] {
+  return motifs.map((m) => {
+    if (m.status !== "deprecated") return m;
+    if (!isSoftPruneReason(m.statusReason || "")) return m;
+    return {
+      ...m,
+      status: "cancelled",
+      statusReason: cleanText(m.statusReason, 180) || "soft_pruned",
+      resolved: true,
+      resolvedBy: "system",
+      resolvedAt: m.updatedAt || new Date().toISOString(),
+      novelty: m.novelty === "new" ? "new" : "updated",
+    };
+  });
+}
+
 function appendStatusHistory(next: ConceptMotif, prev?: ConceptMotif): ConceptMotif {
   const prevHistory = Array.isArray(prev?.history) ? prev!.history!.slice(0, 19) : [];
   const statusChanged = !prev || prev.status !== next.status || cleanText(prev.statusReason, 120) !== cleanText(next.statusReason, 120);
@@ -958,13 +998,17 @@ export function reconcileMotifsWithGraph(params: {
   const relationConflicted = applyRelationConflictDeprecation(mergedDerived, conceptById);
   const deprecationApplied = applyRedundancyDeprecation(relationConflicted, conceptById);
   const triadSubsumed = applyTriadSubsumption(deprecationApplied, conceptById);
-  const densityCapped = capActiveMotifsPerAnchor(triadSubsumed).map((m) => {
-    if (m.status !== "deprecated") return m;
+  const densityCapped = capActiveMotifsPerAnchor(triadSubsumed);
+  const softPrunedCollapsed = convertSoftDeprecationsToCancelled(densityCapped).map((m) => {
+    if (m.status !== "deprecated" && m.status !== "cancelled") return m;
     if (m.novelty === "new") return m;
+    if (m.status === "cancelled") {
+      return { ...m, novelty: "updated" as MotifChangeState };
+    }
     return { ...m, novelty: "updated" as MotifChangeState, resolved: false, resolvedAt: undefined, resolvedBy: undefined };
   });
 
-  const derivedIds = new Set(densityCapped.map((m) => m.id));
+  const derivedIds = new Set(softPrunedCollapsed.map((m) => m.id));
   const cancelledFromHistory: ConceptMotif[] = base
     .filter((old) => !derivedIds.has(old.id))
     .map((old) => ({
@@ -975,7 +1019,7 @@ export function reconcileMotifsWithGraph(params: {
       updatedAt: now,
     }));
 
-  const all = [...densityCapped, ...cancelledFromHistory]
+  const all = [...softPrunedCollapsed, ...cancelledFromHistory]
     .map((m) => withCausalSemantics(m, conceptById))
     .map((m) => appendStatusHistory(m, baseById.get(m.id)));
   return all

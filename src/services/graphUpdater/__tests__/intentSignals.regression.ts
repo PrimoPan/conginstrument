@@ -626,6 +626,7 @@ const cases: Case[] = [
       const concepts = reconcileConceptsWithGraph({ graph, baseConcepts: [] });
       const motifs = reconcileMotifsWithGraph({ graph, concepts, baseMotifs: [] });
       const active = motifs.filter((m) => m.status === "active");
+      const deprecated = motifs.filter((m) => m.status === "deprecated");
 
       const budgetRemainConcept = concepts.find((c) => c.semanticKey === "slot:budget_remaining");
       assert.ok(budgetRemainConcept);
@@ -637,8 +638,117 @@ const cases: Case[] = [
         byAnchor.set(k, (byAnchor.get(k) || 0) + 1);
       }
       for (const count of byAnchor.values()) {
-        assert.equal(count <= 4, true);
+        assert.equal(count <= 3, true);
       }
+
+      const hasSoftDeprecated = deprecated.some((m) => {
+        const r = String(m.statusReason || "");
+        return (
+          r.startsWith("redundant_with:") ||
+          r.startsWith("subsumed_by:") ||
+          r.startsWith("density_pruned:") ||
+          r.startsWith("relation_shadowed_by:")
+        );
+      });
+      assert.equal(hasSoftDeprecated, false);
+    },
+  },
+  {
+    name: "same-semantic relation shadow should be cancelled instead of deprecated",
+    run: () => {
+      const graph = {
+        id: "g_motif_relation_shadow",
+        version: 1,
+        nodes: [
+          {
+            id: "n_goal",
+            type: "goal",
+            layer: "intent",
+            statement: "意图: 去米兰旅游",
+            status: "confirmed",
+            confidence: 0.86,
+            importance: 0.84,
+            key: "slot:goal",
+          },
+          {
+            id: "n_budget",
+            type: "constraint",
+            layer: "requirement",
+            statement: "预算上限: 10000元",
+            status: "confirmed",
+            confidence: 0.92,
+            importance: 0.8,
+            key: "slot:budget",
+          },
+        ] as any,
+        edges: [
+          { id: "e1", from: "n_budget", to: "n_goal", type: "constraint", confidence: 0.92 },
+          { id: "e2", from: "n_budget", to: "n_goal", type: "determine", confidence: 0.9 },
+        ] as any,
+      } as any;
+
+      const concepts = reconcileConceptsWithGraph({ graph, baseConcepts: [] });
+      const motifs = reconcileMotifsWithGraph({ graph, concepts, baseMotifs: [] });
+      assert.equal(
+        motifs.some((m) => m.status === "cancelled" && String(m.statusReason || "").startsWith("relation_shadowed_by:")),
+        true
+      );
+      assert.equal(
+        motifs.some((m) => m.status === "deprecated" && String(m.statusReason || "").startsWith("relation_conflict_with:")),
+        false
+      );
+    },
+  },
+  {
+    name: "explicit opposite-polarity relation should remain deprecated conflict",
+    run: () => {
+      const graph = {
+        id: "g_motif_relation_conflict",
+        version: 1,
+        nodes: [
+          {
+            id: "n_goal",
+            type: "goal",
+            layer: "intent",
+            statement: "意图: 旅游",
+            status: "confirmed",
+            confidence: 0.86,
+            importance: 0.84,
+            key: "slot:goal",
+          },
+          {
+            id: "n_safe_yes",
+            type: "constraint",
+            layer: "requirement",
+            statement: "限制因素: 必须住安全区域",
+            status: "confirmed",
+            confidence: 0.9,
+            importance: 0.82,
+            key: "slot:constraint:limiting:other:safe_yes",
+          },
+          {
+            id: "n_safe_no",
+            type: "constraint",
+            layer: "requirement",
+            statement: "限制因素: 不要住安全区域",
+            status: "confirmed",
+            confidence: 0.86,
+            importance: 0.78,
+            key: "slot:constraint:limiting:other:safe_no",
+          },
+        ] as any,
+        edges: [
+          { id: "e1", from: "n_safe_yes", to: "n_goal", type: "constraint", confidence: 0.9 },
+          { id: "e2", from: "n_safe_no", to: "n_goal", type: "determine", confidence: 0.86 },
+        ] as any,
+      } as any;
+
+      const concepts = reconcileConceptsWithGraph({ graph, baseConcepts: [] });
+      const motifs = reconcileMotifsWithGraph({ graph, concepts, baseMotifs: [] });
+      assert.equal(
+        motifs.some((m) => m.status === "deprecated" && String(m.statusReason || "").startsWith("relation_conflict_with:")),
+        true
+      );
     },
   },
 ];
