@@ -3,6 +3,7 @@ import { buildTravelIntentStatement, isLikelyDestinationCandidate, normalizeDest
 import { cleanStatement } from "./text.js";
 import { analyzeConstraintConflicts, type LimitingFactorInput } from "./conflictAnalyzer.js";
 import type { SlotEdgeSpec, SlotGraphState, SlotNodeSpec } from "./slotTypes.js";
+import { isEnglishLocale, type AppLocale } from "../../i18n/locale.js";
 
 function clamp01(x: any, fallback = 0.72) {
   const n = Number(x);
@@ -29,6 +30,31 @@ function nowISO() {
   return new Date().toISOString();
 }
 
+function tr(locale: AppLocale | undefined, zh: string, en: string): string {
+  return isEnglishLocale(locale) ? en : zh;
+}
+
+function formatDays(locale: AppLocale | undefined, days: number): string {
+  return isEnglishLocale(locale) ? `${days} days` : `${days}天`;
+}
+
+function statementGoal(locale: AppLocale | undefined, text: string): string {
+  if (isEnglishLocale(locale)) {
+    const body = cleanStatement(text || "", 96) || "Plan this task";
+    return /^intent:/i.test(body) ? body : `Intent: ${body}`;
+  }
+  return cleanStatement(text || "", 96) || "意图：制定任务计划";
+}
+
+function statementWithPrefix(locale: AppLocale | undefined, zhPrefix: string, enPrefix: string, body: string): string {
+  const prefix = isEnglishLocale(locale) ? enPrefix : zhPrefix;
+  return `${prefix}${cleanStatement(body || "", 140)}`;
+}
+
+function moneyLabel(locale: AppLocale | undefined, amount: number): string {
+  return isEnglishLocale(locale) ? `${amount} CNY` : `${amount}元`;
+}
+
 type DurationState = {
   totalDays?: number;
   totalEvidence?: string;
@@ -46,7 +72,9 @@ type DurationCandidate = {
 function isDetailLikeDurationEvidence(evidence: string): boolean {
   const s = cleanStatement(evidence || "", 100);
   if (!s) return false;
-  return /第[一二三四五六七八九十0-9两]+天|首日|第一天|落地|抵达|转机|机场|当日|当天|晚上到|早上到/i.test(s);
+  return /第[一二三四五六七八九十0-9两]+天|首日|第一天|落地|抵达|转机|机场|当日|当天|晚上到|早上到|day\\s*[0-9]+|arrival|arrive|landing|transfer|layover|airport|same day/i.test(
+    s
+  );
 }
 
 function likelyNestedDuration(parentCity: string, childCity: string): boolean {
@@ -103,7 +131,7 @@ function weightedMedian(candidates: DurationCandidate[]): DurationCandidate | nu
   return list[list.length - 1];
 }
 
-function buildDurationState(signals: IntentSignals): DurationState {
+function buildDurationState(signals: IntentSignals, locale?: AppLocale): DurationState {
   const byCity = new Map<string, { city: string; days: number; kind: "travel" | "meeting"; evidence: string; importance: number }>();
   for (const seg of signals.cityDurations || []) {
     const city = normalizeDestination(seg.city || "");
@@ -116,7 +144,7 @@ function buildDurationState(signals: IntentSignals): DurationState {
       city,
       days,
       kind: seg.kind === "meeting" ? "meeting" : "travel",
-      evidence: cleanStatement(seg.evidence || `${city}${days}天`, 64),
+      evidence: cleanStatement(seg.evidence || `${city} ${formatDays(locale, days)}`, 64),
       importance:
         clamp01(
           signals.cityDurationImportanceByCity?.[city],
@@ -158,7 +186,7 @@ function buildDurationState(signals: IntentSignals): DurationState {
     candidates.push({
       days: explicitTotal,
       weight: explicitWeight,
-      evidence: cleanStatement(signals.durationEvidence || `${explicitTotal}天`, 80),
+      evidence: cleanStatement(signals.durationEvidence || formatDays(locale, explicitTotal), 80),
       source: "explicit_total",
     });
   }
@@ -170,7 +198,7 @@ function buildDurationState(signals: IntentSignals): DurationState {
     candidates.push({
       days: citySum,
       weight: sumWeight,
-      evidence: cityDurations.map((x) => `${x.city}${x.days}天`).join(" + "),
+      evidence: cityDurations.map((x) => `${x.city} ${formatDays(locale, x.days)}`).join(" + "),
       source: "city_sum",
     });
   }
@@ -179,7 +207,7 @@ function buildDurationState(signals: IntentSignals): DurationState {
     candidates.push({
       days: maxSeg.days,
       weight: clamp01(maxSeg.kind === "meeting" ? 0.62 : 0.68, 0.66),
-      evidence: cleanStatement(`${maxSeg.city}${maxSeg.days}天`, 64),
+      evidence: cleanStatement(`${maxSeg.city} ${formatDays(locale, maxSeg.days)}`, 64),
       source: "max_segment",
     });
   }
@@ -198,7 +226,7 @@ function buildDurationState(signals: IntentSignals): DurationState {
     Math.abs(cityDurations[0].days - explicitTotal) <= 2
   ) {
     totalDays = explicitTotal;
-    totalEvidence = cleanStatement(signals.durationEvidence || `${explicitTotal}天`, 80);
+    totalEvidence = cleanStatement(signals.durationEvidence || formatDays(locale, explicitTotal), 80);
   }
 
   // 防止“显式总时长”在无总时长语气下明显偏离城市时长和（例如 14 vs 7）时占优。
@@ -210,7 +238,7 @@ function buildDurationState(signals: IntentSignals): DurationState {
     (explicitTotal >= Math.ceil(citySum * 1.6) || explicitTotal <= Math.floor(citySum * 0.45))
   ) {
     totalDays = citySum;
-    totalEvidence = cityDurations.map((x) => `${x.city}${x.days}天`).join(" + ");
+    totalEvidence = cityDurations.map((x) => `${x.city} ${formatDays(locale, x.days)}`).join(" + ");
   }
 
   // 多城市且至少有一个“旅行段”时，优先满足分段总和，避免漏算“会议+旅行”这类组合行程。
@@ -222,7 +250,7 @@ function buildDurationState(signals: IntentSignals): DurationState {
     const shouldUseSum = underEstimate || (signals.hasDurationUpdateCue && !explicitStrong);
     if (shouldUseSum) {
       totalDays = citySum;
-      totalEvidence = cityDurations.map((x) => `${x.city}${x.days}天`).join(" + ");
+      totalEvidence = cityDurations.map((x) => `${x.city} ${formatDays(locale, x.days)}`).join(" + ");
     }
   }
 
@@ -255,6 +283,7 @@ function buildGoalNode(params: {
   signals: IntentSignals;
   totalDays?: number;
   now: string;
+  locale?: AppLocale;
 }): SlotNodeSpec {
   // 目标标题里的时长强制对齐状态机总时长，避免“意图6天 vs 总时长3天”这类显示分叉。
   const signalsForIntent: IntentSignals = {
@@ -265,19 +294,33 @@ function buildGoalNode(params: {
   const intent = compactIntentDuration(rawIntent, params.totalDays);
   const successCriteria: string[] = [];
   if (params.signals.destinations?.length) {
-    successCriteria.push(`覆盖目的地：${params.signals.destinations.join("、")}`);
+    successCriteria.push(
+      tr(
+        params.locale,
+        `覆盖目的地：${params.signals.destinations.join("、")}`,
+        `Cover destinations: ${params.signals.destinations.join(" / ")}`
+      )
+    );
   }
   if (params.totalDays) {
-    successCriteria.push(`总时长满足：${params.totalDays}天`);
+    successCriteria.push(
+      tr(params.locale, `总时长满足：${params.totalDays}天`, `Total duration: ${params.totalDays} days`)
+    );
   }
   if (params.signals.budgetCny) {
-    successCriteria.push(`预算不超过：${params.signals.budgetCny}元`);
+    successCriteria.push(
+      tr(
+        params.locale,
+        `预算不超过：${params.signals.budgetCny}元`,
+        `Budget cap: ${params.signals.budgetCny} CNY`
+      )
+    );
   }
   return {
     slotKey: "slot:goal",
     type: "goal",
     layer: "intent",
-    statement: intent || "意图：制定任务计划",
+    statement: statementGoal(params.locale, intent || tr(params.locale, "制定任务计划", "Plan this task")),
     confidence: 0.86,
     importance: clamp01(params.signals.goalImportance, 0.84),
     strength: "hard",
@@ -286,7 +329,7 @@ function buildGoalNode(params: {
     sourceMsgIds: ["latest_user"],
     key: "slot:goal",
     motifType: "expectation",
-    claim: intent || "制定任务计划",
+    claim: intent || tr(params.locale, "制定任务计划", "Plan this task"),
     evidence: motifEvidence(params.userText, "latest_user"),
     linkedIntentIds: [],
     revisionHistory: [{ at: params.now, action: "updated", by: "system", reason: "slot_state_machine" }],
@@ -449,18 +492,20 @@ export function buildSlotStateMachine(params: {
   userText: string;
   recentTurns: Array<{ role: "user" | "assistant"; content: string }>;
   signals: IntentSignals;
+  locale?: AppLocale;
 }): SlotGraphState {
   const latestUserText = cleanStatement(params.userText, 1200);
   const nodes: SlotNodeSpec[] = [];
   const edges: SlotEdgeSpec[] = [];
   const now = nowISO();
 
-  const durationState = buildDurationState(params.signals);
+  const durationState = buildDurationState(params.signals, params.locale);
   const goal = buildGoalNode({
     userText: latestUserText,
     signals: params.signals,
     totalDays: durationState.totalDays,
     now,
+    locale: params.locale,
   });
   nodes.push(goal);
 
@@ -496,7 +541,7 @@ export function buildSlotStateMachine(params: {
       slotKey,
       type: "fact",
       layer: "requirement",
-      statement: `目的地: ${city}`,
+      statement: statementWithPrefix(params.locale, "目的地: ", "Destination: ", city),
       confidence: 0.9,
       importance: imp,
       tags: ["destination"],
@@ -504,7 +549,7 @@ export function buildSlotStateMachine(params: {
       sourceMsgIds: ["latest_user"],
       key: slotKey,
       motifType: "cognitive_step",
-      claim: `目的地是${city}`,
+      claim: isEnglishLocale(params.locale) ? `Destination is ${city}` : `目的地是${city}`,
       evidence: motifEvidence(params.signals.destinationEvidence || city),
       linkedIntentIds: ["slot:goal"],
       revisionHistory: [{ at: now, action: "updated", by: "system", reason: "slot_state_machine" }],
@@ -524,7 +569,16 @@ export function buildSlotStateMachine(params: {
         type: "preference",
         layer: "preference",
         strength: hard ? "hard" : "soft",
-        statement: statement.startsWith("活动偏好") ? statement : `活动偏好: ${statement}`,
+        statement: isEnglishLocale(params.locale)
+          ? statementWithPrefix(
+              params.locale,
+              "活动偏好: ",
+              "Activity preference: ",
+              statement.replace(/^activity\\s*preference\\s*[:：]\\s*/i, "")
+            )
+          : statement.startsWith("活动偏好")
+            ? statement
+            : `活动偏好: ${statement}`,
         confidence: hard ? 0.84 : 0.76,
         importance: imp,
         tags: ["preference", "activity"],
@@ -549,20 +603,35 @@ export function buildSlotStateMachine(params: {
       type: "constraint",
       layer: "requirement",
       strength: "hard",
-      statement: `总行程时长: ${durationState.totalDays}天`,
+      statement: statementWithPrefix(
+        params.locale,
+        "总行程时长: ",
+        "Total duration: ",
+        formatDays(params.locale, durationState.totalDays)
+      ),
       confidence: clamp01(params.signals.durationStrength, 0.88),
       importance: clamp01(params.signals.durationImportance, 0.84),
       tags: ["duration", "total"],
-      evidenceIds: [durationState.totalEvidence || params.signals.durationEvidence || `${durationState.totalDays}天`].filter(Boolean),
+      evidenceIds: [
+        durationState.totalEvidence ||
+          params.signals.durationEvidence ||
+          `${durationState.totalDays}${isEnglishLocale(params.locale) ? " days" : "天"}`,
+      ].filter(Boolean),
       sourceMsgIds: ["latest_user"],
       key: "slot:duration_total",
       motifType: "cognitive_step",
-      claim: `总时长约${durationState.totalDays}天`,
+      claim: isEnglishLocale(params.locale)
+        ? `Total duration is about ${durationState.totalDays} days`
+        : `总时长约${durationState.totalDays}天`,
       evidence: motifEvidence(durationState.totalEvidence || params.signals.durationEvidence),
       linkedIntentIds: ["slot:goal"],
       revisionHistory: [{ at: now, action: "updated", by: "system", reason: "slot_state_machine" }],
       priority: clamp01(params.signals.durationImportance, 0.84),
-      successCriteria: [`行程总时长控制在${durationState.totalDays}天`],
+      successCriteria: [
+        isEnglishLocale(params.locale)
+          ? `Keep total trip duration within ${durationState.totalDays} days`
+          : `行程总时长控制在${durationState.totalDays}天`,
+      ],
     });
     pushEdge(edges, "slot:duration_total", "slot:goal", "constraint", 0.9);
   }
@@ -575,7 +644,12 @@ export function buildSlotStateMachine(params: {
       slotKey,
       type: "fact",
       layer: "requirement",
-      statement: `城市时长: ${seg.city} ${seg.days}天`,
+      statement: statementWithPrefix(
+        params.locale,
+        "城市时长: ",
+        "City duration: ",
+        `${seg.city} ${formatDays(params.locale, seg.days)}`
+      ),
       confidence: seg.kind === "meeting" ? 0.88 : 0.84,
       importance: seg.importance,
       tags: ["duration_city", seg.kind],
@@ -583,7 +657,7 @@ export function buildSlotStateMachine(params: {
       sourceMsgIds: ["latest_user"],
       key: slotKey,
       motifType: "cognitive_step",
-      claim: `${seg.city}停留${seg.days}天`,
+      claim: isEnglishLocale(params.locale) ? `${seg.city} stay ${seg.days} days` : `${seg.city}停留${seg.days}天`,
       evidence: motifEvidence(seg.evidence),
       linkedIntentIds: ["slot:goal"],
       revisionHistory: [{ at: now, action: "updated", by: "system", reason: "slot_state_machine" }],
@@ -619,7 +693,14 @@ export function buildSlotStateMachine(params: {
       layer: "requirement",
       strength: hard ? "hard" : undefined,
       severity: undefined,
-      statement: parentCity ? `子地点: ${name}（${parentCity}）` : `子地点: ${name}`,
+      statement: parentCity
+        ? statementWithPrefix(
+            params.locale,
+            "子地点: ",
+            "Sub-location: ",
+            isEnglishLocale(params.locale) ? `${name} (${parentCity})` : `${name}（${parentCity}）`
+          )
+        : statementWithPrefix(params.locale, "子地点: ", "Sub-location: ", name),
       confidence: hard ? 0.9 : 0.74,
       importance,
       tags: ["sub_location", sub.kind || "other"],
@@ -627,7 +708,11 @@ export function buildSlotStateMachine(params: {
       sourceMsgIds: ["latest_user"],
       key: slotKey,
       motifType: hard ? "hypothesis" : "cognitive_step",
-      claim: parentCity ? `${name}归属${parentCity}` : name,
+      claim: parentCity
+        ? isEnglishLocale(params.locale)
+          ? `${name} belongs to ${parentCity}`
+          : `${name}归属${parentCity}`
+        : name,
       evidence: motifEvidence(sub.evidence || name),
       linkedIntentIds: ["slot:goal"],
       revisionHistory: [{ at: now, action: "updated", by: "system", reason: "slot_state_machine" }],
@@ -647,16 +732,23 @@ export function buildSlotStateMachine(params: {
         slotKey: "slot:people",
         type: "fact",
         layer: "requirement",
-        statement: `同行人数: ${count}人`,
+        statement: statementWithPrefix(
+          params.locale,
+          "同行人数: ",
+          "Travel party: ",
+          isEnglishLocale(params.locale) ? `${count} people` : `${count}人`
+        ),
         confidence: 0.9,
         importance,
         tags: ["people"],
-        evidenceIds: [params.signals.peopleEvidence || `${count}人`].filter(Boolean),
+        evidenceIds: [params.signals.peopleEvidence || (isEnglishLocale(params.locale) ? `${count} people` : `${count}人`)].filter(Boolean),
         sourceMsgIds: ["latest_user"],
         key: "slot:people",
         motifType: "cognitive_step",
-        claim: `同行人数${count}`,
-        evidence: motifEvidence(params.signals.peopleEvidence || `${count}人`),
+        claim: isEnglishLocale(params.locale) ? `Travel party size ${count}` : `同行人数${count}`,
+        evidence: motifEvidence(
+          params.signals.peopleEvidence || (isEnglishLocale(params.locale) ? `${count} people` : `${count}人`)
+        ),
         linkedIntentIds: ["slot:goal"],
         revisionHistory: [{ at: now, action: "updated", by: "system", reason: "slot_state_machine" }],
         priority: importance,
@@ -675,20 +767,20 @@ export function buildSlotStateMachine(params: {
         type: "constraint",
         layer: "requirement",
         strength: "hard",
-        statement: `预算上限: ${budget}元`,
+        statement: statementWithPrefix(params.locale, "预算上限: ", "Budget cap: ", moneyLabel(params.locale, budget)),
         confidence: 0.92,
         importance,
         tags: ["budget"],
-        evidenceIds: [params.signals.budgetEvidence || `${budget}元`].filter(Boolean),
+        evidenceIds: [params.signals.budgetEvidence || moneyLabel(params.locale, budget)].filter(Boolean),
         sourceMsgIds: ["latest_user"],
         key: "slot:budget",
         motifType: "hypothesis",
-        claim: `预算约束${budget}元`,
-        evidence: motifEvidence(params.signals.budgetEvidence || `${budget}元`),
+        claim: isEnglishLocale(params.locale) ? `Budget constraint ${budget} CNY` : `预算约束${budget}元`,
+        evidence: motifEvidence(params.signals.budgetEvidence || moneyLabel(params.locale, budget)),
         linkedIntentIds: ["slot:goal"],
         revisionHistory: [{ at: now, action: "updated", by: "system", reason: "slot_state_machine" }],
         priority: importance,
-        successCriteria: [`预算不超${budget}元`],
+        successCriteria: [isEnglishLocale(params.locale) ? `Budget does not exceed ${budget} CNY` : `预算不超${budget}元`],
       });
       budgetSlotKey = "slot:budget";
       pushEdge(edges, "slot:budget", "slot:goal", "constraint", 0.92);
@@ -709,16 +801,23 @@ export function buildSlotStateMachine(params: {
         slotKey: "slot:budget_spent",
         type: "fact",
         layer: "requirement",
-        statement: `已花预算: ${normalizedSpent}元`,
+        statement: statementWithPrefix(
+          params.locale,
+          "已花预算: ",
+          "Spent budget: ",
+          moneyLabel(params.locale, normalizedSpent)
+        ),
         confidence: 0.88,
         importance: spentImportance,
         tags: ["budget", "spent"],
-        evidenceIds: [params.signals.budgetSpentEvidence || `${normalizedSpent}元`].filter(Boolean),
+        evidenceIds: [params.signals.budgetSpentEvidence || moneyLabel(params.locale, normalizedSpent)].filter(Boolean),
         sourceMsgIds: ["latest_user"],
         key: "slot:budget_spent",
         motifType: "cognitive_step",
-        claim: `当前已花费${normalizedSpent}元`,
-        evidence: motifEvidence(params.signals.budgetSpentEvidence || `${normalizedSpent}元`),
+        claim: isEnglishLocale(params.locale)
+          ? `Current spend is ${normalizedSpent} CNY`
+          : `当前已花费${normalizedSpent}元`,
+        evidence: motifEvidence(params.signals.budgetSpentEvidence || moneyLabel(params.locale, normalizedSpent)),
         linkedIntentIds: ["slot:goal"],
         revisionHistory: [{ at: now, action: "updated", by: "system", reason: "slot_state_machine" }],
         priority: spentImportance,
@@ -737,16 +836,23 @@ export function buildSlotStateMachine(params: {
         type: "constraint",
         layer: "requirement",
         strength: "soft",
-        statement: `待确认预算: ${normalizedPending}元`,
+        statement: statementWithPrefix(
+          params.locale,
+          "待确认预算: ",
+          "Pending budget: ",
+          moneyLabel(params.locale, normalizedPending)
+        ),
         confidence: 0.8,
         importance: pendingImportance,
         tags: ["budget", "pending"],
-        evidenceIds: [params.signals.budgetPendingEvidence || `${normalizedPending}元`].filter(Boolean),
+        evidenceIds: [params.signals.budgetPendingEvidence || moneyLabel(params.locale, normalizedPending)].filter(Boolean),
         sourceMsgIds: ["latest_user"],
         key: "slot:budget_pending",
         motifType: "hypothesis",
-        claim: `待确认支出约${normalizedPending}元`,
-        evidence: motifEvidence(params.signals.budgetPendingEvidence || `${normalizedPending}元`),
+        claim: isEnglishLocale(params.locale)
+          ? `Pending spending about ${normalizedPending} CNY`
+          : `待确认支出约${normalizedPending}元`,
+        evidence: motifEvidence(params.signals.budgetPendingEvidence || moneyLabel(params.locale, normalizedPending)),
         linkedIntentIds: ["slot:goal"],
         revisionHistory: [{ at: now, action: "updated", by: "system", reason: "slot_state_machine" }],
         priority: pendingImportance,
@@ -776,11 +882,15 @@ export function buildSlotStateMachine(params: {
     const remainingEvidence =
       spentBudgetForRemaining > 0
         ? cleanStatement(
-            `${params.signals.budgetEvidence || `${totalBudgetForRemaining}元`}；${params.signals.budgetSpentEvidence || `${spentBudgetForRemaining}元`}`,
+            `${params.signals.budgetEvidence || moneyLabel(params.locale, totalBudgetForRemaining)}; ${
+              params.signals.budgetSpentEvidence || moneyLabel(params.locale, spentBudgetForRemaining)
+            }`,
             80
           )
         : cleanStatement(
-            `${params.signals.budgetEvidence || `${totalBudgetForRemaining}元`}；尚未记录已花预算`,
+            isEnglishLocale(params.locale)
+              ? `${params.signals.budgetEvidence || moneyLabel(params.locale, totalBudgetForRemaining)}; no spent budget recorded`
+              : `${params.signals.budgetEvidence || `${totalBudgetForRemaining}元`}；尚未记录已花预算`,
             80
           );
     nodes.push({
@@ -788,7 +898,12 @@ export function buildSlotStateMachine(params: {
       type: "constraint",
       layer: "requirement",
       strength: "hard",
-      statement: `剩余预算: ${remainingBudget}元`,
+      statement: statementWithPrefix(
+        params.locale,
+        "剩余预算: ",
+        "Remaining budget: ",
+        moneyLabel(params.locale, remainingBudget)
+      ),
       confidence: 0.9,
       importance: remainingImportance,
       tags: ["budget", "remaining"],
@@ -796,12 +911,22 @@ export function buildSlotStateMachine(params: {
       sourceMsgIds: ["latest_user"],
       key: "slot:budget_remaining",
       motifType: "hypothesis",
-      claim: `可用预算还剩${remainingBudget}元`,
-      evidence: motifEvidence(`总预算${totalBudgetForRemaining}元，已花${spentBudgetForRemaining}元，剩余${remainingBudget}元`),
+      claim: isEnglishLocale(params.locale)
+        ? `Remaining available budget ${remainingBudget} CNY`
+        : `可用预算还剩${remainingBudget}元`,
+      evidence: motifEvidence(
+        isEnglishLocale(params.locale)
+          ? `Total ${totalBudgetForRemaining} CNY, spent ${spentBudgetForRemaining} CNY, remaining ${remainingBudget} CNY`
+          : `总预算${totalBudgetForRemaining}元，已花${spentBudgetForRemaining}元，剩余${remainingBudget}元`
+      ),
       linkedIntentIds: ["slot:goal"],
       revisionHistory: [{ at: now, action: "updated", by: "system", reason: "slot_state_machine" }],
       priority: remainingImportance,
-      successCriteria: [`剩余预算不少于${Math.round(remainingBudget * 0.2)}元用于机动安排`],
+      successCriteria: [
+        isEnglishLocale(params.locale)
+          ? `Keep at least ${Math.round(remainingBudget * 0.2)} CNY as contingency budget`
+          : `剩余预算不少于${Math.round(remainingBudget * 0.2)}元用于机动安排`,
+      ],
     });
     pushEdge(edges, "slot:budget_remaining", "slot:goal", "constraint", 0.92);
     if (budgetSlotKey) pushEdge(edges, budgetSlotKey, "slot:budget_remaining", "determine", 0.9);
@@ -818,13 +943,29 @@ export function buildSlotStateMachine(params: {
     const imp = clamp01(factor.importance, factor.hard ? 0.84 : 0.74);
     const rebuttalPoints =
       kind === "health"
-        ? ["若忽略此限制，行程安全风险显著上升"]
+        ? [
+            isEnglishLocale(params.locale)
+              ? "Ignoring this constraint significantly increases travel safety risk"
+              : "若忽略此限制，行程安全风险显著上升",
+          ]
         : kind === "language"
-          ? ["若忽略此限制，沟通与执行效率会明显下降"]
+          ? [
+              isEnglishLocale(params.locale)
+                ? "Ignoring this constraint significantly degrades communication and execution efficiency"
+                : "若忽略此限制，沟通与执行效率会明显下降",
+            ]
           : kind === "diet"
-            ? ["若忽略此限制，饮食可执行性与舒适度会下降"]
+            ? [
+                isEnglishLocale(params.locale)
+                  ? "Ignoring this constraint reduces diet feasibility and comfort"
+                  : "若忽略此限制，饮食可执行性与舒适度会下降",
+              ]
             : kind === "religion"
-              ? ["若忽略此限制，关键活动安排可能与信仰冲突"]
+              ? [
+                  isEnglishLocale(params.locale)
+                    ? "Ignoring this constraint may conflict with faith-related activities"
+                    : "若忽略此限制，关键活动安排可能与信仰冲突",
+                ]
               : undefined;
 
     nodes.push({
@@ -833,7 +974,7 @@ export function buildSlotStateMachine(params: {
       layer: riskKind.has(kind) && (severity === "critical" || severity === "high") ? "risk" : "requirement",
       strength: factor.hard ? "hard" : "soft",
       severity,
-      statement: `限制因素: ${factor.text}`,
+      statement: statementWithPrefix(params.locale, "限制因素: ", "Limiting factor: ", factor.text),
       confidence: factor.hard ? 0.9 : 0.82,
       importance: imp,
       tags: ["limiting_factor", kind],
@@ -855,7 +996,13 @@ export function buildSlotStateMachine(params: {
   if (params.signals.criticalPresentation) {
     const p = params.signals.criticalPresentation;
     const city = normalizeDestination(p.city || "");
-    const detail = city ? `${p.reason}（${city}，${p.days}天）` : `${p.reason}（${p.days}天）`;
+    const detail = city
+      ? isEnglishLocale(params.locale)
+        ? `${p.reason} (${city}, ${p.days} days)`
+        : `${p.reason}（${city}，${p.days}天）`
+      : isEnglishLocale(params.locale)
+        ? `${p.reason} (${p.days} days)`
+        : `${p.reason}（${p.days}天）`;
     const k = `slot:meeting_critical:${slug(city || p.reason || "critical")}`;
     const imp = clamp01(params.signals.criticalImportance, 0.95);
     nodes.push({
@@ -864,7 +1011,7 @@ export function buildSlotStateMachine(params: {
       layer: "risk",
       strength: "hard",
       severity: "critical",
-      statement: `关键日: ${detail}`,
+      statement: statementWithPrefix(params.locale, "关键日: ", "Critical day: ", detail),
       confidence: 0.95,
       importance: imp,
       tags: ["critical_day", "risk"],
@@ -877,7 +1024,11 @@ export function buildSlotStateMachine(params: {
       linkedIntentIds: ["slot:goal"],
       revisionHistory: [{ at: now, action: "updated", by: "system", reason: "slot_state_machine" }],
       priority: imp,
-      successCriteria: [`保留${p.days}天用于关键任务`],
+      successCriteria: [
+        isEnglishLocale(params.locale)
+          ? `Reserve ${p.days} day(s) for the critical task`
+          : `保留${p.days}天用于关键任务`,
+      ],
     });
     if (city && destinations.some((x) => slug(x) === slug(city))) {
       pushEdge(edges, k, `slot:destination:${slug(city)}`, "constraint", 0.94);
@@ -893,7 +1044,12 @@ export function buildSlotStateMachine(params: {
       type: "preference",
       layer: "preference",
       strength: params.signals.scenicPreferenceHard ? "hard" : "soft",
-      statement: `景点偏好: ${params.signals.scenicPreference}`,
+      statement: statementWithPrefix(
+        params.locale,
+        "景点偏好: ",
+        "Scenic preference: ",
+        params.signals.scenicPreference
+      ),
       confidence: 0.76,
       importance: imp,
       tags: ["preference", "scenic"],
@@ -918,7 +1074,7 @@ export function buildSlotStateMachine(params: {
       type: "preference",
       layer: "preference",
       strength: params.signals.lodgingPreferenceHard ? "hard" : "soft",
-      statement: `住宿偏好: ${params.signals.lodgingPreference}`,
+      statement: statementWithPrefix(params.locale, "住宿偏好: ", "Lodging preference: ", params.signals.lodgingPreference),
       confidence: 0.76,
       importance: imp,
       tags: ["preference", "lodging"],
@@ -974,7 +1130,7 @@ export function buildSlotStateMachine(params: {
       layer: c.severity === "critical" || c.severity === "high" ? "risk" : "requirement",
       strength: "hard",
       severity: c.severity,
-      statement: `冲突提示: ${cleanStatement(c.statement, 120)}`,
+      statement: statementWithPrefix(params.locale, "冲突提示: ", "Conflict warning: ", cleanStatement(c.statement, 120)),
       confidence: 0.88,
       importance: clamp01(c.importance, 0.8),
       tags: ["conflict", "planner"],
@@ -987,7 +1143,11 @@ export function buildSlotStateMachine(params: {
       linkedIntentIds: ["slot:goal"],
       revisionHistory: [{ at: now, action: "updated", by: "system", reason: "conflict_analyzer" }],
       priority: clamp01(c.importance, 0.8),
-      rebuttalPoints: ["可通过调整预算/时长/约束优先级来消解冲突"],
+      rebuttalPoints: [
+        isEnglishLocale(params.locale)
+          ? "Resolve by adjusting budget, duration, or constraint priority"
+          : "可通过调整预算/时长/约束优先级来消解冲突",
+      ],
     });
     pushEdge(edges, slotKey, "slot:goal", "constraint", 0.9);
 

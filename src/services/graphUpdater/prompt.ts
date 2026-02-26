@@ -28,6 +28,11 @@ export const GRAPH_SYSTEM_PROMPT = `
 - 非核心细节节点优先挂到相关二级节点（determine），不要全部直接连到根节点。
 - 节点尽量附 evidenceIds（来自用户原句的短片段），用于前端高亮证据文本。
 - 边类型：enable / constraint / determine / conflicts_with
+- 边类型语义（必须遵守）：
+  - enable：A 的变化让 B 变得可执行（对应因果：direct / mediated causation）
+  - constraint：A 限制 B 的可行空间（对应因果：confounding 视角）
+  - determine：A 的取值直接决定 B（对应干预：do(A) -> B）
+  - conflicts_with：仅用于显式冲突标注，不是稳定因果依赖
 - 去重：已有等价节点优先 update_node
 - 连边克制：有 root_goal_id 时，constraint/preference/fact/belief 可以连到 root_goal_id
 - 每轮 op 建议 1~6 个，少而准。

@@ -4,6 +4,7 @@ import {
   buildBudgetLedgerFromUserTurns,
   type BudgetEvent,
 } from "./budgetLedger.js";
+import { isEnglishLocale, type AppLocale } from "../../i18n/locale.js";
 
 export type TravelPlanDay = {
   day: number;
@@ -46,6 +47,10 @@ export type TravelPlanState = {
     lastTurnAt?: string;
   };
 };
+
+function t(locale: AppLocale | undefined, zh: string, en: string): string {
+  return isEnglishLocale(locale) ? en : zh;
+}
 
 function clean(input: any, max = 200): string {
   return String(input ?? "")
@@ -111,13 +116,40 @@ function nodeByKey(graph: CDG, key: string): ConceptNode | undefined {
     })[0];
 }
 
+function statementBodyByPrefixes(statement: string, prefixes: string[]): string {
+  const s = clean(statement, 220);
+  for (const p of prefixes) {
+    const re = new RegExp(`^${p}\\s*[:：]\\s*`, "i");
+    if (re.test(s)) return s.replace(re, "").trim();
+  }
+  return "";
+}
+
+function parseAmountFromNodeStatement(node: ConceptNode | undefined, prefixes: string[]): number | undefined {
+  if (!node) return undefined;
+  const body = statementBodyByPrefixes(String(node.statement || ""), prefixes);
+  if (!body) return undefined;
+  const m = body.match(/([0-9]{1,12}(?:\\.[0-9]{1,2})?)/);
+  if (!m?.[1]) return undefined;
+  return parseMoney(m[1]);
+}
+
+function parseDaysFromNodeStatement(node: ConceptNode | undefined, prefixes: string[]): number | undefined {
+  if (!node) return undefined;
+  const body = statementBodyByPrefixes(String(node.statement || ""), prefixes);
+  if (!body) return undefined;
+  const m = body.match(/([0-9]{1,3})/);
+  if (!m?.[1]) return undefined;
+  return parseDays(m[1]);
+}
+
 const DAY_HEADER_RE =
-  /(第\s*[一二三四五六七八九十两0-9]{1,3}\s*天|day\s*[0-9]{1,2}|[0-9]{1,2}[\.、]\s*第\s*[一二三四五六七八九十两0-9]{1,3}\s*天)\s*[:：\-]?/gi;
+  /(第\s*[一二三四五六七八九十两0-9]{1,3}\s*天|day\s*[0-9]{1,2}|[0-9]{1,2}[\.、]\s*第\s*[一二三四五六七八九十两0-9]{1,3}\s*天|day\s*[0-9]{1,2}\s*[:：\-]?)/gi;
 const CONFIRMATION_QUESTION_RE =
-  /(请确认|是否是硬约束|是否为硬约束|还是可协商偏好|你希望优先满足哪一项|是否允许微调|这条信息是否是硬约束)/i;
+  /(请确认|是否是硬约束|是否为硬约束|还是可协商偏好|你希望优先满足哪一项|是否允许微调|这条信息是否是硬约束|please confirm|hard constraint|negotiable preference|which should be prioritized|allow adjustment)/i;
 
 const DESTINATION_NOISE_RE =
-  /(一个人|独自|自己|我们|我和|父母|家人|全家|去|前往|抵达|飞到|旅游|旅行|游玩|玩|现场观看|看球|比赛|球赛|预算|人民币|安全一点|地方吧)/i;
+  /(一个人|独自|自己|我们|我和|父母|家人|全家|去|前往|抵达|飞到|旅游|旅行|游玩|玩|现场观看|看球|比赛|球赛|预算|人民币|安全一点|地方吧|solo|myself|with family|travel|trip|go to|arrive|flight|budget|safe place)/i;
 
 function normalizeDestinationLabel(raw: string): string {
   let s = normalizeDestination(raw || "");
@@ -142,6 +174,8 @@ function parseDayFromHeader(header: string): number | undefined {
   if (b?.[1]) return parseDays(b[1]);
   const c = s.match(/[0-9]{1,2}[\.、]\s*第\s*([一二三四五六七八九十两0-9]{1,3})\s*天/i);
   if (c?.[1]) return parseDays(c[1]);
+  const d = s.match(/^([0-9]{1,2})[\\.)]\\s*day/i);
+  if (d?.[1]) return parseDays(d[1]);
   return undefined;
 }
 
@@ -165,7 +199,7 @@ function splitItineraryItems(body: string): string[] {
   }
 
   const timeRe =
-    /(上午|早上|中午|下午|傍晚|晚上|夜间|晚间|午后)\s*[：: ]?\s*([^。；;\n\r]{2,140})/g;
+    /(上午|早上|中午|下午|傍晚|晚上|夜间|晚间|午后|morning|noon|afternoon|evening|night)\s*[：: ]?\s*([^。；;\n\r]{2,140})/gi;
   for (const m of src.matchAll(timeRe)) {
     if (m?.[1] && m?.[2]) push(`${m[1]}：${m[2]}`);
   }
@@ -175,7 +209,7 @@ function splitItineraryItems(body: string): string[] {
     for (const m of src.matchAll(sentenceRe)) {
       if (!m?.[1]) continue;
       const seg = clean(m[1], 120);
-      if (/^(行程|建议|安排|预算|交通建议|住宿建议|请问|你觉得|是否)/.test(seg)) continue;
+      if (/^(行程|建议|安排|预算|交通建议|住宿建议|请问|你觉得|是否|itinerary|suggestion|plan|budget|transport|accommodation|question)/i.test(seg)) continue;
       push(seg);
       if (out.length >= 8) break;
     }
@@ -209,7 +243,7 @@ function parseDayBlocksFromText(text: string): TravelPlanDay[] {
     const next = headers[i + 1];
     const rawBody = src.slice(cur.bodyStart, next ? next.start : src.length).trim();
     const body = rawBody
-      .replace(/(?:请问|你觉得|是否需要|是否有|有其他问题|还需要).{0,120}(?:吗|？|\?)?$/i, "")
+      .replace(/(?:请问|你觉得|是否需要|是否有|有其他问题|还需要|do you|would you|any other|need me to|confirm).{0,160}(?:吗|？|\?)?$/i, "")
       .trim();
     const items = splitItineraryItems(body).filter((x) => !shouldDropQuestionLikeSentence(x));
     const firstSentence = clean(body.split(/[。；;\n\r]/)[0] || "", 64);
@@ -219,11 +253,11 @@ function parseDayBlocksFromText(text: string): TravelPlanDay[] {
         .replace(/^（[^）]{1,12}）\s*[:：]?\s*/g, "")
         .trim(),
       48
-    ) || `第${cur.day}天行程`;
+    ) || `Day ${cur.day} Plan`;
     out.push({
       day: cur.day,
       title,
-      items: items.length ? items : ["根据当日节奏进行景点、餐饮和交通安排。"],
+      items: items.length ? items : ["Arrange sights, meals, and transit based on the day pacing."],
     });
   }
 
@@ -236,6 +270,7 @@ function buildFallbackDayPlans(params: {
   totalDays?: number;
   cityDurations: Array<{ city: string; days: number }>;
   destinations: string[];
+  locale?: AppLocale;
 }): TravelPlanDay[] {
   const total = Number(params.totalDays) || 0;
   if (total <= 0) return [];
@@ -251,18 +286,18 @@ function buildFallbackDayPlans(params: {
     }
   }
 
-  const defaultCity = params.destinations[0] || "目的地";
+  const defaultCity = params.destinations[0] || t(params.locale, "目的地", "Destination");
   const out: TravelPlanDay[] = [];
   for (let d = 1; d <= total; d += 1) {
     const city = cityTimeline[d - 1] || defaultCity;
     out.push({
       day: d,
       city,
-      title: `${city}第${d}天`,
+      title: isEnglishLocale(params.locale) ? `${city} Day ${d}` : `${city}第${d}天`,
       items: [
-        `上午：围绕${city}安排核心地标或必去点。`,
-        "下午：补充博物馆/街区漫步等次重点活动。",
-        "晚上：安排本地餐厅并预留机动时间。",
+        t(params.locale, `上午：围绕${city}安排核心地标或必去点。`, `Morning: cover must-see landmarks in ${city}.`),
+        t(params.locale, "下午：补充博物馆/街区漫步等次重点活动。", "Afternoon: add secondary activities such as museums or district walks."),
+        t(params.locale, "晚上：安排本地餐厅并预留机动时间。", "Evening: arrange local dinner and keep buffer time."),
       ],
     });
   }
@@ -341,6 +376,7 @@ function addDateLabelsToDayPlans(
 }
 
 function buildSummary(params: {
+  locale?: AppLocale;
   goalStatement: string;
   destinations: string[];
   totalDays?: number;
@@ -352,18 +388,44 @@ function buildSummary(params: {
   const parts: string[] = [];
   const goal = clean(params.goalStatement || "", 100);
   if (goal) parts.push(goal);
-  if (params.destinations.length) parts.push(`目的地：${params.destinations.join("、")}`);
-  if (params.totalDays) parts.push(`总时长：${params.totalDays}天`);
+  if (params.destinations.length)
+    parts.push(
+      isEnglishLocale(params.locale)
+        ? `Destinations: ${params.destinations.join(" / ")}`
+        : `目的地：${params.destinations.join("、")}`
+    );
+  if (params.totalDays)
+    parts.push(
+      isEnglishLocale(params.locale)
+        ? `Total duration: ${params.totalDays} days`
+        : `总时长：${params.totalDays}天`
+    );
   if (params.totalBudget != null) {
-    const budgetPart: string[] = [`总预算${params.totalBudget}元`];
-    if (params.spentBudget != null) budgetPart.push(`已花${params.spentBudget}元`);
-    if (params.remainingBudget != null) budgetPart.push(`剩余${params.remainingBudget}元`);
-    parts.push(`预算：${budgetPart.join("，")}`);
+    const budgetPart: string[] = isEnglishLocale(params.locale)
+      ? [`total ${params.totalBudget} CNY`]
+      : [`总预算${params.totalBudget}元`];
+    if (params.spentBudget != null) {
+      budgetPart.push(isEnglishLocale(params.locale) ? `spent ${params.spentBudget} CNY` : `已花${params.spentBudget}元`);
+    }
+    if (params.remainingBudget != null) {
+      budgetPart.push(
+        isEnglishLocale(params.locale) ? `remaining ${params.remainingBudget} CNY` : `剩余${params.remainingBudget}元`
+      );
+    }
+    parts.push(
+      isEnglishLocale(params.locale)
+        ? `Budget: ${budgetPart.join(", ")}`
+        : `预算：${budgetPart.join("，")}`
+    );
   }
   if (params.constraints.length) {
-    parts.push(`关键约束：${params.constraints.slice(0, 2).join("；")}`);
+    parts.push(
+      isEnglishLocale(params.locale)
+        ? `Key constraints: ${params.constraints.slice(0, 2).join("; ")}`
+        : `关键约束：${params.constraints.slice(0, 2).join("；")}`
+    );
   }
-  return clean(parts.join("。"), 240);
+  return clean(parts.join(isEnglishLocale(params.locale) ? ". " : "。"), 260);
 }
 
 function parseCityDurations(graph: CDG): Array<{ city: string; days: number }> {
@@ -371,7 +433,7 @@ function parseCityDurations(graph: CDG): Array<{ city: string; days: number }> {
   for (const n of graph.nodes || []) {
     if (n.status === "rejected") continue;
     const s = clean(n.statement, 120);
-    const m = s.match(/^(?:城市时长|停留时长)[:：]\s*(.+?)\s+([0-9]{1,3})\s*天$/);
+    const m = s.match(/^(?:城市时长|停留时长|city duration|stay duration)[:：]\s*(.+?)\s+([0-9]{1,3})\s*(?:天|days?)$/i);
     if (!m?.[1] || !m?.[2]) continue;
     const city = normalizeDestinationLabel(clean(m[1], 24));
     const days = Number(m[2]);
@@ -389,7 +451,7 @@ function shouldDropQuestionLikeSentence(s: string): boolean {
   const v = clean(s, 200);
   if (!v) return true;
   if (CONFIRMATION_QUESTION_RE.test(v)) return true;
-  if (/^(请问|你觉得|是否|还有什么|需要调整|有其他问题吗)/.test(v)) return true;
+  if (/^(请问|你觉得|是否|还有什么|需要调整|有其他问题吗|do you|would you|is there anything|any adjustments|any other questions)/i.test(v)) return true;
   return false;
 }
 
@@ -408,6 +470,14 @@ function normalizeConstraintStatement(s: string): string {
   out = out.replace(
     /^限制因素[“"']?\s*(.+?)\s*[”"']?\s*是可协商偏好$/i,
     "限制因素: $1（可协商偏好）"
+  );
+  out = out.replace(
+    /^Limiting factor[:：]?\s*[\"']?(.+?)[\"']?\s*is a hard constraint$/i,
+    "Limiting factor: $1 (hard constraint)"
+  );
+  out = out.replace(
+    /^Limiting factor[:：]?\s*[\"']?(.+?)[\"']?\s*is a negotiable preference$/i,
+    "Limiting factor: $1 (negotiable preference)"
   );
   return clean(out, 100);
 }
@@ -431,7 +501,7 @@ function dedupeParagraphs(text: string, maxLen = 3600): string {
   return clean(out.join("\n"), maxLen);
 }
 
-function buildFallbackNarrativeFromDayPlans(dayPlans: TravelPlanDay[]): string {
+function buildFallbackNarrativeFromDayPlans(dayPlans: TravelPlanDay[], locale?: AppLocale): string {
   if (!dayPlans.length) return "";
   const lines: string[] = [];
   for (const day of dayPlans) {
@@ -440,7 +510,11 @@ function buildFallbackNarrativeFromDayPlans(dayPlans: TravelPlanDay[]): string {
       : day.city
         ? `（${day.city}）`
         : "";
-    lines.push(`第${day.day}天${datePart}：${clean(day.title || "行程安排", 64)}`);
+    lines.push(
+      isEnglishLocale(locale)
+        ? `Day ${day.day}${day.city ? ` (${day.city})` : ""}: ${clean(day.title || "Plan", 64)}`
+        : `第${day.day}天${datePart}：${clean(day.title || "行程安排", 64)}`
+    );
     for (const item of day.items || []) {
       lines.push(`- ${clean(item, 140)}`);
     }
@@ -449,6 +523,7 @@ function buildFallbackNarrativeFromDayPlans(dayPlans: TravelPlanDay[]): string {
 }
 
 function buildExportNarrative(plan: {
+  locale?: AppLocale;
   summary: string;
   narrativeText?: string;
   dayPlans: TravelPlanDay[];
@@ -457,44 +532,50 @@ function buildExportNarrative(plan: {
   const hasStructuredDayPlan = /第\s*[一二三四五六七八九十两0-9]{1,3}\s*天|day\s*[0-9]{1,2}/i.test(narrative);
   if (hasStructuredDayPlan && narrative.length >= 80) return narrative;
 
-  const fallback = buildFallbackNarrativeFromDayPlans(plan.dayPlans || []);
+  const fallback = buildFallbackNarrativeFromDayPlans(plan.dayPlans || [], plan.locale);
   if (fallback) return fallback;
   return dedupeParagraphs(plan.summary || "", 800);
 }
 
 export function buildTravelPlanState(params: {
+  locale?: AppLocale;
   graph: CDG;
   turns: Array<{ createdAt?: Date | string; userText: string; assistantText: string }>;
   previous?: TravelPlanState | null;
 }): TravelPlanState {
+  const locale = params.locale;
   const graph = params.graph;
   const turns = params.turns || [];
 
   const goalNode = (graph.nodes || [])
     .filter((n) => n.type === "goal" && n.status !== "rejected")
     .sort((a, b) => (Number(b.importance) || 0) - (Number(a.importance) || 0))[0];
-  const goalStatement = clean(goalNode?.statement || "", 120) || "制定旅行计划";
+  const goalStatement = clean(goalNode?.statement || "", 120) || t(locale, "制定旅行计划", "Plan the trip");
 
   const destinationNodes = (graph.nodes || [])
     .filter((n) => n.status !== "rejected")
-    .filter((n) => /^目的地[:：]/.test(clean(n.statement, 120)))
-    .map((n) => normalizeDestinationLabel(clean(String(n.statement || "").split(/[:：]/)[1] || "", 30)))
+    .filter((n) => /^(目的地|destination)[:：]/i.test(clean(n.statement, 120)) || String((n as any).key || "").startsWith("slot:destination:"))
+    .map((n) => {
+      const fromKey = String((n as any).key || "").startsWith("slot:destination:")
+        ? clean(String((n as any).statement || "").replace(/^(目的地|destination)[:：]/i, ""), 30)
+        : clean(String(n.statement || "").split(/[:：]/)[1] || "", 30);
+      return normalizeDestinationLabel(fromKey);
+    })
     .filter(Boolean);
   const destinations = dedupe(destinationNodes).slice(0, 8);
 
   const durationNode = nodeByKey(graph, "slot:duration_total");
-  const durationM = clean(durationNode?.statement || "", 80).match(/总行程时长[:：]\s*([0-9]{1,3})\s*天/);
-  const totalDays = durationM?.[1] ? Number(durationM[1]) : undefined;
+  const totalDays = parseDaysFromNodeStatement(durationNode, ["总行程时长", "行程时长", "Total duration", "Trip duration"]);
 
   const budgetNode = nodeByKey(graph, "slot:budget");
   const spentNode = nodeByKey(graph, "slot:budget_spent");
   const remainNode = nodeByKey(graph, "slot:budget_remaining");
   const pendingNode = nodeByKey(graph, "slot:budget_pending");
 
-  const totalBudget = parseMoney((clean(budgetNode?.statement || "", 80).match(/预算(?:上限)?[:：]\s*([0-9]{1,12})\s*元?/) || [])[1] || "");
-  const spentBudget = parseMoney((clean(spentNode?.statement || "", 80).match(/已花预算[:：]\s*([0-9]{1,12})\s*元?/) || [])[1] || "");
-  let remainingBudget = parseMoney((clean(remainNode?.statement || "", 80).match(/(?:剩余预算|可用预算)[:：]\s*([0-9]{1,12})\s*元?/) || [])[1] || "");
-  const pendingBudget = parseMoney((clean(pendingNode?.statement || "", 80).match(/(?:待确认预算|待确认支出)[:：]\s*([0-9]{1,12})\s*元?/) || [])[1] || "");
+  const totalBudget = parseAmountFromNodeStatement(budgetNode, ["预算上限", "预算", "Budget cap", "Budget"]);
+  const spentBudget = parseAmountFromNodeStatement(spentNode, ["已花预算", "Spent budget"]);
+  let remainingBudget = parseAmountFromNodeStatement(remainNode, ["剩余预算", "可用预算", "Remaining budget", "Available budget"]);
+  const pendingBudget = parseAmountFromNodeStatement(pendingNode, ["待确认预算", "待确认支出", "Pending budget", "Pending spending"]);
   if (remainingBudget == null && totalBudget != null && spentBudget != null) {
     remainingBudget = Math.max(0, totalBudget - spentBudget);
   }
@@ -518,10 +599,10 @@ export function buildTravelPlanState(params: {
     .filter(
       (s) =>
         s &&
-        !/^预算(?:上限)?[:：]/.test(s) &&
-        !/^已花预算[:：]/.test(s) &&
-        !/^(?:剩余预算|可用预算|待确认预算|待确认支出)[:：]/.test(s) &&
-        !/^总行程时长[:：]/.test(s)
+        !/^(?:预算(?:上限)?|Budget(?: cap)?)[:：]/i.test(s) &&
+        !/^(?:已花预算|Spent budget)[:：]/i.test(s) &&
+        !/^(?:剩余预算|可用预算|待确认预算|待确认支出|Remaining budget|Available budget|Pending budget|Pending spending)[:：]/i.test(s) &&
+        !/^(?:总行程时长|行程时长|Total duration|Trip duration)[:：]/i.test(s)
     );
   const normalizedConstraints = dedupe(constraints).slice(0, 10);
 
@@ -535,11 +616,12 @@ export function buildTravelPlanState(params: {
       totalDays,
       cityDurations,
       destinations,
+      locale,
     });
   }
 
   if (totalDays && dayPlans.length && dayPlans.length !== totalDays) {
-    const fallback = buildFallbackDayPlans({ totalDays, cityDurations, destinations });
+    const fallback = buildFallbackDayPlans({ totalDays, cityDurations, destinations, locale });
     for (const f of fallback) {
       if (!dayPlans.find((x) => x.day === f.day)) dayPlans.push(f);
     }
@@ -553,6 +635,7 @@ export function buildTravelPlanState(params: {
   dayPlans = addDateLabelsToDayPlans(dayPlans, dateAnchor);
 
   const summary = buildSummary({
+    locale,
     goalStatement,
     destinations,
     totalDays,
@@ -575,14 +658,14 @@ export function buildTravelPlanState(params: {
   const evidenceAppendix: Array<{ title: string; content: string; source: "dialogue" | "budget" | "graph" }> = [];
   for (const ev of budgetLedger.events.slice(-10)) {
     evidenceAppendix.push({
-      title: `预算事件 · ${ev.type}`,
-      content: `${ev.evidence}${ev.amountCny != null ? `（${ev.amountCny}元）` : ""}`,
+      title: isEnglishLocale(locale) ? `Budget event · ${ev.type}` : `预算事件 · ${ev.type}`,
+      content: `${ev.evidence}${ev.amountCny != null ? (isEnglishLocale(locale) ? ` (${ev.amountCny} CNY)` : `（${ev.amountCny}元）`) : ""}`,
       source: "budget",
     });
   }
   for (const c of normalizedConstraints.slice(0, 6)) {
     evidenceAppendix.push({
-      title: "约束证据",
+      title: isEnglishLocale(locale) ? "Constraint evidence" : "约束证据",
       content: c,
       source: "graph",
     });
@@ -591,7 +674,7 @@ export function buildTravelPlanState(params: {
     const u = clean(t.userText || "", 140);
     if (!u || shouldDropQuestionLikeSentence(u)) continue;
     evidenceAppendix.push({
-      title: "用户原句",
+      title: isEnglishLocale(locale) ? "User utterance" : "用户原句",
       content: u,
       source: "dialogue",
     });
@@ -604,6 +687,7 @@ export function buildTravelPlanState(params: {
   const dedupAppendix = Array.from(appendixMap.values()).slice(0, 20);
 
   const exportNarrative = buildExportNarrative({
+    locale,
     summary,
     narrativeText,
     dayPlans,
@@ -641,30 +725,42 @@ export function buildTravelPlanState(params: {
   };
 }
 
-export function buildTravelPlanText(plan: TravelPlanState): string {
+export function buildTravelPlanText(plan: TravelPlanState, locale?: AppLocale): string {
   const lines: string[] = [];
-  lines.push("旅行计划（可执行版）");
+  lines.push(t(locale, "旅行计划（可执行版）", "Travel Plan (Executable Version)"));
   lines.push("");
-  lines.push(`行程摘要：${plan.summary || "（暂无摘要）"}`);
+  lines.push(
+    isEnglishLocale(locale)
+      ? `Summary: ${plan.summary || "(no summary)"}`
+      : `行程摘要：${plan.summary || "（暂无摘要）"}`
+  );
 
   if (plan.destinations?.length) {
-    lines.push(`目的地：${plan.destinations.join("、")}`);
+    lines.push(
+      isEnglishLocale(locale)
+        ? `Destinations: ${plan.destinations.join(" / ")}`
+        : `目的地：${plan.destinations.join("、")}`
+    );
   }
   if (plan.totalDays) {
-    lines.push(`总时长：${plan.totalDays}天`);
+    lines.push(isEnglishLocale(locale) ? `Total duration: ${plan.totalDays} days` : `总时长：${plan.totalDays}天`);
   }
 
   if (plan.budget) {
     const b = plan.budget;
-    lines.push("预算总览：");
-    if (b.totalCny != null) lines.push(`- 总预算：${b.totalCny}元`);
-    if (b.spentCny != null) lines.push(`- 已花预算：${b.spentCny}元`);
-    if (b.remainingCny != null) lines.push(`- 剩余预算：${b.remainingCny}元`);
-    if (b.pendingCny != null && b.pendingCny > 0) lines.push(`- 待确认支出：${b.pendingCny}元`);
+    lines.push(t(locale, "预算总览：", "Budget Overview:"));
+    if (b.totalCny != null)
+      lines.push(isEnglishLocale(locale) ? `- Total budget: ${b.totalCny} CNY` : `- 总预算：${b.totalCny}元`);
+    if (b.spentCny != null)
+      lines.push(isEnglishLocale(locale) ? `- Spent: ${b.spentCny} CNY` : `- 已花预算：${b.spentCny}元`);
+    if (b.remainingCny != null)
+      lines.push(isEnglishLocale(locale) ? `- Remaining: ${b.remainingCny} CNY` : `- 剩余预算：${b.remainingCny}元`);
+    if (b.pendingCny != null && b.pendingCny > 0)
+      lines.push(isEnglishLocale(locale) ? `- Pending: ${b.pendingCny} CNY` : `- 待确认支出：${b.pendingCny}元`);
   }
 
   if (plan.constraints?.length) {
-    lines.push("关键约束：");
+    lines.push(t(locale, "关键约束：", "Key Constraints:"));
     for (const c of plan.constraints) {
       lines.push(`- ${c}`);
     }
@@ -676,19 +772,23 @@ export function buildTravelPlanText(plan: TravelPlanState): string {
 
   if (plan.exportNarrative) {
     lines.push("");
-    lines.push("可执行行程：");
+    lines.push(t(locale, "可执行行程：", "Executable Itinerary:"));
     lines.push(plan.exportNarrative);
   }
 
   if (!narrativeHasDay) {
     lines.push("");
-    lines.push("按天行程：");
+    lines.push(t(locale, "按天行程：", "Day-by-Day Plan:"));
     if (!plan.dayPlans?.length) {
-      lines.push("- 暂无按天行程，请继续对话补全。");
+      lines.push(t(locale, "- 暂无按天行程，请继续对话补全。", "- No day-by-day plan yet. Continue the conversation to complete it."));
     } else {
       for (const day of plan.dayPlans) {
         const datePart = day.dateLabel ? `（${day.dateLabel}${day.city ? `，${day.city}` : ""}）` : day.city ? `（${day.city}）` : "";
-        lines.push(`第${day.day}天${datePart}：${day.title || "行程安排"}`);
+        lines.push(
+          isEnglishLocale(locale)
+            ? `Day ${day.day}${day.city ? ` (${day.city})` : ""}: ${day.title || "Plan"}`
+            : `第${day.day}天${datePart}：${day.title || "行程安排"}`
+        );
         for (const item of day.items || []) {
           lines.push(`  - ${item}`);
         }
@@ -698,9 +798,13 @@ export function buildTravelPlanText(plan: TravelPlanState): string {
 
   if (plan.evidenceAppendix?.length) {
     lines.push("");
-    lines.push("附录（证据片段）：");
+    lines.push(t(locale, "附录（证据片段）：", "Appendix (Evidence Snippets):"));
     for (const e of plan.evidenceAppendix.slice(0, 20)) {
-      lines.push(`- [${e.source}] ${e.title}：${e.content}`);
+      lines.push(
+        isEnglishLocale(locale)
+          ? `- [${e.source}] ${e.title}: ${e.content}`
+          : `- [${e.source}] ${e.title}：${e.content}`
+      );
     }
   }
 

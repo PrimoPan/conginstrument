@@ -1,4 +1,5 @@
 import type { ConceptMotif } from "./conceptMotifs.js";
+import { isEnglishLocale, type AppLocale } from "../../i18n/locale.js";
 
 export type ConflictGateItem = {
   id: string;
@@ -13,6 +14,10 @@ function cleanText(input: any, max = 140): string {
     .replace(/\s+/g, " ")
     .trim()
     .slice(0, max);
+}
+
+function t(locale: AppLocale | undefined, zh: string, en: string): string {
+  return isEnglishLocale(locale) ? en : zh;
 }
 
 function isResolved(m: ConceptMotif): boolean {
@@ -36,14 +41,21 @@ export function listUnresolvedDeprecatedMotifs(motifs: ConceptMotif[]): Conflict
     }));
 }
 
-export function buildConflictGateMessage(items: ConflictGateItem[]): string {
+export function buildConflictGateMessage(items: ConflictGateItem[], locale?: AppLocale): string {
   const list = (items || []).slice(0, 4);
   const lines = list.map((x, i) => `${i + 1}. ${x.title}`).join("\n");
   return [
-    `当前检测到 ${items.length} 条冲突 motif，继续生成计划前需要先确认。`,
-    "请在中间 Motif 面板对冲突项选择“确认保留”或“确认停用”，然后点击“保存并生成建议”。",
-    "待确认冲突：",
+    t(
+      locale,
+      `当前检测到 ${items.length} 条冲突 motif，继续生成计划前需要先确认。`,
+      `${items.length} conflicting motifs detected. Resolve them before continuing.`
+    ),
+    t(
+      locale,
+      "请在中间 Motif 面板对冲突项选择“确认保留”或“确认停用”，然后点击“保存并生成建议”。",
+      'In the Motif panel, choose "keep" or "disable" for each conflict, then click "Save and generate advice".'
+    ),
+    t(locale, "待确认冲突：", "Pending conflicts:"),
     lines || "- (none)",
   ].join("\n");
 }
-

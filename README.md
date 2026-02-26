@@ -132,7 +132,7 @@ Base URL 示例：`http://localhost:3001`
 | `PUT` | `/api/conversations/:id/graph` | 是 | 保存前端编辑后的整图快照（可选触发“基于新图”的建议） |
 | `PUT` | `/api/conversations/:id/concepts` | 是 | 保存中间 Concept 模块状态（锁定/暂停/编辑） |
 | `GET` | `/api/conversations/:id/turns?limit=30` | 是 | 历史轮次 |
-| `GET` | `/api/conversations/:id/travel-plan/export.pdf` | 是 | 导出旅行计划 PDF（中文、按天行程） |
+| `GET` | `/api/conversations/:id/travel-plan/export.pdf` | 是 | 导出旅行计划 PDF（按会话 locale 输出中/英文） |
 | `POST` | `/api/conversations/:id/turn` | 是 | 非流式单轮 |
 | `POST` | `/api/conversations/:id/turn/stream` | 是 | SSE 流式单轮 |
 
@@ -193,7 +193,8 @@ Base URL 示例：`http://localhost:3001`
   {
     "conversationId": "65f1...",
     "title": "新对话",
-    "updatedAt": "2026-02-15T12:00:00.000Z"
+    "updatedAt": "2026-02-15T12:00:00.000Z",
+    "locale": "zh-CN"
   }
 ]
 ```
@@ -203,12 +204,13 @@ Base URL 示例：`http://localhost:3001`
 请求：
 
 ```json
-{ "title": "新对话" }
+{ "title": "新对话", "locale": "zh-CN" }
 ```
 
 规则：
 
 - 默认标题：`New Conversation`
+- `locale` 可选：`zh-CN | en-US`（默认 `zh-CN`）
 - 标题最大 80 字符
 - 自动初始化空图：
   `{ id: conversationId, version: 0, nodes: [], edges: [] }`
@@ -219,6 +221,7 @@ Base URL 示例：`http://localhost:3001`
 {
   "conversationId": "65f1...",
   "title": "新对话",
+  "locale": "zh-CN",
   "systemPrompt": "你是CogInstrument的助手...",
   "graph": {
     "id": "65f1...",
@@ -237,6 +240,7 @@ Base URL 示例：`http://localhost:3001`
 {
   "conversationId": "65f1...",
   "title": "新对话",
+  "locale": "zh-CN",
   "systemPrompt": "你是CogInstrument的助手...",
   "graph": {
     "id": "65f1...",

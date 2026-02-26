@@ -7,6 +7,7 @@ import {
 } from "./intentSignals.js";
 import { LANGUAGE_CONSTRAINT_RE, MEDICAL_HEALTH_RE } from "./constants.js";
 import { classifyConstraintText, dedupeClassifiedConstraints } from "./constraintClassifier.js";
+import { isEnglishLocale, type AppLocale } from "../../i18n/locale.js";
 
 type SlotExtractionResult = {
   intent_summary?: string;
@@ -561,7 +562,7 @@ function slotsToSignals(slots: SlotExtractionResult): IntentSignals {
 
 const SLOT_FUNCTION_NAME = "extract_structured_intent_slots";
 
-const SLOT_SYSTEM_PROMPT = `你是结构化槽位抽取器。只调用给定函数并返回 JSON 参数。
+const SLOT_SYSTEM_PROMPT_ZH = `你是结构化槽位抽取器。只调用给定函数并返回 JSON 参数。
 
 要求：
 1) 只从用户输入中抽取，不复述助手建议。
@@ -571,6 +572,17 @@ const SLOT_SYSTEM_PROMPT = `你是结构化槽位抽取器。只调用给定函�
 5) 约束可放 health_constraints / language_constraints / constraints（通用约束）。
 6) “球迷/看球/演唱会/看展”等兴趣诉求优先放 activity_preference（以及必要的 sub_locations），不要误放到 constraints。
 7) 不确定就留空，不要编造。`;
+
+const SLOT_SYSTEM_PROMPT_EN = `You are a structured slot extractor. Only call the provided function and return JSON arguments.
+
+Rules:
+1) Extract only from user messages. Do not copy assistant suggestions.
+2) When later turns update constraints, newer constraints override old ones.
+3) "Reserve one day for a task/presentation/meeting" must go to critical_days and must NOT overwrite total_duration.
+4) destinations must contain only places (city/region/country). Venues/POIs should go to sub_locations with parent_city when possible.
+5) Put constraints into health_constraints / language_constraints / constraints.
+6) Preference signals like football/game/concert/exhibition should go to activity_preference (+ sub_locations if needed), not generic constraints.
+7) If uncertain, leave fields empty. Do not hallucinate values.`;
 
 const SLOT_PARAMETERS = {
   type: "object",
@@ -756,6 +768,7 @@ export async function extractIntentSignalsByFunctionCall(params: {
   latestUserText: string;
   recentTurns: Array<{ role: "user" | "assistant"; content: string }>;
   systemPrompt?: string;
+  locale?: AppLocale;
   debug?: boolean;
 }): Promise<{ signals: IntentSignals; raw: SlotExtractionResult } | null> {
   const userTurns = (params.recentTurns || [])
@@ -769,16 +782,19 @@ export async function extractIntentSignalsByFunctionCall(params: {
     recent_user_turns: userTurns,
     optional_system_prompt: params.systemPrompt ? cleanStatement(params.systemPrompt, 500) : undefined,
   };
+  const useEn = isEnglishLocale(params.locale);
 
   const resp = await openai.chat.completions.create({
     model: params.model,
     temperature: 0,
     max_tokens: 900,
     messages: [
-      { role: "system", content: SLOT_SYSTEM_PROMPT },
+      { role: "system", content: useEn ? SLOT_SYSTEM_PROMPT_EN : SLOT_SYSTEM_PROMPT_ZH },
       {
         role: "user",
-        content: `请抽取结构化槽位。输入 JSON:\n${JSON.stringify(inputPayload)}`,
+        content: useEn
+          ? `Extract structured slots from this JSON input:\n${JSON.stringify(inputPayload)}`
+          : `请抽取结构化槽位。输入 JSON:\n${JSON.stringify(inputPayload)}`,
       },
     ],
     tools: [

@@ -1,5 +1,6 @@
 import { MongoClient, Db, Collection, ObjectId } from "mongodb";
 import { config } from "../server/config.js";
+import type { AppLocale } from "../i18n/locale.js";
 
 export type UserDoc = {
   _id?: ObjectId;
@@ -20,6 +21,7 @@ export type ConversationDoc = {
   _id?: ObjectId;
   userId: ObjectId;
   title: string;
+  locale?: AppLocale;
   systemPrompt: string;
   model: string;
   createdAt: Date;

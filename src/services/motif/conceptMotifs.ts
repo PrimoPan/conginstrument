@@ -4,6 +4,12 @@ import type { ConceptItem } from "../concepts.js";
 export type ConceptMotifType = "pair" | "triad";
 export type MotifLifecycleStatus = "active" | "uncertain" | "deprecated" | "disabled" | "cancelled";
 export type MotifChangeState = "new" | "updated" | "unchanged";
+export type MotifCausalOperator =
+  | "direct_causation"
+  | "mediated_causation"
+  | "confounding"
+  | "intervention"
+  | "contradiction";
 
 export type ConceptMotif = {
   id: string;
@@ -22,6 +28,17 @@ export type ConceptMotif = {
   resolved?: boolean;
   resolvedAt?: string;
   resolvedBy?: "user" | "system";
+  causalOperator?: MotifCausalOperator;
+  causalFormula?: string;
+  dependencyClass?: EdgeType;
+  history?: Array<{
+    at: string;
+    by: "system" | "user";
+    action: "status_changed" | "edited" | "resolved";
+    from?: MotifLifecycleStatus;
+    to?: MotifLifecycleStatus;
+    reason?: string;
+  }>;
   novelty: MotifChangeState;
   updatedAt: string;
 };
@@ -69,6 +86,23 @@ function relationLabel(type: EdgeType): string {
   if (type === "determine") return "决定";
   if (type === "conflicts_with") return "冲突";
   return type;
+}
+
+function relationTheoryHint(type: EdgeType, motifType: ConceptMotifType): string {
+  if (type === "enable") return motifType === "triad" ? "Enable · Mediated causation" : "Enable · Direct causation";
+  if (type === "constraint") return "Constraint · Confounding";
+  if (type === "determine") return "Determine · Intervention";
+  return "Conflict · Contradiction";
+}
+
+function normalizeDependencyClass(raw: any, fallback: EdgeType): EdgeType {
+  const v = cleanText(raw, 40);
+  if (v === "constraint" || v === "enable" || v === "determine" || v === "conflicts_with") return v;
+  return fallback;
+}
+
+function motifDependencyClass(m: Pick<ConceptMotif, "relation" | "dependencyClass">): EdgeType {
+  return normalizeDependencyClass(m.dependencyClass, m.relation);
 }
 
 function familyLabel(family: ConceptItem["family"]): string {
@@ -120,15 +154,11 @@ function sourceSignatureToken(c: ConceptItem | undefined): string {
   if (key === "slot:budget" || key === "slot:budget_spent" || key === "slot:budget_remaining" || key === "slot:budget_pending") {
     return "slot:budget";
   }
-  if (
-    key.startsWith("slot:destination:") ||
-    key.startsWith("slot:duration_city:") ||
-    key.startsWith("slot:meeting_critical:") ||
-    key.startsWith("slot:constraint:limiting:") ||
-    key.startsWith("slot:sub_location:")
-  ) {
-    return key;
-  }
+  if (key.startsWith("slot:destination:")) return "slot:destination";
+  if (key.startsWith("slot:duration_city:")) return "slot:duration_city";
+  if (key.startsWith("slot:meeting_critical:")) return "slot:meeting_critical";
+  if (key.startsWith("slot:constraint:limiting:")) return "slot:constraint:limiting";
+  if (key.startsWith("slot:sub_location:")) return "slot:sub_location";
   if (key === "slot:goal") return "slot:goal";
   if (key === "slot:duration_total" || key === "slot:duration") return "slot:duration_total";
   if (key === "slot:people") return "slot:people";
@@ -169,10 +199,59 @@ function sourceFamiliesForPattern(m: ConceptMotif, conceptById: Map<string, Conc
   );
 }
 
+function inferCausalOperator(m: ConceptMotif): MotifCausalOperator {
+  const dep = motifDependencyClass(m);
+  if (dep === "enable") return m.motifType === "triad" ? "mediated_causation" : "direct_causation";
+  if (dep === "constraint") return "confounding";
+  if (dep === "determine") return "intervention";
+  return "contradiction";
+}
+
+function conceptTitleOf(id: string, conceptById: Map<string, ConceptItem>): string {
+  return cleanText(conceptById.get(id)?.title, 28) || cleanText(id, 28) || "C";
+}
+
+function motifSourceIds(m: ConceptMotif): string[] {
+  const ids = (m.conceptIds || []).slice();
+  if (m.anchorConceptId) {
+    const idx = ids.indexOf(m.anchorConceptId);
+    if (idx >= 0) ids.splice(idx, 1);
+  }
+  return ids;
+}
+
+function causalFormula(m: ConceptMotif, conceptById: Map<string, ConceptItem>): string {
+  const sourceIds = motifSourceIds(m);
+  const anchorId = m.anchorConceptId || (m.conceptIds || [])[m.conceptIds.length - 1] || "";
+  const target = conceptTitleOf(anchorId, conceptById);
+  const a = sourceIds[0] ? conceptTitleOf(sourceIds[0], conceptById) : "A";
+  const b = sourceIds[1] ? conceptTitleOf(sourceIds[1], conceptById) : "B";
+  const op = inferCausalOperator(m);
+  if (op === "direct_causation") return `${a} -> ${target}`;
+  if (op === "mediated_causation") return `${a} -> ${b} -> ${target}`;
+  if (op === "confounding") return sourceIds.length >= 2 ? `${a} <- ${b} -> ${target}` : `C -> ${target}`;
+  if (op === "intervention") return `do(${a}) -> ${target}`;
+  return `${a} x ${target}`;
+}
+
+function withCausalSemantics(m: ConceptMotif, conceptById: Map<string, ConceptItem>): ConceptMotif {
+  const dep = motifDependencyClass(m);
+  const op = inferCausalOperator(m);
+  return {
+    ...m,
+    dependencyClass: dep,
+    causalOperator: op,
+    causalFormula: causalFormula(m, conceptById),
+    description:
+      cleanText(m.description, 220) ||
+      cleanText(`${relationTheoryHint(dep, m.motifType)} · ${causalFormula(m, conceptById)}`, 220),
+  };
+}
+
 function motifPatternSignature(m: ConceptMotif, conceptById: Map<string, ConceptItem>): string {
   const source = sourceFamiliesForPattern(m, conceptById).join("+") || "none";
   const anchorFamily = canonicalConceptFamily(conceptById.get(m.anchorConceptId));
-  return `${m.motifType}|${m.relation}|${source}->${anchorFamily || "other"}`;
+  return `${m.motifType}|${motifDependencyClass(m)}|${source}->${anchorFamily || "other"}`;
 }
 
 function relationTypeBoost(relation: EdgeType): number {
@@ -278,7 +357,13 @@ function aggregateToPatternMotifs(instances: ConceptMotif[], concepts: ConceptIt
       conceptIds,
       anchorConceptId: anchorId,
       title: cleanText(title, 160),
-      description: cleanText(`模式：${sourceFamilyText || "概念"} ${relationLabel(g.relation)} ${anchorFamilyText}`, 220),
+      description: cleanText(
+        `模式：${sourceFamilyText || "概念"} ${relationLabel(g.relation)} ${anchorFamilyText}（${relationTheoryHint(
+          g.relation,
+          g.motifType
+        )}）`,
+        220
+      ),
       confidence,
       supportEdgeIds: uniq(Array.from(g.supportEdgeIds), 72),
       supportNodeIds: uniq(Array.from(g.supportNodeIds), 72),
@@ -323,6 +408,7 @@ function buildPairMotifs(graph: CDG, concepts: ConceptItem[]): ConceptMotif[] {
   const now = new Date().toISOString();
 
   for (const e of graph.edges || []) {
+    if (e.type === "conflicts_with") continue;
     const fromConceptIds = nodeToConcepts.get(e.from) || [];
     const toConceptIds = nodeToConcepts.get(e.to) || [];
     if (!fromConceptIds.length || !toConceptIds.length) continue;
@@ -376,7 +462,9 @@ function buildPairMotifs(graph: CDG, concepts: ConceptItem[]): ConceptMotif[] {
       conceptIds: [pair.fromId, pair.toId],
       anchorConceptId: pair.toId,
       title: `${fromConcept.title} ${relationLabel(pair.relation)} ${toConcept.title}`,
-      description: `${familyLabel(fromConcept.family)} ${relationLabel(pair.relation)} ${familyLabel(toConcept.family)}`,
+      description: `${familyLabel(fromConcept.family)} ${relationLabel(pair.relation)} ${familyLabel(
+        toConcept.family
+      )}（${relationTheoryHint(pair.relation, "pair")}）`,
       confidence,
       supportEdgeIds: uniq(pair.supportEdgeIds, 32),
       supportNodeIds: uniq(pair.supportNodeIds, 32),
@@ -450,7 +538,7 @@ function buildTriadMotifs(pairMotifs: ConceptMotif[], concepts: ConceptItem[]): 
         title: `${sourceConcepts[0].title} + ${sourceConcepts[1].title} ${relationLabel(relation)} ${target.title}`,
         description: `复合结构：${familyLabel(sourceConcepts[0].family)} + ${familyLabel(
           sourceConcepts[1].family
-        )} ${relationLabel(relation)} ${familyLabel(target.family)}`,
+        )} ${relationLabel(relation)} ${familyLabel(target.family)}（${relationTheoryHint(relation, "triad")}）`,
         confidence,
         supportEdgeIds: uniq(top.flatMap((m) => m.supportEdgeIds), 36),
         supportNodeIds: uniq(top.flatMap((m) => m.supportNodeIds), 36),
@@ -472,20 +560,23 @@ function normalizeMotifs(input: any): ConceptMotif[] {
     const id = cleanText((raw as any)?.id, 140);
     if (!id || seen.has(id)) continue;
     seen.add(id);
-    const relation = cleanText((raw as any)?.relation, 40) as EdgeType;
+    const relationRaw = cleanText((raw as any)?.relation, 40);
+    const relation =
+      relationRaw === "constraint" || relationRaw === "enable" || relationRaw === "determine" || relationRaw === "conflicts_with"
+        ? (relationRaw as EdgeType)
+        : "enable";
+    const dependencyClass = normalizeDependencyClass((raw as any)?.dependencyClass, relation);
     const motifType = cleanText((raw as any)?.motifType, 20) as ConceptMotifType;
     const statusRaw = cleanText((raw as any)?.status, 24).toLowerCase();
     const noveltyRaw = cleanText((raw as any)?.novelty, 24).toLowerCase();
+    const causalRaw = cleanText((raw as any)?.causalOperator, 40).toLowerCase();
     const resolved = !!(raw as any)?.resolved;
     const resolvedByRaw = cleanText((raw as any)?.resolvedBy, 24).toLowerCase();
     out.push({
       id,
       templateKey: cleanText((raw as any)?.templateKey, 180),
       motifType: motifType === "triad" ? "triad" : "pair",
-      relation:
-        relation === "constraint" || relation === "enable" || relation === "determine" || relation === "conflicts_with"
-          ? relation
-          : "enable",
+      relation,
       conceptIds: uniq(
         (Array.isArray((raw as any)?.conceptIds) ? (raw as any).conceptIds : []).map((x: any) => cleanText(x, 100)),
         8
@@ -517,6 +608,49 @@ function normalizeMotifs(input: any): ConceptMotif[] {
       resolved,
       resolvedAt: resolved ? cleanText((raw as any)?.resolvedAt, 40) || undefined : undefined,
       resolvedBy: resolved ? (resolvedByRaw === "user" ? "user" : "system") : undefined,
+      causalOperator:
+        causalRaw === "direct_causation" ||
+        causalRaw === "mediated_causation" ||
+        causalRaw === "confounding" ||
+        causalRaw === "intervention" ||
+        causalRaw === "contradiction"
+          ? (causalRaw as MotifCausalOperator)
+          : undefined,
+      causalFormula: cleanText((raw as any)?.causalFormula, 180) || undefined,
+      dependencyClass,
+      history: Array.isArray((raw as any)?.history)
+        ? (raw as any).history
+            .map((h: any) => ({
+              at: cleanText(h?.at, 40) || new Date().toISOString(),
+              by: cleanText(h?.by, 20) === "user" ? "user" : "system",
+              action:
+                cleanText(h?.action, 40) === "resolved"
+                  ? "resolved"
+                  : cleanText(h?.action, 40) === "edited"
+                  ? "edited"
+                  : "status_changed",
+              from:
+                cleanText(h?.from, 24) === "uncertain" ||
+                cleanText(h?.from, 24) === "deprecated" ||
+                cleanText(h?.from, 24) === "disabled" ||
+                cleanText(h?.from, 24) === "cancelled"
+                  ? (cleanText(h?.from, 24) as MotifLifecycleStatus)
+                  : cleanText(h?.from, 24) === "active"
+                  ? "active"
+                  : undefined,
+              to:
+                cleanText(h?.to, 24) === "uncertain" ||
+                cleanText(h?.to, 24) === "deprecated" ||
+                cleanText(h?.to, 24) === "disabled" ||
+                cleanText(h?.to, 24) === "cancelled"
+                  ? (cleanText(h?.to, 24) as MotifLifecycleStatus)
+                  : cleanText(h?.to, 24) === "active"
+                  ? "active"
+                  : undefined,
+              reason: cleanText(h?.reason, 120) || undefined,
+            }))
+            .slice(0, 20)
+        : undefined,
       novelty: noveltyRaw === "updated" || noveltyRaw === "unchanged" ? (noveltyRaw as MotifChangeState) : "new",
       updatedAt: cleanText((raw as any)?.updatedAt, 40) || new Date().toISOString(),
     });
@@ -565,7 +699,7 @@ function inferBaseStatus(m: ConceptMotif, prev: ConceptMotif | undefined, concep
     });
   if (allPaused) return { status: "disabled" as MotifLifecycleStatus, reason: "all_related_concepts_paused" };
 
-  if (prev?.status === "disabled" && !allPaused) {
+  if (prev?.status === "disabled" && !!prev.resolved && !allPaused) {
     return { status: "disabled" as MotifLifecycleStatus, reason: prev.statusReason || "user_disabled" };
   }
   if (m.confidence < 0.7) return { status: "uncertain" as MotifLifecycleStatus, reason: "low_confidence" };
@@ -573,12 +707,13 @@ function inferBaseStatus(m: ConceptMotif, prev: ConceptMotif | undefined, concep
 }
 
 function motifPriorityScore(m: ConceptMotif): number {
+  const dep = motifDependencyClass(m);
   const relationBoost =
-    m.relation === "constraint"
+    dep === "constraint"
       ? 0.03
-      : m.relation === "determine"
+      : dep === "determine"
       ? 0.02
-      : m.relation === "enable"
+      : dep === "enable"
       ? 0.01
       : 0;
   const typeBoost = m.motifType === "pair" ? 0.015 : 0;
@@ -591,7 +726,7 @@ function applyRedundancyDeprecation(motifs: ConceptMotif[], conceptById: Map<str
     if (m.resolved) continue;
     if (m.status === "cancelled" || m.status === "disabled") continue;
     if (!m.anchorConceptId) continue;
-    const signature = `${m.relation}|${m.anchorConceptId}|${sourceFamilySignature(m, conceptById)}`;
+    const signature = `${motifDependencyClass(m)}|${m.anchorConceptId}|${sourceFamilySignature(m, conceptById)}`;
     if (!groups.has(signature)) groups.set(signature, []);
     groups.get(signature)!.push(m);
   }
@@ -622,6 +757,72 @@ function applyRedundancyDeprecation(motifs: ConceptMotif[], conceptById: Map<str
   });
 }
 
+function arraysIntersect(a: string[], b: string[]): boolean {
+  if (!a.length || !b.length) return false;
+  const setA = new Set(a);
+  for (const x of b) if (setA.has(x)) return true;
+  return false;
+}
+
+function hasNegationSignal(text: string): boolean {
+  return /(不|不能|不要|避免|别|禁止|must not|cannot|avoid|no )/i.test(cleanText(text, 180));
+}
+
+function applyRelationConflictDeprecation(motifs: ConceptMotif[], conceptById: Map<string, ConceptItem>): ConceptMotif[] {
+  const candidates = motifs.filter(
+    (m) =>
+      !m.resolved &&
+      m.status !== "cancelled" &&
+      m.status !== "disabled" &&
+      m.status !== "deprecated" &&
+      !!m.anchorConceptId
+  );
+  if (candidates.length < 2) return motifs;
+
+  const patch = new Map<string, { status: MotifLifecycleStatus; reason: string }>();
+  for (let i = 0; i < candidates.length; i += 1) {
+    const a = candidates[i];
+    for (let j = i + 1; j < candidates.length; j += 1) {
+      const b = candidates[j];
+      if (!a.anchorConceptId || a.anchorConceptId !== b.anchorConceptId) continue;
+      if (a.relation === b.relation) continue;
+
+      const relationPair = new Set([motifDependencyClass(a), motifDependencyClass(b)]);
+      const isPotentialConflict =
+        (relationPair.has("constraint") && relationPair.has("determine")) ||
+        (relationPair.has("constraint") && relationPair.has("enable"));
+      if (!isPotentialConflict) continue;
+
+      const srcA = sourceFamiliesForPattern(a, conceptById);
+      const srcB = sourceFamiliesForPattern(b, conceptById);
+      const familyOverlap = arraysIntersect(srcA, srcB);
+      const negA = hasNegationSignal(a.title) || hasNegationSignal(a.description);
+      const negB = hasNegationSignal(b.title) || hasNegationSignal(b.description);
+      if (!familyOverlap && negA === negB) continue;
+
+      const winner = motifPriorityScore(a) >= motifPriorityScore(b) ? a : b;
+      const loser = winner.id === a.id ? b : a;
+      if (loser.resolved) continue;
+      patch.set(loser.id, { status: "deprecated", reason: `relation_conflict_with:${winner.id}` });
+    }
+  }
+
+  if (!patch.size) return motifs;
+  return motifs.map((m) => {
+    const p = patch.get(m.id);
+    if (!p) return m;
+    return {
+      ...m,
+      status: p.status,
+      statusReason: p.reason,
+      novelty: m.novelty === "new" ? "new" : "updated",
+      resolved: false,
+      resolvedAt: undefined,
+      resolvedBy: undefined,
+    };
+  });
+}
+
 function isSubsetOf(a: string[], b: string[]): boolean {
   if (!a.length) return true;
   const setB = new Set(b);
@@ -634,7 +835,7 @@ function applyTriadSubsumption(motifs: ConceptMotif[], conceptById: Map<string, 
   if (!triads.length) return motifs;
   const triadMeta = triads.map((t) => ({
     id: t.id,
-    relation: t.relation,
+    relation: motifDependencyClass(t),
     anchor: t.anchorConceptId,
     sourceFamilies: sourceFamiliesForPattern(t, conceptById),
     confidence: t.confidence,
@@ -645,7 +846,7 @@ function applyTriadSubsumption(motifs: ConceptMotif[], conceptById: Map<string, 
     const pairFamilies = sourceFamiliesForPattern(m, conceptById);
     const covering = triadMeta.find(
       (t) =>
-        t.relation === m.relation &&
+        t.relation === motifDependencyClass(m) &&
         t.anchor === m.anchorConceptId &&
         isSubsetOf(pairFamilies, t.sourceFamilies) &&
         t.confidence + 0.08 >= m.confidence
@@ -695,6 +896,29 @@ function capActiveMotifsPerAnchor(motifs: ConceptMotif[]): ConceptMotif[] {
   );
 }
 
+function appendStatusHistory(next: ConceptMotif, prev?: ConceptMotif): ConceptMotif {
+  const prevHistory = Array.isArray(prev?.history) ? prev!.history!.slice(0, 19) : [];
+  const statusChanged = !prev || prev.status !== next.status || cleanText(prev.statusReason, 120) !== cleanText(next.statusReason, 120);
+  if (!statusChanged) {
+    return {
+      ...next,
+      history: prevHistory.length ? prevHistory : next.history,
+    };
+  }
+  const event = {
+    at: next.updatedAt || new Date().toISOString(),
+    by: (next.resolvedBy === "user" ? "user" : "system") as "system" | "user",
+    action: "status_changed" as const,
+    from: prev?.status,
+    to: next.status,
+    reason: cleanText(next.statusReason, 120) || undefined,
+  };
+  return {
+    ...next,
+    history: [event, ...prevHistory].slice(0, 20),
+  };
+}
+
 export function reconcileMotifsWithGraph(params: {
   graph: CDG;
   concepts: ConceptItem[];
@@ -731,7 +955,8 @@ export function reconcileMotifsWithGraph(params: {
     };
   });
 
-  const deprecationApplied = applyRedundancyDeprecation(mergedDerived, conceptById);
+  const relationConflicted = applyRelationConflictDeprecation(mergedDerived, conceptById);
+  const deprecationApplied = applyRedundancyDeprecation(relationConflicted, conceptById);
   const triadSubsumed = applyTriadSubsumption(deprecationApplied, conceptById);
   const densityCapped = capActiveMotifsPerAnchor(triadSubsumed).map((m) => {
     if (m.status !== "deprecated") return m;
@@ -750,7 +975,9 @@ export function reconcileMotifsWithGraph(params: {
       updatedAt: now,
     }));
 
-  const all = [...densityCapped, ...cancelledFromHistory];
+  const all = [...densityCapped, ...cancelledFromHistory]
+    .map((m) => withCausalSemantics(m, conceptById))
+    .map((m) => appendStatusHistory(m, baseById.get(m.id)));
   return all
     .slice()
     .sort((a, b) => statusRank(b.status) - statusRank(a.status) || b.confidence - a.confidence || a.id.localeCompare(b.id))

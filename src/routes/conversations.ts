@@ -11,12 +11,15 @@ import { buildCognitiveModel } from "../services/cognitiveModel.js";
 import { buildConflictGateMessage, listUnresolvedDeprecatedMotifs } from "../services/motif/conflictGate.js";
 import { buildTravelPlanState, type TravelPlanState } from "../services/travelPlan/state.js";
 import { defaultTravelPlanFileName, renderTravelPlanPdf } from "../services/travelPlan/pdf.js";
+import { normalizeLocale, isEnglishLocale, type AppLocale } from "../i18n/locale.js";
 
 export const convRouter = Router();
 convRouter.use(authMiddleware);
 
-function defaultSystemPrompt() {
-  // 不限定云南/旅游，保持通用任务助手
+function defaultSystemPrompt(locale: AppLocale) {
+  if (isEnglishLocale(locale)) {
+    return `You are CogInstrument's assistant. Help the user complete the current task and ask focused clarification questions about goals, constraints, and preferences. Each conversation is an isolated new session, and you must not use information from other sessions.`;
+  }
   return `你是CogInstrument的助手，目标是帮助用户完成当前任务，并通过提问澄清用户的目标/约束/偏好。每个conversation都是独立的新会话，不要引用其他会话信息。`;
 }
 
@@ -108,6 +111,7 @@ async function computeTravelPlanState(params: {
   userId: ObjectId;
   graph: CDG;
   previous?: TravelPlanState | null;
+  locale: AppLocale;
 }): Promise<TravelPlanState> {
   const turns = await loadRecentTurnsForPlan({
     conversationId: params.conversationId,
@@ -115,6 +119,7 @@ async function computeTravelPlanState(params: {
     limit: 160,
   });
   return buildTravelPlanState({
+    locale: params.locale,
     graph: params.graph,
     turns: turns.map((t) => ({
       createdAt: t.createdAt,
@@ -131,12 +136,14 @@ async function persistConversationModel(params: {
   model: ReturnType<typeof buildCognitiveModel>;
   updatedAt: Date;
   previousTravelPlan?: TravelPlanState | null;
+  locale: AppLocale;
 }): Promise<TravelPlanState> {
   const travelPlanState = await computeTravelPlanState({
     conversationId: params.conversationId,
     userId: params.userId,
     graph: params.model.graph,
     previous: params.previousTravelPlan || null,
+    locale: params.locale,
   });
   await collections.conversations.updateOne(
     { _id: params.conversationId, userId: params.userId },
@@ -156,13 +163,13 @@ async function persistConversationModel(params: {
   return travelPlanState;
 }
 
-function toConflictGatePayload(motifs: any[]) {
+function toConflictGatePayload(motifs: any[], locale?: AppLocale) {
   const unresolved = listUnresolvedDeprecatedMotifs(Array.isArray(motifs) ? motifs : []);
   if (!unresolved.length) return null;
   return {
     blocked: true,
     unresolvedMotifs: unresolved,
-    message: buildConflictGateMessage(unresolved),
+    message: buildConflictGateMessage(unresolved, locale),
   };
 }
 
@@ -198,19 +205,23 @@ convRouter.get("/", async (req: AuthedRequest, res) => {
       conversationId: String(x._id),
       title: x.title,
       updatedAt: x.updatedAt,
+      locale: normalizeLocale((x as any).locale),
     }))
   );
 });
 
 convRouter.post("/", async (req: AuthedRequest, res) => {
   const userId = req.userId!;
-  const title = String(req.body?.title || "New Conversation").slice(0, 80);
+  const locale = normalizeLocale(req.body?.locale);
+  const defaultTitle = isEnglishLocale(locale) ? "New Conversation" : "新对话";
+  const title = String(req.body?.title || defaultTitle).slice(0, 80);
   const now = new Date();
-  const systemPrompt = defaultSystemPrompt();
+  const systemPrompt = defaultSystemPrompt(locale);
 
   const inserted = await collections.conversations.insertOne({
     userId,
     title,
+    locale,
     systemPrompt,
     model: config.model,
     createdAt: now,
@@ -224,7 +235,9 @@ convRouter.post("/", async (req: AuthedRequest, res) => {
     travelPlanState: {
       version: 1,
       updatedAt: now.toISOString(),
-      summary: "暂无旅行计划，请先开始对话。",
+      summary: isEnglishLocale(locale)
+        ? "No travel plan yet. Start chatting to build one."
+        : "暂无旅行计划，请先开始对话。",
       destinations: [],
       constraints: [],
       dayPlans: [],
@@ -247,7 +260,9 @@ convRouter.post("/", async (req: AuthedRequest, res) => {
         travelPlanState: {
           version: 1,
           updatedAt: now.toISOString(),
-          summary: "暂无旅行计划，请先开始对话。",
+          summary: isEnglishLocale(locale)
+            ? "No travel plan yet. Start chatting to build one."
+            : "暂无旅行计划，请先开始对话。",
           destinations: [],
           constraints: [],
           dayPlans: [],
@@ -272,6 +287,7 @@ convRouter.post("/", async (req: AuthedRequest, res) => {
   res.json({
     conversationId,
     title: conv.title,
+    locale: normalizeLocale((conv as any).locale),
     systemPrompt: conv.systemPrompt,
     graph: model.graph,
     concepts: model.concepts,
@@ -305,6 +321,7 @@ convRouter.get("/:id", async (req: AuthedRequest, res) => {
   res.json({
     conversationId: id,
     title: conv.title,
+    locale: normalizeLocale((conv as any).locale),
     systemPrompt: conv.systemPrompt,
     graph: model.graph,
     concepts: model.concepts,
@@ -358,11 +375,13 @@ convRouter.put("/:id/graph", async (req: AuthedRequest, res) => {
 
   const requestAdvice = parseBoolFlag(req.body?.requestAdvice);
   const advicePrompt = String(req.body?.advicePrompt || "").trim().slice(0, 1200);
+  const locale = normalizeLocale((conv as any).locale);
   const travelPlanState = await computeTravelPlanState({
     conversationId: oid,
     userId,
     graph: model.graph,
     previous: (conv as any).travelPlanState || null,
+    locale,
   });
 
   const now = new Date();
@@ -400,13 +419,16 @@ convRouter.put("/:id/graph", async (req: AuthedRequest, res) => {
 
       const mergedPrompt =
         advicePrompt ||
-        "用户已经手动修改了意图流程图。请把这个图视为最新有效意图，结合最近对话给出下一步可执行建议。先给具体行动方案，再给1-2个澄清问题。";
+        (isEnglishLocale(locale)
+          ? "The user has manually edited the intent graph. Treat this graph as the latest source of truth and provide executable next-step advice from recent dialogue. Give an action plan first, then ask 1-2 focused clarifying questions."
+          : "用户已经手动修改了意图流程图。请把这个图视为最新有效意图，结合最近对话给出下一步可执行建议。先给具体行动方案，再给1-2个澄清问题。");
 
       assistantText = await generateAssistantTextNonStreaming({
         graph: model.graph,
         userText: mergedPrompt,
         recentTurns,
         systemPrompt: conv.systemPrompt,
+        locale,
       });
     } catch (e: any) {
       adviceError = String(e?.message || "advice_generation_failed");
@@ -415,6 +437,7 @@ convRouter.put("/:id/graph", async (req: AuthedRequest, res) => {
 
   res.json({
     conversationId: id,
+    locale,
     graph: model.graph,
     concepts: model.concepts,
     motifs: model.motifs,
@@ -461,6 +484,7 @@ convRouter.put("/:id/concepts", async (req: AuthedRequest, res) => {
     userId,
     graph: model.graph,
     previous: (conv as any).travelPlanState || null,
+    locale: normalizeLocale((conv as any).locale),
   });
 
   const now = new Date();
@@ -482,6 +506,7 @@ convRouter.put("/:id/concepts", async (req: AuthedRequest, res) => {
 
   res.json({
     conversationId: id,
+    locale: normalizeLocale((conv as any).locale),
     graph: model.graph,
     concepts: model.concepts,
     motifs: model.motifs,
@@ -544,6 +569,7 @@ convRouter.get("/:id/travel-plan/export.pdf", async (req: AuthedRequest, res) =>
       edges: Array.isArray(conv.graph?.edges) ? conv.graph.edges : [],
     };
     const travelPlanState = buildTravelPlanState({
+      locale: normalizeLocale((conv as any).locale),
       graph,
       turns: turns.map((t) => ({
         createdAt: t.createdAt,
@@ -567,6 +593,7 @@ convRouter.get("/:id/travel-plan/export.pdf", async (req: AuthedRequest, res) =>
     const pdf = await renderTravelPlanPdf({
       plan: travelPlanState,
       conversationId: id,
+      locale: normalizeLocale((conv as any).locale),
     });
     const filename = defaultTravelPlanFileName(id);
     res.setHeader("Content-Type", "application/pdf");
@@ -603,6 +630,7 @@ convRouter.post("/:id/turn", async (req: AuthedRequest, res) => {
   if (!conv) return res.status(404).json({ error: "conversation not found" });
 
   const graph: CDG = conv.graph;
+  const locale = normalizeLocale((conv as any).locale);
 
   // recent turns：取最近 10 轮（更像“有记忆”）
   const recent = await collections.turns
@@ -631,7 +659,7 @@ convRouter.post("/:id/turn", async (req: AuthedRequest, res) => {
     baseMotifLinks: (conv as any).motifLinks || [],
     baseContexts: (conv as any).contexts || [],
   });
-  const conflictGate = toConflictGatePayload(preModel.motifs);
+  const conflictGate = toConflictGatePayload(preModel.motifs, locale);
   if (conflictGate) {
     const now = new Date();
     const blockedPatch = { ops: [], notes: ["blocked:motif_conflict_gate"] };
@@ -651,6 +679,7 @@ convRouter.post("/:id/turn", async (req: AuthedRequest, res) => {
       model: preModel,
       updatedAt: now,
       previousTravelPlan: (conv as any).travelPlanState || null,
+      locale,
     });
 
     return res.json({
@@ -674,6 +703,7 @@ convRouter.post("/:id/turn", async (req: AuthedRequest, res) => {
     recentTurns,
     stateContextUserTurns,
     systemPrompt: conv.systemPrompt,
+    locale,
   });
 
   const merged = applyPatchWithGuards(graph, out.graph_patch);
@@ -704,6 +734,7 @@ convRouter.post("/:id/turn", async (req: AuthedRequest, res) => {
     model,
     updatedAt: now,
     previousTravelPlan: (conv as any).travelPlanState || null,
+    locale,
   });
 
   res.json({
@@ -737,6 +768,7 @@ convRouter.post("/:id/turn/stream", async (req: AuthedRequest, res) => {
   if (!conv) return res.status(404).json({ error: "conversation not found" });
 
   const graph: CDG = conv.graph;
+  const locale = normalizeLocale((conv as any).locale);
 
   // recent turns：取最近 10 轮
   const recent = await collections.turns
@@ -765,7 +797,7 @@ convRouter.post("/:id/turn/stream", async (req: AuthedRequest, res) => {
     baseMotifLinks: (conv as any).motifLinks || [],
     baseContexts: (conv as any).contexts || [],
   });
-  const conflictGate = toConflictGatePayload(preModel.motifs);
+  const conflictGate = toConflictGatePayload(preModel.motifs, locale);
   if (conflictGate) {
     const now = new Date();
     const blockedPatch = { ops: [], notes: ["blocked:motif_conflict_gate"] };
@@ -786,6 +818,7 @@ convRouter.post("/:id/turn/stream", async (req: AuthedRequest, res) => {
       model: preModel,
       updatedAt: now,
       previousTravelPlan: (conv as any).travelPlanState || null,
+      locale,
     });
 
     res.status(200);
@@ -847,6 +880,7 @@ convRouter.post("/:id/turn/stream", async (req: AuthedRequest, res) => {
       recentTurns,
       stateContextUserTurns,
       systemPrompt: conv.systemPrompt,
+      locale,
       signal: ac.signal,
       onToken: (token) => {
         if (closed) return;
@@ -888,6 +922,7 @@ convRouter.post("/:id/turn/stream", async (req: AuthedRequest, res) => {
       model,
       updatedAt: now,
       previousTravelPlan: (conv as any).travelPlanState || null,
+      locale,
     });
 
     sseSend(res, "done", {
@@ -914,6 +949,7 @@ convRouter.post("/:id/turn/stream", async (req: AuthedRequest, res) => {
           recentTurns,
           stateContextUserTurns,
           systemPrompt: conv.systemPrompt,
+          locale,
         });
 
         const merged2 = applyPatchWithGuards(graph, out2.graph_patch);
@@ -944,6 +980,7 @@ convRouter.post("/:id/turn/stream", async (req: AuthedRequest, res) => {
           model: model2,
           updatedAt: now,
           previousTravelPlan: (conv as any).travelPlanState || null,
+          locale,
         });
 
         sseSend(res, "done", {

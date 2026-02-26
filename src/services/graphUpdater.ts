@@ -16,6 +16,7 @@ import { cleanStatement, mergeTextSegments } from "./graphUpdater/text.js";
 import { makeTempId } from "./graphUpdater/common.js";
 import { enrichPatchWithMotifFoundation } from "./motif/motifGrounding.js";
 import { buildBudgetLedgerFromUserTurns } from "./travelPlan/budgetLedger.js";
+import type { AppLocale } from "../i18n/locale.js";
 
 const DEBUG = process.env.CI_DEBUG_LLM === "1";
 function dlog(...args: any[]) {
@@ -137,6 +138,7 @@ async function buildSignals(params: {
   recentTurns: Array<{ role: "user" | "assistant"; content: string }>;
   stateContextUserTurns?: string[];
   systemPrompt?: string;
+  locale?: AppLocale;
 }): Promise<IntentSignals> {
   const recentTurns = params.recentTurns || [];
   const fallbackRecentUserTexts = recentTurns
@@ -178,6 +180,7 @@ async function buildSignals(params: {
         latestUserText: params.userText,
         recentTurns: params.recentTurns,
         systemPrompt: params.systemPrompt,
+        locale: params.locale,
         debug: DEBUG,
       });
       if (slotResult?.signals) {
@@ -260,12 +263,14 @@ export async function generateGraphPatch(params: {
   stateContextUserTurns?: string[];
   assistantText: string;
   systemPrompt?: string;
+  locale?: AppLocale;
 }): Promise<GraphPatch> {
   const signals = await buildSignals(params);
   const state = buildSlotStateMachine({
     userText: params.userText,
     recentTurns: params.recentTurns,
     signals,
+    locale: params.locale,
   });
 
   const rawPatch = compileSlotStateToPatch({

@@ -7,6 +7,9 @@ export type MotifReasoningNode = {
   motifId: string;
   title: string;
   relation: ConceptMotif["relation"];
+  dependencyClass: ConceptMotif["dependencyClass"];
+  causalOperator: ConceptMotif["causalOperator"];
+  causalFormula: string;
   motifType: ConceptMotif["motifType"];
   status: ConceptMotif["status"];
   confidence: number;
@@ -115,6 +118,9 @@ export function buildMotifReasoningView(params: {
         motifId: m.id,
         title: cleanText(m.title, 160) || cleanText(m.templateKey, 120) || "motif",
         relation: m.relation,
+        dependencyClass: m.dependencyClass || m.relation,
+        causalOperator: m.causalOperator,
+        causalFormula: cleanText(m.causalFormula, 120) || motifPattern(m, conceptTitles),
         motifType: m.motifType,
         status: m.status,
         confidence: clamp01(m.confidence, 0.72),

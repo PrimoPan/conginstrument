@@ -4,6 +4,7 @@ import { streamAssistantText, generateAssistantTextNonStreaming } from "./chatRe
 import { generateGraphPatch } from "./graphUpdater.js";
 import { buildExtremeWeatherAdvisory } from "./weather/advisor.js";
 import { buildFxRateAdvisory } from "./fx/advisor.js";
+import type { AppLocale } from "../i18n/locale.js";
 
 const DEBUG = process.env.CI_DEBUG_LLM === "1";
 function dlog(...args: any[]) {
@@ -50,6 +51,7 @@ export async function generateTurn(params: {
   recentTurns: Array<{ role: "user" | "assistant"; content: string }>;
   stateContextUserTurns?: string[];
   systemPrompt?: string;
+  locale?: AppLocale;
 }): Promise<{ assistant_text: string; graph_patch: GraphPatch }> {
   const safeRecent = normalizeRecentTurns(params.recentTurns);
 
@@ -58,12 +60,14 @@ export async function generateTurn(params: {
     userText: params.userText,
     recentTurns: safeRecent,
     systemPrompt: params.systemPrompt,
+    locale: params.locale,
   });
 
   const fxAdvisory = await buildFxRateAdvisory({
     graph: params.graph,
     userText: params.userText,
     recentTurns: safeRecent,
+    locale: params.locale,
   }).catch(() => null);
   assistant_text = appendFxAdvisory(assistant_text, fxAdvisory);
 
@@ -71,6 +75,7 @@ export async function generateTurn(params: {
     graph: params.graph,
     userText: params.userText,
     recentTurns: safeRecent,
+    locale: params.locale,
   }).catch(() => null);
   assistant_text = appendWeatherAdvisory(assistant_text, weatherAdvisory);
 
@@ -83,6 +88,7 @@ export async function generateTurn(params: {
       stateContextUserTurns: params.stateContextUserTurns || [],
       assistantText: assistant_text,
       systemPrompt: params.systemPrompt,
+      locale: params.locale,
     });
   } catch (e: any) {
     graph_patch = { ops: [], notes: [`graph_patch_exception:${e?.message || "unknown"}`] };
@@ -99,6 +105,7 @@ export async function generateTurnStreaming(params: {
   recentTurns: Array<{ role: "user" | "assistant"; content: string }>;
   stateContextUserTurns?: string[];
   systemPrompt?: string;
+  locale?: AppLocale;
   onToken: (token: string) => void;
   signal?: AbortSignal;
 }): Promise<{ assistant_text: string; graph_patch: GraphPatch }> {
@@ -109,6 +116,7 @@ export async function generateTurnStreaming(params: {
     userText: params.userText,
     recentTurns: safeRecent,
     systemPrompt: params.systemPrompt,
+    locale: params.locale,
     onToken: params.onToken,
     signal: params.signal,
   });
@@ -117,6 +125,7 @@ export async function generateTurnStreaming(params: {
     graph: params.graph,
     userText: params.userText,
     recentTurns: safeRecent,
+    locale: params.locale,
   }).catch(() => null);
   const fxAppended = appendFxAdvisory(assistant_text, fxAdvisory);
   if (fxAppended !== assistant_text) {
@@ -129,6 +138,7 @@ export async function generateTurnStreaming(params: {
     graph: params.graph,
     userText: params.userText,
     recentTurns: safeRecent,
+    locale: params.locale,
   }).catch(() => null);
   const appended = appendWeatherAdvisory(assistant_text, weatherAdvisory);
   if (appended !== assistant_text) {
@@ -146,6 +156,7 @@ export async function generateTurnStreaming(params: {
       stateContextUserTurns: params.stateContextUserTurns || [],
       assistantText: assistant_text,
       systemPrompt: params.systemPrompt,
+      locale: params.locale,
     });
   } catch (e: any) {
     graph_patch = { ops: [], notes: [`graph_patch_exception:${e?.message || "unknown"}`] };
