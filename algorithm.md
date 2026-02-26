@@ -1,13 +1,11 @@
-# CogInstrument Graph Construction Algorithm (Current Implementation)
+# CogInstrument Graph Algorithms (Implementation Spec)
 
-Last updated: 2026-02-25
+Last updated: 2026-02-26
 
-This document is the implementation-level algorithm spec for the current backend pipeline.
-It reflects the actual code path from dialogue input to graph update and travel-plan export.
+This document describes the current backend algorithm pipeline used in production code.
+It focuses on the two-stage graph engine, motif logic, budget state machine, and topology optimization.
 
 ## 1. Source-of-Truth Files
-
-Primary files:
 
 - `/Users/primopan/UISTcoginstrument/app/conginstrument/src/routes/conversations.ts`
 - `/Users/primopan/UISTcoginstrument/app/conginstrument/src/services/llm.ts`
@@ -15,83 +13,54 @@ Primary files:
 - `/Users/primopan/UISTcoginstrument/app/conginstrument/src/services/graphUpdater/intentSignals.ts`
 - `/Users/primopan/UISTcoginstrument/app/conginstrument/src/services/graphUpdater/slotFunctionCall.ts`
 - `/Users/primopan/UISTcoginstrument/app/conginstrument/src/services/graphUpdater/signalSanitizer.ts`
-- `/Users/primopan/UISTcoginstrument/app/conginstrument/src/services/travelPlan/budgetLedger.ts`
 - `/Users/primopan/UISTcoginstrument/app/conginstrument/src/services/graphUpdater/slotStateMachine.ts`
 - `/Users/primopan/UISTcoginstrument/app/conginstrument/src/services/graphUpdater/conflictAnalyzer.ts`
 - `/Users/primopan/UISTcoginstrument/app/conginstrument/src/services/graphUpdater/slotGraphCompiler.ts`
+- `/Users/primopan/UISTcoginstrument/app/conginstrument/src/services/travelPlan/budgetLedger.ts`
 - `/Users/primopan/UISTcoginstrument/app/conginstrument/src/services/motif/motifGrounding.ts`
 - `/Users/primopan/UISTcoginstrument/app/conginstrument/src/services/patchGuard.ts`
 - `/Users/primopan/UISTcoginstrument/app/conginstrument/src/core/graph/patchApply.ts`
-- `/Users/primopan/UISTcoginstrument/app/conginstrument/src/core/graph/common.ts`
 - `/Users/primopan/UISTcoginstrument/app/conginstrument/src/core/graph/topology.ts`
 - `/Users/primopan/UISTcoginstrument/app/conginstrument/src/services/travelPlan/state.ts`
 - `/Users/primopan/UISTcoginstrument/app/conginstrument/src/services/travelPlan/pdf.ts`
 
----
+## 2. End-to-End Runtime Pipeline
 
-## 2. End-to-End Pipeline
+1. User turn arrives.
+2. Assistant text is generated using short recent context.
+3. Graph patch is generated from deterministic + function-call signals.
+4. Slot state machine compiles canonical slot state.
+5. Slot graph compiler resolves duplicates and stale nodes.
+6. Motif grounding enriches semantic metadata.
+7. Patch guard sanitizes operations.
+8. Patch is applied with topology rebalance.
+9. Graph + Concept + Motif + Context + TravelPlanState are persisted.
 
-The live pipeline is a two-stage system:
+## 3. Context Windows
 
-1. Slot State Machine (semantic structuring)
-2. Graph Compiler + Topology Rebalancer (graph shaping)
+- **Short context**: for assistant response fluency (typically latest ~10 turns).
+- **Long user context**: for state reconstruction (typically 80-160 user turns).
 
-```
-user turn
-  -> assistant text generation (short context)
-  -> generateGraphPatch
-       -> deterministic signal extraction
-       -> optional function-call slot extraction
-       -> geo resolution
-       -> signal sanitization
-       -> budget-ledger replay (long user history)
-       -> slot state machine
-       -> slot graph compiler
-       -> motif grounding + strict patch sanitization
-  -> applyPatchWithGuards
-       -> apply ops
-       -> structured-node pruning
-       -> singleton-slot compaction
-       -> topology rebalance (A* anchor, Tarjan cycle break, transitive reduction, connectivity repair)
-  -> persist graph + concepts/motifs/contexts + travelPlanState
-```
+This prevents budget/duration rollbacks caused by short-window truncation.
 
----
+## 4. Signal Layer
 
-## 3. Context Strategy (Short vs Long)
+Signals are merged from:
 
-The system intentionally uses two context windows:
-
-- Assistant response context: short recent turns (typically latest ~10 turns)
-- State/graph context: long user-only history (typically 80–160 user turns)
-
-This prevents:
-
-- budget deltas being forgotten in later turns
-- duration/destination rollback from short-window truncation
-
----
-
-## 4. Signal Extraction Layer
-
-`IntentSignals` are extracted by combining:
-
-- deterministic parser (`intentSignals.ts`)
-- optional function-call schema extraction (`slotFunctionCall.ts`)
+- Deterministic parser (`intentSignals.ts`)
+- Function-call slot extraction (`slotFunctionCall.ts`)
 
 Merge policy:
 
-- deterministic signals remain authoritative for core scalar conflicts (duration/budget)
-- function-call extraction fills missing structure and improves semantics
+- Deterministic parser is authoritative for scalar stability (budget, duration).
+- Function-call extraction fills structural gaps.
 
-Then `signalSanitizer.ts` performs canonicalization and denoising:
+Then `signalSanitizer.ts` performs:
 
-- destination noise filtering
+- destination canonicalization and noise filtering
 - sub-location parent remapping
 - duration reconciliation between total and segmented evidence
-- constraint confirmation normalization
-
----
+- confirmation statement normalization
 
 ## 5. Budget Ledger State Machine
 
@@ -105,165 +74,139 @@ Implemented in `budgetLedger.ts`.
 - `expense_refund`
 - `expense_pending`
 
-### 5.2 Accounting Rules
+### 5.2 Accounting Policy
 
-- Only user-confirmed spending is committed.
-- Unconfirmed deductions go to `expense_pending`.
-- FX conversion uses snapshot rates (`CI_FX_<CUR>_TO_CNY` override supported).
+- Only **user-confirmed** spending contributes to committed cost.
+- Unconfirmed deductions stay pending.
+- FX conversion stores a snapshot rate per event for reproducibility.
 
 ### 5.3 Replay Equations
 
-```
-total := undefined
-spent := 0
-pending := 0
+$$
+\text{total}_0 = \varnothing,\quad
+\text{spent}_0 = 0,\quad
+\text{pending}_0 = 0
+$$
 
-for ev in events (chronological):
-  if ev.type == budget_set:
-     total = ev.amount
-  if ev.type == budget_adjust:
-     total = (total ?? 0) + ev.amount
-  if ev.type == expense_commit:
-     spent = (ev.mode == absolute) ? ev.amount : spent + ev.amount
-  if ev.type == expense_refund:
-     spent = max(spent - ev.amount, 0)
-  if ev.type == expense_pending:
-     pending += ev.amount
+For each event `e_t` in chronological order:
 
-remaining = (total is defined) ? max(total - spent, 0) : undefined
-```
+$$
+\text{total}_{t+1} =
+\begin{cases}
+e_t.\text{amount} & \text{if } e_t.\text{type}=\texttt{budget\_set}\\
+(\text{total}_t \text{ or } 0) + e_t.\text{amount} & \text{if } e_t.\text{type}=\texttt{budget\_adjust}\\
+\text{total}_t & \text{otherwise}
+\end{cases}
+$$
 
-Ledger output overrides weak/noisy per-turn budget signals.
+$$
+\text{spent}_{t+1} =
+\begin{cases}
+e_t.\text{amount} & \text{if } e_t.\text{type}=\texttt{expense\_commit}\land e_t.\text{mode}=\texttt{absolute}\\
+\text{spent}_t + e_t.\text{amount} & \text{if } e_t.\text{type}=\texttt{expense\_commit}\land e_t.\text{mode}=\texttt{incremental}\\
+\max(\text{spent}_t - e_t.\text{amount}, 0) & \text{if } e_t.\text{type}=\texttt{expense\_refund}\\
+\text{spent}_t & \text{otherwise}
+\end{cases}
+$$
 
----
+$$
+\text{pending}_{t+1} =
+\begin{cases}
+\text{pending}_t + e_t.\text{amount} & \text{if } e_t.\text{type}=\texttt{expense\_pending}\\
+\text{pending}_t & \text{otherwise}
+\end{cases}
+$$
 
-## 6. Slot State Machine (Structured Graph State)
+$$
+\text{remaining}=
+\begin{cases}
+\max(\text{total}-\text{spent}, 0) & \text{if total is defined}\\
+\varnothing & \text{otherwise}
+\end{cases}
+$$
+
+## 6. Slot State Machine
 
 Implemented in `slotStateMachine.ts`.
 
 Output:
 
-- `nodes: SlotNodeSpec[]`
-- `edges: SlotEdgeSpec[]`
+- canonical slot nodes
+- canonical slot edges
 
-### 6.1 Goal Alignment
-
-`slot:goal` is always generated.
-Its statement is forced to align with the consensus total duration to avoid split titles such as “goal=6 days, duration node=3 days”.
-
-### 6.2 Duration Consensus
+### 6.1 Duration Consensus
 
 Candidates:
 
 - explicit total duration
-- sum of city segments
-- max segment
+- city segment sum
+- maximum segment duration
 
-Consensus is weighted median + rule correction.
+$$
+d^\* = \operatorname{WeightedMedian}\!\left(d_{\text{explicit}}, d_{\text{city-sum}}, d_{\text{max-seg}}\right)
+$$
 
-```
-totalDays = weightedMedian(explicit_total, city_sum, max_segment)
+Rule corrections:
 
-if multi-city and travel segments exist:
-   prefer city_sum when consensus underestimates
+- If multi-city travel exists and consensus underestimates coverage, prefer `d_city-sum`.
+- If explicit total is an outlier without explicit-total cue, downgrade it.
 
-if explicit total is an outlier without explicit-total cue:
-   fallback to city_sum
-```
+### 6.2 Budget Slot Family
 
-This is the main safeguard against duration explosions.
+Current slot family:
 
-### 6.3 Budget Slot Family
+- `slot:budget`
+- `slot:budget_spent`
+- `slot:budget_pending`
+- `slot:budget_remaining`
 
-Current budget slots:
+$$
+b_{\text{remaining}} = \max\!\left(b_{\text{total}}-b_{\text{spent}},\,0\right)
+$$
 
-- `slot:budget` (total budget)
-- `slot:budget_spent` (committed spend)
-- `slot:budget_pending` (pending spend)
-- `slot:budget_remaining` (remaining budget)
+If both derived and weak textual remaining signals exist:
 
-Remaining budget node is derived as:
+$$
+b_{\text{remaining}}^{\text{final}} = \max\!\left(b_{\text{remaining}}^{\text{calc}},\, b_{\text{remaining}}^{\text{signal}}\right)
+$$
 
-```
-remainingByCalc   = max(totalBudget - spentBudget, 0)
-remainingBySignal = normalized signal remaining
-remainingBudget   = max(remainingByCalc, remainingBySignal)
-```
+### 6.3 Unified Limiting Factors
 
-Dependency edges:
+Health/language/diet/religion/safety/legal/logistics are normalized into one constraint family:
 
-- `budget -> budget_remaining (determine)`
-- `budget_spent -> budget_remaining (determine)`
-- `budget_pending -> budget_remaining (determine)`
-- `budget_remaining -> goal (constraint)`
+- `slot:constraint:limiting:<kind>:<detail>`
 
-### 6.4 Unified Limiting Factors
-
-Health/language/diet/religion/safety/legal/logistics are mapped into one normalized limiting-factor family:
-
-- `slot:constraint:limiting:<kind>:<text>`
-
-Hard/soft class decides edge polarity (`constraint` vs `determine`).
-
-### 6.5 Critical Day and Sub-Location Handling
-
-- Critical-day nodes are risk-layer hard constraints.
-- If city matches a destination, critical day attaches to destination; otherwise to goal.
-- Sub-locations are attached under parent destination, not promoted to top-level destinations.
-
----
+This avoids category fragmentation and improves portability beyond travel scenarios.
 
 ## 7. Conflict Analyzer
 
 Implemented in `conflictAnalyzer.ts`.
 
-### 7.1 Destination Guard (False Positive Fix)
+### 7.1 False-Positive Guard
 
-Before duration-density conflict checks:
+Duration-density conflict is blocked when canonical destination count is less than 2:
 
-- canonical destination normalization
-- noise phrase filtering
-- near-duplicate compaction
+$$
+|D_{\text{canonical}}| < 2 \Rightarrow \text{skip duration-density conflict emission}
+$$
 
-Conflict `duration_destination_density` is only allowed when canonical destination count is at least 2.
+### 7.2 Active Rules
 
-### 7.2 Current Conflict Rules
-
-- budget vs luxury lodging
+- budget vs luxury lodging mismatch
 - destination density vs total duration
-- high-intensity preference vs mobility/health limits
-- too many hard constraints under short duration
-
-Conflict nodes are emitted as `slot:conflict:*` and connected by:
-
-- `conflict -> goal (constraint)`
-- `conflict -> related_slots (conflicts_with)`
-
----
+- high-intensity preference vs mobility/health constraints
+- hard-constraint overload under short duration
 
 ## 8. Slot Graph Compiler
 
 Implemented in `slotGraphCompiler.ts`.
 
-### 8.1 Slot Winner Election
+For each slot group:
 
-For each slot key group:
-
-1. status rank
-2. confidence
-3. importance
-
-### 8.2 Stale/Duplicate Cleanup
-
-- unlocked stale nodes: removed
-- locked stale nodes: downgraded (`rejected`, `stale_slot`, `auto_cleaned`)
-- incident edges are removed for stale duplicates
-
-### 8.3 Slot-Target Alignment
-
-Slots not present in the latest state machine output are aggressively cleaned to prevent historical noise leakage.
-
----
+1. winner election by status rank, confidence, importance
+2. stale node cleanup
+3. stale edge detachment
+4. alignment to latest slot state
 
 ## 9. Motif Grounding + Patch Guard
 
@@ -272,24 +215,19 @@ Implemented in:
 - `motifGrounding.ts`
 - `patchGuard.ts`
 
-Patch pre-application chain:
+Patch chain:
 
-```
-rawPatch
-  -> enrichPatchWithMotifFoundation
-  -> sanitizeGraphPatchStrict
-```
+$$
+\text{rawPatch}
+\rightarrow
+\text{motifFoundation}
+\rightarrow
+\text{strictSanitization}
+\rightarrow
+\text{safePatch}
+$$
 
-Motif grounding auto-fills:
-
-- `motifType`
-- `claim`
-- `priority`
-- `revisionHistory`
-
-Patch guard enforces op/type/schema safety and numeric clamps.
-
----
+Auto-enriched motif fields include `motifType`, `claim`, `priority`, and `revisionHistory`.
 
 ## 10. Topology Rebalancer (Graph-Theoretic Core)
 
@@ -298,129 +236,119 @@ Implemented in:
 - `patchApply.ts`
 - `core/graph/topology.ts`
 
-Execution order after patch application:
+Execution order:
 
 1. prune invalid structured nodes
-2. prune noisy total-duration outliers
-3. compact singleton slots
-4. rebalance topology
+2. prune noisy duration outliers
+3. compact singleton slot duplicates
+4. run topology rebalance
 
-### 10.1 A* Anchor Assignment (Prominent Formula)
+### 10.1 A*-Style Anchor Assignment
 
-For non-slot nodes, anchor selection uses an A*-style objective:
+For non-slot nodes, anchor assignment minimizes travel + heuristic cost:
 
-```
-a* = argmin_a [ g(root -> a) + h(node, a) ]
-```
+$$
+a^\* = \arg\min_{a \in \mathcal{A}} \left[g(x,a) + h(x,a)\right]
+$$
 
-Where:
+Edge travel cost:
 
-```
-travelCost(edge) = typeBias(edge.type) + 0.35 * (1 - edge.confidence)
+$$
+\operatorname{travelCost}(e)=b_{\text{type}(e)} + 0.35\cdot\left(1-c_e\right)
+$$
 
-typeBias(determine) = 1.08
-typeBias(enable)    = 0.95
-typeBias(constraint)= 0.88
+With:
 
-h(node,a) = (1 - Jaccard(tokens_node, tokens_a))
-          + slotDistancePenalty
-          + typePenalty
-          + riskPenalty
-```
+$$
+b_{\texttt{determine}}=1.08,\quad
+b_{\texttt{enable}}=0.95,\quad
+b_{\texttt{constraint}}=0.88
+$$
 
-Final anchor score:
+Heuristic term:
 
-```
-score(a) = g(root -> a) + h(node,a)
-```
+$$
+h(x,a)=\left(1-\operatorname{Jaccard}(T_x,T_a)\right)+\Delta_{\text{slot}}+\Delta_{\text{type}}+\Delta_{\text{risk}}
+$$
 
-### 10.2 Adaptive Topology Tuning (Prominent Formula)
+Final score:
 
-```
-density   = |E| / (|V| * log2(|V| + 1))
-cycleRate = (#nodes in SCC cycles) / |V|
+$$
+\operatorname{score}(a)=g(x,a)+h(x,a)
+$$
 
-lambda = clip(0.38 + 0.24*tanh(density - 1) + 0.36*cycleRate, 0, 1)
-```
+### 10.2 Adaptive Topology Control
 
-Derived controls:
+Graph density and cycle pressure control rebalancing aggressiveness:
 
-```
-maxRootIncoming = clip(round(9 - 4*lambda), 4, 10)
-maxAStarSteps   = clip(round(30 + |V|*(0.28 + (1-lambda)*0.35)), 20, 96)
-transitiveCutoff= clip(0.72 - 0.18*lambda, 0.48, 0.9)
-```
+$$
+\rho=\frac{|E|}{|V|\cdot\log_2(|V|+1)},\qquad
+\kappa=\frac{|V_{\text{SCC-cycle}}|}{|V|}
+$$
 
-### 10.3 Tarjan SCC Cycle Breaking (Prominent Formula)
+$$
+\lambda=\operatorname{clip}\!\left(0.38+0.24\tanh(\rho-1)+0.36\kappa,\ 0,\ 1\right)
+$$
 
-SCC detection uses Tarjan on structural edges (excluding `conflicts_with`).
+Derived runtime controls:
 
-For each cyclic SCC, remove the weakest edge by keep score:
+$$
+\text{maxRootIncoming}=\operatorname{clip}\!\left(\operatorname{round}(9-4\lambda),\ 4,\ 10\right)
+$$
 
-```
-keepScore(e) = typeScore(e.type)
-             + 0.9 * confidence(e)
-             + 0.65 * avgImportance(endpoints)
-             + touchedBonus
-             + toRootBonus
-             + riskBonus
-```
+$$
+\text{maxAStarSteps}=\operatorname{clip}\!\left(\operatorname{round}\!\left(30+|V|\cdot(0.28+(1-\lambda)\cdot0.35)\right),\ 20,\ 96\right)
+$$
 
-The minimum keep-score edge in each SCC is removed iteratively until acyclic or iteration cap.
+$$
+\text{transitiveCutoff}=\operatorname{clip}(0.72-0.18\lambda,\ 0.48,\ 0.9)
+$$
+
+### 10.3 Tarjan SCC Cycle Breaking
+
+Tarjan SCC is run on structural edges (excluding `conflicts_with`).
+
+For each cyclic SCC, the weakest edge by keep score is removed:
+
+$$
+\operatorname{keepScore}(e)=
+s_{\text{type}}(e)+0.9\,c_e+0.65\,\overline{i}_e+b_{\text{touch}}+b_{\text{root}}+b_{\text{risk}}
+$$
+
+Iteration continues until acyclic or max-iteration limit.
 
 ### 10.4 Approximate Transitive Reduction + Connectivity Repair
 
-An edge is removable only if:
+Edge `u -> v` is removable only when:
 
-1. an alternate path still exists from source to target,
-2. source can still reach root after removal,
-3. keep score is below threshold shaped by adaptive `lambda`.
+1. alternate path `u =>* v` still exists
+2. root reachability is preserved
+3. keep score is below adaptive cutoff
 
-Disconnected nodes are repaired by adding an inferred root edge:
+Disconnected node repair:
 
-```
-if not Reach(node, root):
-   add node -> root with inferred edge type
-```
+$$
+\neg \operatorname{Reach}(n,\text{root}) \Rightarrow \text{add inferred edge } n \to \text{root}
+$$
 
----
+## 11. TravelPlan State + PDF Export
 
-## 11. TravelPlan Hidden State and PDF Export
+Implemented in `travelPlan/state.ts` and `travelPlan/pdf.ts`.
 
-Implemented in:
-
-- `travelPlan/state.ts`
-- `travelPlan/pdf.ts`
-
-### 11.1 Budget Source Priority
-
-`travelPlanState.budgetSummary` prioritizes ledger replay over weak graph slots:
-
-- `totalCny`
-- `spentCny`
-- `remainingCny`
-- `pendingCny`
-
-### 11.2 Narrative Cleanup
-
-- repeated confirmation-question filtering
-- paragraph-level deduplication
-- normalized constraint phrasing
-
-### 11.3 PDF Layout
-
-Current export structure:
+Export structure:
 
 1. Summary
-2. Overview
-3. Executable itinerary
-4. Budget event ledger
-5. Key constraints
-6. Evidence appendix
+2. Executable itinerary (day-by-day)
+3. Budget ledger
+4. Key constraints
+5. Evidence appendix (deduplicated)
 
----
+Deduplication includes:
 
-## 12. Runtime Controls
+- repeated paragraph hash removal
+- repeated confirmation-question suppression
+
+## 12. Runtime Flags
 
 - `CI_GRAPH_USE_FUNCTION_SLOTS`
 - `CI_GRAPH_MODEL`
@@ -429,24 +357,17 @@ Current export structure:
 - `CI_FX_<CUR>_TO_CNY`
 - `CI_PDF_FONT_PATH`
 
-Note: delete behavior is guarded in both patch-sanitization and graph-apply layers; keep environment configuration consistent in production.
+## 13. Covered Failure Modes
 
----
+1. Budget delta loss (`5000 + 5000` not reflected)
+2. Single-destination false conflict (`2 destinations / 3 days`)
+3. Stale slot duplication across rounds
+4. Duration outlier explosions
+5. Repeated/noisy export text blocks
 
-## 13. Bugs Explicitly Covered by Current Design
+## 14. Next Strengthening Targets
 
-1. Budget update drops (`5000 + 5000` not reflected)
-2. False duration-density conflict under single canonical destination
-3. Stale slot duplication polluting later rounds
-4. Duration outliers (e.g., phantom 14-day totals)
-5. Repetitive/noisy PDF narrative blocks
-
----
-
-## 14. Recommended Next Strengthening
-
-1. Explicit pending->commit transition with user-confirmed event IDs
-2. Conflict nodes with resolution provenance (`resolvedBy=user/system`)
-3. Stronger geo hierarchy cache for city/region/venue disambiguation
-4. Dual export modes: concise execution sheet vs appendix-rich report
-
+1. explicit pending-to-commit transition by event ID
+2. conflict resolution provenance (`resolvedBy`, `resolvedAt`)
+3. stronger geo hierarchy cache for venue-to-city grounding
+4. export modes: concise executive vs appendix-rich trace

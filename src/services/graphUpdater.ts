@@ -17,6 +17,7 @@ import { makeTempId } from "./graphUpdater/common.js";
 import { enrichPatchWithMotifFoundation } from "./motif/motifGrounding.js";
 import { buildBudgetLedgerFromUserTurns } from "./travelPlan/budgetLedger.js";
 import type { AppLocale } from "../i18n/locale.js";
+import { isEnglishLocale } from "../i18n/locale.js";
 
 const DEBUG = process.env.CI_DEBUG_LLM === "1";
 function dlog(...args: any[]) {
@@ -25,6 +26,10 @@ function dlog(...args: any[]) {
 
 const GRAPH_MODEL = process.env.CI_GRAPH_MODEL || config.model;
 const USE_FUNCTION_SLOT_EXTRACTION = process.env.CI_GRAPH_USE_FUNCTION_SLOTS !== "0";
+
+function t(locale: AppLocale | undefined, zh: string, en: string): string {
+  return isEnglishLocale(locale) ? en : zh;
+}
 
 function normalizeUtterance(input: any): string {
   return String(input || "")
@@ -57,7 +62,12 @@ function pickRootGoalId(graph: CDG): string | null {
     )[0]?.id;
 }
 
-function fallbackPatch(graph: CDG, userText: string, reason: string): GraphPatch {
+function fallbackPatch(
+  graph: CDG,
+  userText: string,
+  reason: string,
+  locale?: AppLocale
+): GraphPatch {
   const root = pickRootGoalId(graph);
   const short = cleanStatement(userText, 140);
   if (!root) {
@@ -69,13 +79,13 @@ function fallbackPatch(graph: CDG, userText: string, reason: string): GraphPatch
             id: makeTempId("n"),
             type: "goal",
             layer: "intent",
-            statement: short || "意图：制定任务计划",
+            statement: short || t(locale, "意图：制定任务计划", "Intent: plan this task"),
             status: "proposed",
             confidence: 0.7,
             importance: 0.78,
             key: "slot:goal",
             motifType: "expectation",
-            claim: short || "制定任务计划",
+            claim: short || t(locale, "制定任务计划", "Plan this task"),
             revisionHistory: [
               {
                 at: new Date().toISOString(),
@@ -100,12 +110,12 @@ function fallbackPatch(graph: CDG, userText: string, reason: string): GraphPatch
           id: nid,
           type: "fact",
           layer: "requirement",
-          statement: short || "用户补充信息",
+          statement: short || t(locale, "用户补充信息", "User added details"),
           status: "proposed",
           confidence: 0.55,
           importance: 0.55,
           motifType: "cognitive_step",
-          claim: short || "用户补充信息",
+          claim: short || t(locale, "用户补充信息", "User added details"),
           sourceMsgIds: ["latest_user"],
           revisionHistory: [
             {
@@ -228,13 +238,17 @@ async function buildSignals(params: {
   if (budgetLedger.summary.totalCny != null) {
     signals.budgetCny = Math.max(100, Math.round(Number(budgetLedger.summary.totalCny)));
     signals.budgetEvidence =
-      budgetLedger.latestTotalEvidence || signals.budgetEvidence || `${signals.budgetCny}元`;
+      budgetLedger.latestTotalEvidence ||
+      signals.budgetEvidence ||
+      (isEnglishLocale(params.locale) ? `${signals.budgetCny} CNY` : `${signals.budgetCny}元`);
     signals.budgetImportance = Math.max(Number(signals.budgetImportance) || 0, 0.9);
   }
   if (budgetLedger.summary.spentCny > 0) {
     signals.budgetSpentCny = Math.max(0, Math.round(Number(budgetLedger.summary.spentCny)));
     signals.budgetSpentEvidence =
-      budgetLedger.latestSpentEvidence || signals.budgetSpentEvidence || `${signals.budgetSpentCny}元`;
+      budgetLedger.latestSpentEvidence ||
+      signals.budgetSpentEvidence ||
+      (isEnglishLocale(params.locale) ? `${signals.budgetSpentCny} CNY` : `${signals.budgetSpentCny}元`);
     signals.budgetImportance = Math.max(Number(signals.budgetImportance) || 0, 0.88);
   }
   if (budgetLedger.summary.remainingCny != null) {
@@ -243,7 +257,9 @@ async function buildSignals(params: {
   if (budgetLedger.summary.pendingCny > 0) {
     signals.budgetPendingCny = Math.max(0, Math.round(Number(budgetLedger.summary.pendingCny)));
     signals.budgetPendingEvidence =
-      budgetLedger.latestPendingEvidence || signals.budgetPendingEvidence || `${signals.budgetPendingCny}元`;
+      budgetLedger.latestPendingEvidence ||
+      signals.budgetPendingEvidence ||
+      (isEnglishLocale(params.locale) ? `${signals.budgetPendingCny} CNY` : `${signals.budgetPendingCny}元`);
   } else {
     signals.budgetPendingCny = undefined;
     signals.budgetPendingEvidence = undefined;
@@ -292,5 +308,5 @@ export async function generateGraphPatch(params: {
     return strictPatch;
   }
 
-  return fallbackPatch(params.graph, params.userText, "empty_compiled_patch");
+  return fallbackPatch(params.graph, params.userText, "empty_compiled_patch", params.locale);
 }
