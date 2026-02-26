@@ -106,7 +106,14 @@ function slotFamily(key: string): ConceptFamily {
   if (key.startsWith("slot:sub_location:")) return "sub_location";
   if (key === "slot:goal") return "goal";
   if (key === "slot:duration" || key === "slot:duration_total") return "duration_total";
-  if (key === "slot:budget") return "budget";
+  if (
+    key === "slot:budget" ||
+    key === "slot:budget_spent" ||
+    key === "slot:budget_remaining" ||
+    key === "slot:budget_pending"
+  ) {
+    return "budget";
+  }
   if (key === "slot:people") return "people";
   if (key === "slot:lodging") return "lodging";
   if (key === "slot:health" || key === "slot:language") return "limiting_factor";
@@ -134,6 +141,9 @@ function parseSemanticKeyFromStatement(node: ConceptNode): string {
 
   if (/^总行程时长[:：]\s*[0-9]{1,3}\s*天$/.test(s)) return "slot:duration_total";
   if (/^预算(?:上限)?[:：]/.test(s)) return "slot:budget";
+  if (/^已花预算[:：]/.test(s)) return "slot:budget_spent";
+  if (/^(?:剩余预算|可用预算)[:：]/.test(s)) return "slot:budget_remaining";
+  if (/^(?:待确认预算|待确认支出)[:：]/.test(s)) return "slot:budget_pending";
   if (/^同行人数[:：]/.test(s)) return "slot:people";
   if (/^(住宿偏好|酒店偏好|住宿标准|酒店标准)[:：]/.test(s)) return "slot:lodging";
   if (/^景点偏好[:：]/.test(s)) return "slot:scenic_preference";
@@ -190,6 +200,9 @@ function canonicalSlotKey(key: string): string {
   if (k === "slot:goal") return "slot:goal";
   if (k === "slot:duration_total") return "slot:duration_total";
   if (k === "slot:budget") return "slot:budget";
+  if (k === "slot:budget_spent") return "slot:budget_spent";
+  if (k === "slot:budget_remaining") return "slot:budget_remaining";
+  if (k === "slot:budget_pending") return "slot:budget_pending";
   if (k === "slot:people") return "slot:people";
   if (k === "slot:lodging") return "slot:lodging";
   if (k === "slot:health") return "slot:constraint:limiting:health:health";

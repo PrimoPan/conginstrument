@@ -26,6 +26,8 @@ export type ConceptMotif = {
   updatedAt: string;
 };
 
+const MAX_ACTIVE_MOTIFS_PER_ANCHOR = 4;
+
 function cleanText(input: any, max = 200): string {
   return String(input ?? "")
     .replace(/\s+/g, " ")
@@ -90,6 +92,57 @@ function conceptScore(c: ConceptItem): number {
   return clamp01(c.score, 0.72);
 }
 
+function conceptSemanticKey(c: ConceptItem | undefined): string {
+  return cleanText(c?.semanticKey, 180).toLowerCase();
+}
+
+function canonicalConceptFamily(c: ConceptItem | undefined): string {
+  const key = conceptSemanticKey(c);
+  if (key === "slot:budget" || key === "slot:budget_spent" || key === "slot:budget_remaining" || key === "slot:budget_pending") {
+    return "budget";
+  }
+  if (key === "slot:duration_total" || key === "slot:duration") return "duration_total";
+  if (key.startsWith("slot:duration_city:")) return "duration_city";
+  if (key.startsWith("slot:destination:")) return "destination";
+  if (key.startsWith("slot:constraint:limiting:")) return "limiting_factor";
+  if (key.startsWith("slot:meeting_critical:")) return "meeting_critical";
+  if (key.startsWith("slot:sub_location:")) return "sub_location";
+  if (key === "slot:activity_preference") return "activity_preference";
+  if (key === "slot:scenic_preference") return "scenic_preference";
+  if (key === "slot:lodging") return "lodging";
+  if (key === "slot:people") return "people";
+  if (key === "slot:goal") return "goal";
+  return cleanText(c?.family, 40) || "other";
+}
+
+function sourceSignatureToken(c: ConceptItem | undefined): string {
+  const key = conceptSemanticKey(c);
+  if (key === "slot:budget" || key === "slot:budget_spent" || key === "slot:budget_remaining" || key === "slot:budget_pending") {
+    return "slot:budget";
+  }
+  if (
+    key.startsWith("slot:destination:") ||
+    key.startsWith("slot:duration_city:") ||
+    key.startsWith("slot:meeting_critical:") ||
+    key.startsWith("slot:constraint:limiting:") ||
+    key.startsWith("slot:sub_location:")
+  ) {
+    return key;
+  }
+  if (key === "slot:goal") return "slot:goal";
+  if (key === "slot:duration_total" || key === "slot:duration") return "slot:duration_total";
+  if (key === "slot:people") return "slot:people";
+  if (key === "slot:lodging") return "slot:lodging";
+  if (key === "slot:activity_preference") return "slot:activity_preference";
+  if (key === "slot:scenic_preference") return "slot:scenic_preference";
+  return canonicalConceptFamily(c);
+}
+
+function isBudgetBookkeepingConcept(c: ConceptItem | undefined): boolean {
+  const key = conceptSemanticKey(c);
+  return key === "slot:budget_spent" || key === "slot:budget_remaining" || key === "slot:budget_pending";
+}
+
 function sortConceptIdsForTriad(ids: string[], byId: Map<string, ConceptItem>): string[] {
   return ids
     .slice()
@@ -144,6 +197,7 @@ function buildPairMotifs(graph: CDG, concepts: ConceptItem[]): ConceptMotif[] {
         const fromConcept = byId.get(fromId);
         const toConcept = byId.get(toId);
         if (!fromConcept || !toConcept) continue;
+        if (isBudgetBookkeepingConcept(fromConcept) || isBudgetBookkeepingConcept(toConcept)) continue;
 
         const templateKey = `${e.type}:${fromConcept.family}->${toConcept.family}`;
         const key = `${templateKey}:${fromId}->${toId}`;
@@ -235,10 +289,12 @@ function buildTriadMotifs(pairMotifs: ConceptMotif[], concepts: ConceptItem[]): 
 
       const sourceConcepts = sourceIds.map((id) => byId.get(id)).filter(Boolean) as ConceptItem[];
       if (sourceConcepts.length < 2) continue;
+      const sourceFamilyCount = new Set(sourceConcepts.map((c) => canonicalConceptFamily(c))).size;
+      if (sourceFamilyCount < 2) continue;
 
       const orderedSourceIds = sortConceptIdsForTriad(sourceIds, byId);
       const familySig = sourceConcepts
-        .map((c) => c.family)
+        .map((c) => canonicalConceptFamily(c))
         .sort()
         .join("+");
       const templateKey = `triad:${relation}:${familySig}->${target.family}`;
@@ -345,7 +401,7 @@ function sourceFamilySignature(m: ConceptMotif, conceptById: Map<string, Concept
     if (idx >= 0) ids.splice(idx, 1);
   }
   const families = ids
-    .map((id) => conceptById.get(id)?.family || "other")
+    .map((id) => sourceSignatureToken(conceptById.get(id)))
     .sort();
   return families.join("+") || "none";
 }
@@ -380,6 +436,19 @@ function inferBaseStatus(m: ConceptMotif, prev: ConceptMotif | undefined, concep
   return { status: "active" as MotifLifecycleStatus, reason: "" };
 }
 
+function motifPriorityScore(m: ConceptMotif): number {
+  const relationBoost =
+    m.relation === "constraint"
+      ? 0.03
+      : m.relation === "determine"
+      ? 0.02
+      : m.relation === "enable"
+      ? 0.01
+      : 0;
+  const typeBoost = m.motifType === "pair" ? 0.015 : 0;
+  return m.confidence + relationBoost + typeBoost;
+}
+
 function applyRedundancyDeprecation(motifs: ConceptMotif[], conceptById: Map<string, ConceptItem>): ConceptMotif[] {
   const groups = new Map<string, ConceptMotif[]>();
   for (const m of motifs) {
@@ -396,16 +465,13 @@ function applyRedundancyDeprecation(motifs: ConceptMotif[], conceptById: Map<str
     if (list.length <= 1) continue;
     const sorted = list
       .slice()
-      .sort((a, b) => b.confidence - a.confidence || a.id.localeCompare(b.id));
+      .sort((a, b) => motifPriorityScore(b) - motifPriorityScore(a) || a.id.localeCompare(b.id));
     const winner = sorted[0];
-    const threshold = Math.max(0.04, 0.14 - winner.confidence * 0.08);
     for (const loser of sorted.slice(1)) {
-      if (winner.confidence - loser.confidence >= threshold || loser.status === "uncertain") {
-        patch.set(loser.id, {
-          status: "deprecated",
-          reason: `redundant_with:${winner.id}`,
-        });
-      }
+      patch.set(loser.id, {
+        status: "deprecated",
+        reason: `redundant_with:${winner.id}`,
+      });
     }
   }
 
@@ -418,6 +484,38 @@ function applyRedundancyDeprecation(motifs: ConceptMotif[], conceptById: Map<str
       statusReason: p.reason,
     };
   });
+}
+
+function capActiveMotifsPerAnchor(motifs: ConceptMotif[]): ConceptMotif[] {
+  const groups = new Map<string, ConceptMotif[]>();
+  for (const m of motifs) {
+    if (!m.anchorConceptId || m.status !== "active" || m.resolved) continue;
+    if (!groups.has(m.anchorConceptId)) groups.set(m.anchorConceptId, []);
+    groups.get(m.anchorConceptId)!.push(m);
+  }
+
+  const patch = new Map<string, string>();
+  for (const list of groups.values()) {
+    if (list.length <= MAX_ACTIVE_MOTIFS_PER_ANCHOR) continue;
+    const sorted = list
+      .slice()
+      .sort((a, b) => motifPriorityScore(b) - motifPriorityScore(a) || a.id.localeCompare(b.id));
+    for (const m of sorted.slice(MAX_ACTIVE_MOTIFS_PER_ANCHOR)) {
+      patch.set(m.id, `density_pruned:max_${MAX_ACTIVE_MOTIFS_PER_ANCHOR}`);
+    }
+  }
+
+  if (!patch.size) return motifs;
+  return motifs.map((m) =>
+    patch.has(m.id)
+      ? {
+          ...m,
+          status: "deprecated",
+          statusReason: patch.get(m.id),
+          novelty: m.novelty === "new" ? "new" : "updated",
+        }
+      : m
+  );
 }
 
 export function reconcileMotifsWithGraph(params: {
@@ -456,13 +554,14 @@ export function reconcileMotifsWithGraph(params: {
     };
   });
 
-  const deprecationApplied = applyRedundancyDeprecation(mergedDerived, conceptById).map((m) => {
+  const deprecationApplied = applyRedundancyDeprecation(mergedDerived, conceptById);
+  const densityCapped = capActiveMotifsPerAnchor(deprecationApplied).map((m) => {
     if (m.status !== "deprecated") return m;
     if (m.novelty === "new") return m;
     return { ...m, novelty: "updated" as MotifChangeState, resolved: false, resolvedAt: undefined, resolvedBy: undefined };
   });
 
-  const derivedIds = new Set(deprecationApplied.map((m) => m.id));
+  const derivedIds = new Set(densityCapped.map((m) => m.id));
   const cancelledFromHistory: ConceptMotif[] = base
     .filter((old) => !derivedIds.has(old.id))
     .map((old) => ({
@@ -473,7 +572,7 @@ export function reconcileMotifsWithGraph(params: {
       updatedAt: now,
     }));
 
-  const all = [...deprecationApplied, ...cancelledFromHistory];
+  const all = [...densityCapped, ...cancelledFromHistory];
   return all
     .slice()
     .sort((a, b) => statusRank(b.status) - statusRank(a.status) || b.confidence - a.confidence || a.id.localeCompare(b.id))

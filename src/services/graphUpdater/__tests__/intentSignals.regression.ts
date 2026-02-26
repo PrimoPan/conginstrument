@@ -11,6 +11,8 @@ import { buildTravelPlanState } from "../../travelPlan/state.js";
 import { buildSlotStateMachine } from "../slotStateMachine.js";
 import { compileSlotStateToPatch } from "../slotGraphCompiler.js";
 import { planUncertaintyQuestion } from "../../uncertainty/questionPlanner.js";
+import { reconcileConceptsWithGraph } from "../../concepts.js";
+import { reconcileMotifsWithGraph } from "../../motif/conceptMotifs.js";
 
 type Case = {
   name: string;
@@ -531,6 +533,102 @@ const cases: Case[] = [
       });
       assert.equal(state.budget?.totalCny, 10000);
       assert.equal(state.budget?.remainingCny, 10000);
+    },
+  },
+  {
+    name: "motif dedupe should suppress bookkeeping-budget motifs and cap active motifs per anchor",
+    run: () => {
+      const graph = {
+        id: "g_motif_dedupe",
+        version: 1,
+        nodes: [
+          {
+            id: "n_goal",
+            type: "goal",
+            layer: "intent",
+            statement: "意图: 去米兰旅游3天",
+            status: "confirmed",
+            confidence: 0.86,
+            importance: 0.84,
+            key: "slot:goal",
+          },
+          {
+            id: "n_budget",
+            type: "constraint",
+            layer: "requirement",
+            statement: "预算上限: 10000元",
+            status: "confirmed",
+            confidence: 0.92,
+            importance: 0.8,
+            key: "slot:budget",
+          },
+          {
+            id: "n_budget_remain",
+            type: "constraint",
+            layer: "requirement",
+            statement: "剩余预算: 10000元",
+            status: "confirmed",
+            confidence: 0.9,
+            importance: 0.78,
+            key: "slot:budget_remaining",
+          },
+          {
+            id: "n_duration",
+            type: "constraint",
+            layer: "requirement",
+            statement: "总行程时长: 3天",
+            status: "confirmed",
+            confidence: 0.9,
+            importance: 0.8,
+            key: "slot:duration_total",
+          },
+          {
+            id: "n_dest",
+            type: "fact",
+            layer: "requirement",
+            statement: "目的地: 米兰",
+            status: "confirmed",
+            confidence: 0.9,
+            importance: 0.8,
+            key: "slot:destination:米兰",
+          },
+          {
+            id: "n_limit",
+            type: "constraint",
+            layer: "requirement",
+            statement: "限制因素: 需要安全感强（治安、夜间出行）",
+            status: "confirmed",
+            confidence: 0.9,
+            importance: 0.79,
+            key: "slot:constraint:limiting:other:safety",
+          },
+        ] as any,
+        edges: [
+          { id: "e1", from: "n_budget", to: "n_goal", type: "constraint", confidence: 0.92 },
+          { id: "e2", from: "n_budget_remain", to: "n_goal", type: "constraint", confidence: 0.9 },
+          { id: "e3", from: "n_duration", to: "n_goal", type: "constraint", confidence: 0.9 },
+          { id: "e4", from: "n_dest", to: "n_duration", type: "constraint", confidence: 0.84 },
+          { id: "e5", from: "n_limit", to: "n_goal", type: "constraint", confidence: 0.9 },
+          { id: "e6", from: "n_budget", to: "n_budget_remain", type: "determine", confidence: 0.9 },
+        ] as any,
+      } as any;
+
+      const concepts = reconcileConceptsWithGraph({ graph, baseConcepts: [] });
+      const motifs = reconcileMotifsWithGraph({ graph, concepts, baseMotifs: [] });
+      const active = motifs.filter((m) => m.status === "active");
+
+      const budgetRemainConcept = concepts.find((c) => c.semanticKey === "slot:budget_remaining");
+      assert.ok(budgetRemainConcept);
+      assert.equal(active.some((m) => m.conceptIds.includes(budgetRemainConcept!.id)), false);
+
+      const byAnchor = new Map<string, number>();
+      for (const m of active) {
+        const k = String(m.anchorConceptId || "");
+        byAnchor.set(k, (byAnchor.get(k) || 0) + 1);
+      }
+      for (const count of byAnchor.values()) {
+        assert.equal(count <= 4, true);
+      }
     },
   },
 ];
