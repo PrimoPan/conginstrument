@@ -317,6 +317,16 @@ const cases: Case[] = [
     },
   },
   {
+    name: "safety wording should not be parsed as destination",
+    run: () => {
+      const s = extractIntentSignals(
+        "我有惊恐发作史，所以希望行程稳妥到不出事，尽量安全感强"
+      );
+      assert.equal((s.destinations || []).length, 0);
+      assert.equal(s.destination, undefined);
+    },
+  },
+  {
     name: "history budget delta should not be re-applied when merged with function-slot budget",
     run: () => {
       const textSignals = extractIntentSignalsWithRecency(

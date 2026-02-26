@@ -1485,6 +1485,7 @@ export function isLikelyDestinationCandidate(x: string): boolean {
   ) {
     return false;
   }
+  if (/(不出事|稳妥|安全感|别出事|不冒险|低风险|风险低|保险一点|保守一点)/i.test(s)) return false;
   if (/^(更|比较|稍微|尽量|优先|最好)?\s*(安全|安静|方便|便宜|舒适|舒服|热闹|清净|治安).*/i.test(s)) {
     return false;
   }

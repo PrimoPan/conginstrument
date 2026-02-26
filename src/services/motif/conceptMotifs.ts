@@ -154,6 +154,142 @@ function sortConceptIdsForTriad(ids: string[], byId: Map<string, ConceptItem>): 
     });
 }
 
+function sourceFamiliesForPattern(m: ConceptMotif, conceptById: Map<string, ConceptItem>): string[] {
+  const ids = (m.conceptIds || []).slice();
+  if (m.anchorConceptId) {
+    const idx = ids.indexOf(m.anchorConceptId);
+    if (idx >= 0) ids.splice(idx, 1);
+  }
+  return uniq(
+    ids
+      .map((id) => canonicalConceptFamily(conceptById.get(id)))
+      .filter(Boolean)
+      .sort(),
+    6
+  );
+}
+
+function motifPatternSignature(m: ConceptMotif, conceptById: Map<string, ConceptItem>): string {
+  const source = sourceFamiliesForPattern(m, conceptById).join("+") || "none";
+  const anchorFamily = canonicalConceptFamily(conceptById.get(m.anchorConceptId));
+  return `${m.motifType}|${m.relation}|${source}->${anchorFamily || "other"}`;
+}
+
+function relationTypeBoost(relation: EdgeType): number {
+  if (relation === "constraint") return 0.03;
+  if (relation === "determine") return 0.02;
+  if (relation === "enable") return 0.01;
+  return 0;
+}
+
+function sourceTitlesFromConcepts(conceptIds: string[], anchorId: string, conceptById: Map<string, ConceptItem>): string[] {
+  const ids = conceptIds.filter((id) => id !== anchorId);
+  return ids
+    .slice()
+    .sort((a, b) => {
+      const ca = conceptById.get(a);
+      const cb = conceptById.get(b);
+      return conceptScore(cb || ({} as any)) - conceptScore(ca || ({} as any)) || a.localeCompare(b);
+    })
+    .map((id) => cleanText(conceptById.get(id)?.title, 44))
+    .filter(Boolean);
+}
+
+function aggregateToPatternMotifs(instances: ConceptMotif[], concepts: ConceptItem[]): ConceptMotif[] {
+  const byId = new Map((concepts || []).map((c) => [c.id, c]));
+  const groups = new Map<
+    string,
+    {
+      signature: string;
+      motifType: ConceptMotifType;
+      relation: EdgeType;
+      templateKey: string;
+      concepts: Set<string>;
+      anchors: Set<string>;
+      supportEdgeIds: Set<string>;
+      supportNodeIds: Set<string>;
+      confidenceSum: number;
+      confidenceMax: number;
+      count: number;
+    }
+  >();
+
+  for (const m of instances || []) {
+    const signature = motifPatternSignature(m, byId);
+    const base = groups.get(signature) || {
+      signature,
+      motifType: m.motifType,
+      relation: m.relation,
+      templateKey: m.templateKey,
+      concepts: new Set<string>(),
+      anchors: new Set<string>(),
+      supportEdgeIds: new Set<string>(),
+      supportNodeIds: new Set<string>(),
+      confidenceSum: 0,
+      confidenceMax: 0,
+      count: 0,
+    };
+    for (const cid of m.conceptIds || []) if (cid) base.concepts.add(cid);
+    if (m.anchorConceptId) base.anchors.add(m.anchorConceptId);
+    for (const eid of m.supportEdgeIds || []) if (eid) base.supportEdgeIds.add(eid);
+    for (const nid of m.supportNodeIds || []) if (nid) base.supportNodeIds.add(nid);
+    base.confidenceSum += clamp01(m.confidence, 0.72);
+    base.confidenceMax = Math.max(base.confidenceMax, clamp01(m.confidence, 0.72));
+    base.count += 1;
+    groups.set(signature, base);
+  }
+
+  const now = new Date().toISOString();
+  const out: ConceptMotif[] = [];
+  for (const g of groups.values()) {
+    const conceptIds = uniq(Array.from(g.concepts), 24);
+    if (!conceptIds.length) continue;
+    const anchorId =
+      Array.from(g.anchors)
+        .sort((a, b) => {
+          const ca = byId.get(a);
+          const cb = byId.get(b);
+          return conceptScore(cb || ({} as any)) - conceptScore(ca || ({} as any)) || a.localeCompare(b);
+        })
+        .find((id) => conceptIds.includes(id)) || conceptIds[conceptIds.length - 1];
+    const anchorTitle = cleanText(byId.get(anchorId)?.title, 56) || familyLabel(canonicalConceptFamily(byId.get(anchorId)) as any);
+    const sourceTitles = sourceTitlesFromConcepts(conceptIds, anchorId, byId);
+    const srcA = sourceTitles[0] || familyLabel(sourceFamiliesForPattern({ ...({} as any), conceptIds, anchorConceptId: anchorId } as any, byId)[0] as any);
+    const srcB = sourceTitles[1] || "";
+    const title =
+      sourceTitles.length >= 2 || g.motifType === "triad"
+        ? `${srcA}${srcB ? ` + ${srcB}` : ""} ${relationLabel(g.relation)} ${anchorTitle}`
+        : `${srcA} ${relationLabel(g.relation)} ${anchorTitle}`;
+
+    const sourceFamilyText = sourceFamiliesForPattern(
+      { ...({} as any), conceptIds, anchorConceptId: anchorId } as any,
+      byId
+    )
+      .map((x) => familyLabel(x as any))
+      .join(" + ");
+    const anchorFamilyText = familyLabel(canonicalConceptFamily(byId.get(anchorId)) as any);
+    const avg = g.confidenceSum / Math.max(1, g.count);
+    const confidence = clamp01(g.confidenceMax * 0.68 + avg * 0.32 + relationTypeBoost(g.relation), 0.72);
+    out.push({
+      id: stableId(`pattern:${g.signature}`),
+      templateKey: `pattern:${g.signature}`,
+      motifType: g.motifType,
+      relation: g.relation,
+      conceptIds,
+      anchorConceptId: anchorId,
+      title: cleanText(title, 160),
+      description: cleanText(`模式：${sourceFamilyText || "概念"} ${relationLabel(g.relation)} ${anchorFamilyText}`, 220),
+      confidence,
+      supportEdgeIds: uniq(Array.from(g.supportEdgeIds), 72),
+      supportNodeIds: uniq(Array.from(g.supportNodeIds), 72),
+      status: "active",
+      novelty: "new",
+      updatedAt: now,
+    });
+  }
+  return out;
+}
+
 type PairAccum = {
   fromId: string;
   toId: string;
@@ -486,6 +622,47 @@ function applyRedundancyDeprecation(motifs: ConceptMotif[], conceptById: Map<str
   });
 }
 
+function isSubsetOf(a: string[], b: string[]): boolean {
+  if (!a.length) return true;
+  const setB = new Set(b);
+  for (const x of a) if (!setB.has(x)) return false;
+  return true;
+}
+
+function applyTriadSubsumption(motifs: ConceptMotif[], conceptById: Map<string, ConceptItem>): ConceptMotif[] {
+  const triads = motifs.filter((m) => m.motifType === "triad" && m.status === "active" && !m.resolved);
+  if (!triads.length) return motifs;
+  const triadMeta = triads.map((t) => ({
+    id: t.id,
+    relation: t.relation,
+    anchor: t.anchorConceptId,
+    sourceFamilies: sourceFamiliesForPattern(t, conceptById),
+    confidence: t.confidence,
+  }));
+
+  return motifs.map((m) => {
+    if (m.motifType !== "pair" || m.status !== "active" || m.resolved) return m;
+    const pairFamilies = sourceFamiliesForPattern(m, conceptById);
+    const covering = triadMeta.find(
+      (t) =>
+        t.relation === m.relation &&
+        t.anchor === m.anchorConceptId &&
+        isSubsetOf(pairFamilies, t.sourceFamilies) &&
+        t.confidence + 0.08 >= m.confidence
+    );
+    if (!covering) return m;
+    return {
+      ...m,
+      status: "deprecated",
+      statusReason: `subsumed_by:${covering.id}`,
+      novelty: m.novelty === "new" ? "new" : "updated",
+      resolved: false,
+      resolvedAt: undefined,
+      resolvedBy: undefined,
+    };
+  });
+}
+
 function capActiveMotifsPerAnchor(motifs: ConceptMotif[]): ConceptMotif[] {
   const groups = new Map<string, ConceptMotif[]>();
   for (const m of motifs) {
@@ -524,9 +701,9 @@ export function reconcileMotifsWithGraph(params: {
   baseMotifs?: any;
 }): ConceptMotif[] {
   const now = new Date().toISOString();
-  const pair = buildPairMotifs(params.graph, params.concepts);
-  const triads = buildTriadMotifs(pair, params.concepts);
-  const derived = [...pair, ...triads];
+  const pairInstances = buildPairMotifs(params.graph, params.concepts);
+  const triadInstances = buildTriadMotifs(pairInstances, params.concepts);
+  const derived = aggregateToPatternMotifs([...pairInstances, ...triadInstances], params.concepts);
   const base = normalizeMotifs(params.baseMotifs);
   const baseById = new Map(base.map((m) => [m.id, m]));
   const conceptById = new Map((params.concepts || []).map((c) => [c.id, c]));
@@ -555,7 +732,8 @@ export function reconcileMotifsWithGraph(params: {
   });
 
   const deprecationApplied = applyRedundancyDeprecation(mergedDerived, conceptById);
-  const densityCapped = capActiveMotifsPerAnchor(deprecationApplied).map((m) => {
+  const triadSubsumed = applyTriadSubsumption(deprecationApplied, conceptById);
+  const densityCapped = capActiveMotifsPerAnchor(triadSubsumed).map((m) => {
     if (m.status !== "deprecated") return m;
     if (m.novelty === "new") return m;
     return { ...m, novelty: "updated" as MotifChangeState, resolved: false, resolvedAt: undefined, resolvedBy: undefined };
