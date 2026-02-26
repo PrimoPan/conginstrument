@@ -141,6 +141,7 @@ Base URL 示例：`http://localhost:3001`
 - `concepts`: `ConceptItem[]`
 - `motifs`: `ConceptMotif[]`（含 `status/novelty/statusReason`）
 - `motifLinks`: `MotifLink[]`（motif 间关系，可由用户编辑后保存）
+- `motifReasoningView`: `MotifReasoningView`（后端标准化的 motif 推理视图，供前端右侧 `Motif Reasoning` 画布直接渲染）
 - `contexts`: `ContextItem[]`
 - `conflictGate`: 仅在 `turn/turn/stream` 被冲突门控时返回，包含 `unresolvedMotifs[]` 与阻塞提示文案
 

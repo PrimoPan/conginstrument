@@ -14,6 +14,10 @@ import {
   type MotifLink,
 } from "./motif/motifLinks.js";
 import {
+  buildMotifReasoningView,
+  type MotifReasoningView,
+} from "./motif/reasoningView.js";
+import {
   reconcileContextsWithGraph,
   type ContextItem,
 } from "./contexts.js";
@@ -23,6 +27,7 @@ export type CognitiveModel = {
   concepts: ConceptItem[];
   motifs: ConceptMotif[];
   motifLinks: MotifLink[];
+  motifReasoningView: MotifReasoningView;
   contexts: ContextItem[];
 };
 
@@ -52,6 +57,11 @@ export function buildCognitiveModel(params: {
     motifs,
     baseLinks: params.baseMotifLinks,
   });
+  const motifReasoningView = buildMotifReasoningView({
+    concepts: nextConceptsDraft,
+    motifs,
+    motifLinks,
+  });
   const concepts = attachMotifIdsToConcepts(nextConceptsDraft, motifs);
   const contexts = reconcileContextsWithGraph({
     graph: graphWithConceptState,
@@ -65,6 +75,7 @@ export function buildCognitiveModel(params: {
     concepts,
     motifs,
     motifLinks,
+    motifReasoningView,
     contexts,
   };
 }
