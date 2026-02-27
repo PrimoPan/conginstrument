@@ -86,21 +86,71 @@ function intersectCount(a: string[], b: string[]): number {
   return cnt;
 }
 
-function autoType(a: ConceptMotif, b: ConceptMotif): MotifLinkType {
-  if (a.status === "deprecated" || b.status === "deprecated") return "conflicts";
-  const anchorA = a.anchorConceptId;
-  const anchorB = b.anchorConceptId;
-  const aUsesB = !!anchorB && (a.conceptIds || []).includes(anchorB);
-  const bUsesA = !!anchorA && (b.conceptIds || []).includes(anchorA);
-  if (aUsesB && !bUsesA) return "depends_on";
-  if (bUsesA && !aUsesB) return "refines";
-  return "supports";
+function sourceConceptIds(m: ConceptMotif): string[] {
+  const ids = Array.isArray(m?.conceptIds) ? m.conceptIds : [];
+  const anchor = cleanText(m?.anchorConceptId, 100);
+  if (!anchor) return ids.slice();
+  return ids.filter((id) => id && id !== anchor);
+}
+
+function relationIsConflict(a: ConceptMotif, b: ConceptMotif): boolean {
+  if (a.status === "deprecated" || b.status === "deprecated") return true;
+  if (a.relation === "conflicts_with" || b.relation === "conflicts_with") return true;
+  const pair = new Set([a.relation, b.relation]);
+  return (
+    (pair.has("constraint") && pair.has("determine")) ||
+    (pair.has("constraint") && pair.has("enable"))
+  );
+}
+
+function directedCandidate(
+  from: ConceptMotif,
+  to: ConceptMotif
+): { type: MotifLinkType; score: number } | null {
+  if (!from?.id || !to?.id || from.id === to.id) return null;
+
+  const fromConcepts = Array.isArray(from.conceptIds) ? from.conceptIds : [];
+  const toConcepts = Array.isArray(to.conceptIds) ? to.conceptIds : [];
+  const overlap = intersectCount(fromConcepts, toConcepts);
+
+  const fromAnchor = cleanText(from.anchorConceptId, 100);
+  const toAnchor = cleanText(to.anchorConceptId, 100);
+  const toSources = sourceConceptIds(to);
+  const fromSources = sourceConceptIds(from);
+
+  const fromFeedsTo = !!fromAnchor && toSources.includes(fromAnchor);
+  const toFeedsFrom = !!toAnchor && fromSources.includes(toAnchor);
+  const sameAnchor = !!fromAnchor && !!toAnchor && fromAnchor === toAnchor;
+
+  if (relationIsConflict(from, to) && (sameAnchor || overlap > 0)) {
+    return { type: "conflicts", score: 0.7 + Math.min(0.2, overlap * 0.05) };
+  }
+
+  if (fromFeedsTo) {
+    return { type: "depends_on", score: 0.9 + Math.min(0.08, overlap * 0.03) };
+  }
+  if (toFeedsFrom) {
+    return null;
+  }
+
+  if (sameAnchor && from.relation === to.relation) {
+    const score = 0.62 + Math.min(0.18, overlap * 0.04);
+    return { type: "refines", score };
+  }
+
+  if (overlap > 0) {
+    const score = 0.58 + Math.min(0.2, overlap * 0.05);
+    return { type: "supports", score };
+  }
+
+  return null;
 }
 
 function buildAutoLinks(motifs: ConceptMotif[]): MotifLink[] {
   const now = new Date().toISOString();
   const out: MotifLink[] = [];
   const seen = new Set<string>();
+  const reverseSeen = new Set<string>();
   const candidates = (motifs || [])
     .filter((m) => m.status !== "cancelled")
     .slice()
@@ -108,42 +158,78 @@ function buildAutoLinks(motifs: ConceptMotif[]): MotifLink[] {
     .slice(0, 140);
 
   const outDegree = new Map<string, number>();
+  const scored: Array<{ from: ConceptMotif; to: ConceptMotif; type: MotifLinkType; score: number }> = [];
   for (let i = 0; i < candidates.length; i += 1) {
-    const a = candidates[i];
-    for (let j = i + 1; j < candidates.length; j += 1) {
-      const b = candidates[j];
-      const overlap = intersectCount(a.conceptIds || [], b.conceptIds || []);
-      if (overlap <= 0) continue;
-      const type = autoType(a, b);
-      const from = a.confidence >= b.confidence ? a : b;
-      const to = from.id === a.id ? b : a;
+    for (let j = 0; j < candidates.length; j += 1) {
+      if (i === j) continue;
+      const from = candidates[i];
+      const to = candidates[j];
+      const inferred = directedCandidate(from, to);
+      if (!inferred) continue;
+      scored.push({
+        from,
+        to,
+        type: inferred.type,
+        score:
+          inferred.score *
+          ((from.confidence + to.confidence) / 2) *
+          motifStatePenalty(from.status) *
+          motifStatePenalty(to.status),
+      });
+    }
+  }
 
-      const fromCnt = outDegree.get(from.id) || 0;
-      if (fromCnt >= 3) continue;
+  scored.sort((a, b) => b.score - a.score || a.from.id.localeCompare(b.from.id) || a.to.id.localeCompare(b.to.id));
+  for (const item of scored) {
+    const from = item.from;
+    const to = item.to;
+    const type = item.type;
+    const k = linkKey(from.id, to.id);
+    if (seen.has(k)) continue;
 
-      const k = linkKey(from.id, to.id);
-      if (seen.has(k)) continue;
-      seen.add(k);
-      outDegree.set(from.id, fromCnt + 1);
+    const reverse = linkKey(to.id, from.id);
+    if (reverseSeen.has(k) || (seen.has(reverse) && type !== "conflicts")) continue;
 
+    const fromCnt = outDegree.get(from.id) || 0;
+    if (fromCnt >= 4) continue;
+
+    seen.add(k);
+    reverseSeen.add(reverse);
+    outDegree.set(from.id, fromCnt + 1);
+    out.push({
+      id: stableId(`${from.id}:${to.id}:${type}`),
+      fromMotifId: from.id,
+      toMotifId: to.id,
+      type,
+      confidence: clamp01(item.score, 0.72),
+      source: "system",
+      updatedAt: now,
+    });
+
+    if (out.length >= 220) break;
+  }
+
+  // Keep the motif graph connected enough for reasoning visualization.
+  if (out.length === 0 && candidates.length >= 2) {
+    for (let i = 0; i < candidates.length - 1; i += 1) {
+      const from = candidates[i];
+      const to = candidates[i + 1];
       out.push({
-        id: stableId(`${from.id}:${to.id}:${type}`),
+        id: stableId(`${from.id}:${to.id}:supports`),
         fromMotifId: from.id,
         toMotifId: to.id,
-        type,
+        type: "supports",
         confidence: clamp01(
           ((from.confidence + to.confidence) / 2) *
             motifStatePenalty(from.status) *
             motifStatePenalty(to.status),
-          0.72
+          0.68
         ),
         source: "system",
         updatedAt: now,
       });
-
-      if (out.length >= 220) break;
+      if (out.length >= 12) break;
     }
-    if (out.length >= 220) break;
   }
   return out;
 }
@@ -195,4 +281,3 @@ export function reconcileMotifLinks(params: {
     )
     .slice(0, 220);
 }
-
