@@ -546,6 +546,81 @@ const cases: Case[] = [
     },
   },
   {
+    name: "near-duplicate safety limiting factors should collapse to one concept",
+    run: () => {
+      const merged = extractIntentSignalsWithRecency(
+        "限制因素：治安、夜间出行要考虑",
+        "所以要尽量让我安全感强（治安、夜间出行都要考虑），需安全感强"
+      );
+      const state = buildSlotStateMachine({
+        userText: "所以要尽量让我安全感强（治安、夜间出行都要考虑），需安全感强",
+        recentTurns: [
+          { role: "user", content: "限制因素：治安、夜间出行要考虑" },
+          { role: "assistant", content: "收到" },
+          { role: "user", content: "所以要尽量让我安全感强（治安、夜间出行都要考虑），需安全感强" },
+        ],
+        signals: merged,
+      });
+
+      const safetyLimitingNodes = state.nodes.filter((n: any) => {
+        const key = String(n?.slotKey || "");
+        const tags = Array.isArray(n?.tags) ? n.tags.map((x: any) => String(x)) : [];
+        return key.startsWith("slot:constraint:limiting:") && tags.includes("safety");
+      });
+      assert.equal(safetyLimitingNodes.length, 1);
+    },
+  },
+  {
+    name: "structural raw kinds (constraint/risk) should still collapse to one safety limiting concept",
+    run: () => {
+      const state = buildSlotStateMachine({
+        userText: "所以要尽量让我安全感强（治安、夜间出行都要考虑）",
+        recentTurns: [
+          { role: "user", content: "限制因素：治安、夜间出行要考虑" },
+          { role: "assistant", content: "收到" },
+          { role: "user", content: "所以要尽量让我安全感强（治安、夜间出行都要考虑）" },
+        ],
+        signals: {
+          destinations: ["米兰"],
+          destination: "米兰",
+          genericConstraints: [
+            {
+              text: "限制因素：治安、夜间出行要考虑",
+              evidence: "限制因素：治安、夜间出行要考虑",
+              kind: "safety",
+              hard: false,
+              severity: "high",
+              importance: 0.82,
+            },
+            {
+              text: "所以要尽量让我安全感强（治安、夜间出行都要考虑）",
+              evidence: "所以要尽量让我安全感强（治安、夜间出行都要考虑）",
+              kind: "constraint" as any,
+              hard: false,
+              severity: "medium",
+              importance: 0.78,
+            },
+            {
+              text: "需安全感强",
+              evidence: "需安全感强",
+              kind: "risk" as any,
+              hard: true,
+              severity: "high",
+              importance: 0.9,
+            },
+          ],
+        } as any,
+      });
+
+      const safetyLimitingNodes = state.nodes.filter((n: any) => {
+        const key = String(n?.slotKey || "");
+        const tags = Array.isArray(n?.tags) ? n.tags.map((x: any) => String(x)) : [];
+        return key.startsWith("slot:constraint:limiting:") && tags.includes("safety");
+      });
+      assert.equal(safetyLimitingNodes.length, 1);
+    },
+  },
+  {
     name: "motif dedupe should suppress bookkeeping-budget motifs and cap active motifs per anchor",
     run: () => {
       const graph = {

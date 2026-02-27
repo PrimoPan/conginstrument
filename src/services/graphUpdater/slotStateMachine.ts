@@ -355,14 +355,144 @@ type LimitingFactor = {
   severity?: "medium" | "high" | "critical";
   importance: number;
   kind: string;
+  canonicalKey: string;
+  semanticTokens: string[];
 };
 
 function normalizeLimitingText(raw: string): string {
   return cleanStatement(raw || "", 140)
     .toLowerCase()
+    .replace(/^限制因素[:：]?\s*/i, "")
+    .replace(/^limiting factor[:：]?\s*/i, "")
     .replace(/[，。,；;！!？?\s]+/g, "")
     .replace(/^(我|我们|家人|父母|父亲|母亲)+/, "")
-    .replace(/(需要|必须|尽量|注意|请|希望|可以|不能|不要|避免)/g, "");
+    .replace(/(所以|因此|然后|就是|一下|吧|呢|呀|啊|都要|都得|尽量|注意|请|希望|可以|需要|必须|务必|一定|不能|不要|避免)/g, "");
+}
+
+function hasCjk(text: string): boolean {
+  return /[\u3400-\u9fff]/.test(String(text || ""));
+}
+
+function severityRank(x?: "medium" | "high" | "critical"): number {
+  return x === "critical" ? 3 : x === "high" ? 2 : x === "medium" ? 1 : 0;
+}
+
+function inferLimitingKind(rawKind: string | undefined, text: string): string {
+  const kind = cleanStatement(rawKind || "", 32).toLowerCase();
+  const normalizedKind =
+    kind === "security" || kind === "travel_safety" || kind === "safety_risk"
+      ? "safety"
+      : kind === "medical"
+        ? "health"
+        : kind === "lang"
+          ? "language"
+          : kind;
+  const acceptedSemanticKinds = new Set([
+    "health",
+    "language",
+    "diet",
+    "religion",
+    "legal",
+    "mobility",
+    "safety",
+    "logistics",
+    "other",
+  ]);
+  // Only trust kind when it is a semantic category. Ignore structural labels
+  // such as "constraint/risk/requirement", then infer from text instead.
+  if (acceptedSemanticKinds.has(normalizedKind) && normalizedKind !== "other") return normalizedKind;
+  const s = cleanStatement(text || "", 160);
+  if (/心脏|心肺|慢性病|过敏|糖尿病|哮喘|医疗|病史|health|medical|cardiac|allergy/i.test(s)) return "health";
+  if (/英语|语言|翻译|沟通|外语|english|language|translate|communication/i.test(s)) return "language";
+  if (/饮食|忌口|清真|素食|过敏原|halal|kosher|vegetarian|vegan|diet/i.test(s)) return "diet";
+  if (/宗教|礼拜|祷告|斋月|安息日|religion|prayer|ramadan|sabbath/i.test(s)) return "religion";
+  if (/签证|护照|入境|海关|法律|visa|passport|immigration|permit|legal/i.test(s)) return "legal";
+  if (/轮椅|无障碍|体力|行动不便|不能久走|mobility|wheelchair|accessibility/i.test(s)) return "mobility";
+  if (/治安|安全|安全感|危险|夜间|夜里|夜晚|抢劫|诈骗|security|safety|danger|risk|night/i.test(s)) return "safety";
+  if (/转机|换乘|托运|航班|火车|机场|时差|logistics|layover|flight|train/i.test(s)) return "logistics";
+  return "other";
+}
+
+function limitingPolarity(text: string): "pos" | "neg" {
+  const s = cleanStatement(text || "", 160);
+  return /(不要|不能|避免|别|禁止|must not|cannot|don't|avoid)/i.test(s) ? "neg" : "pos";
+}
+
+function semanticTokens(kind: string, text: string): string[] {
+  const s = cleanStatement(text || "", 200);
+  const out: string[] = [];
+  const push = (x: string) => {
+    if (!out.includes(x)) out.push(x);
+  };
+  if (kind === "safety") {
+    if (/治安|安全|安全感|危险|风险|抢劫|诈骗|security|safety|safe|danger|risk/i.test(s)) push("security");
+    if (/夜间|夜里|夜晚|晚间|night|late/i.test(s)) push("night");
+    if (/出行|步行|打车|交通|transit|travel|walk|taxi/i.test(s)) push("transit");
+    if (/酒店|住宿|民宿|住在|hotel|lodging|accommodation/i.test(s)) push("lodging");
+    if (/区域|片区|地段|社区|neighborhood|district|area/i.test(s)) push("area");
+  } else if (kind === "language") {
+    if (/英语|语言|外语|english|language/i.test(s)) push("language");
+    if (/翻译|翻译器|translate|translator/i.test(s)) push("translate");
+    if (/沟通|communication|communicate/i.test(s)) push("communication");
+  } else if (kind === "health") {
+    if (/心脏|心肺|cardiac|heart/i.test(s)) push("cardiac");
+    if (/慢性病|chronic|糖尿病|高血压|哮喘/i.test(s)) push("chronic");
+    if (/过敏|allergy/i.test(s)) push("allergy");
+    if (/体力|强度|不能久走|爬山|intensity|exertion/i.test(s)) push("intensity");
+  } else {
+    const normalized = normalizeLimitingText(s);
+    if (normalized) push(normalized.slice(0, 32));
+  }
+  return out.slice(0, 4);
+}
+
+function canonicalLimitingText(kind: string, tokens: string[], raw: string): string {
+  const cjk = hasCjk(raw);
+  if (kind === "safety") {
+    const hasSecurity = tokens.includes("security");
+    const hasNight = tokens.includes("night");
+    const hasTransit = tokens.includes("transit");
+    const hasLodgingOrArea = tokens.includes("lodging") || tokens.includes("area");
+    if (hasSecurity && (hasNight || hasTransit)) {
+      return cjk ? "治安、夜间出行要考虑" : "Prioritize security and night travel safety";
+    }
+    if (hasSecurity && hasLodgingOrArea) {
+      return cjk ? "住宿区域需优先安全" : "Lodging area must prioritize safety";
+    }
+    if (hasSecurity) {
+      return cjk ? "需优先考虑安全性" : "Safety needs to be prioritized";
+    }
+  }
+  return cleanStatement(raw || "", 120);
+}
+
+function overlapScore(a: string[], b: string[]): number {
+  if (!a.length || !b.length) return 0;
+  const setA = new Set(a);
+  const setB = new Set(b);
+  let inter = 0;
+  for (const x of setA) if (setB.has(x)) inter += 1;
+  const union = new Set([...setA, ...setB]).size;
+  return union ? inter / union : 0;
+}
+
+function isSubsetTokens(a: string[], b: string[]): boolean {
+  if (!a.length) return true;
+  const setB = new Set(b);
+  for (const x of a) {
+    if (!setB.has(x)) return false;
+  }
+  return true;
+}
+
+function limitingQuality(x: LimitingFactor): number {
+  return (
+    severityRank(x.severity) * 100 +
+    (x.hard ? 40 : 0) +
+    x.importance * 10 +
+    x.semanticTokens.length * 8 -
+    cleanStatement(x.text, 120).length * 0.02
+  );
 }
 
 function isExperienceLikeConstraint(text: string): boolean {
@@ -388,24 +518,29 @@ function collectLimitingFactors(signals: IntentSignals): LimitingFactor[] {
     importance?: number;
     kind?: string;
   }) => {
-    const text = cleanStatement(raw.text || "", 120);
-    if (!text) return;
-    const key = text.toLowerCase();
+    const rawText = cleanStatement(raw.text || "", 120);
+    if (!rawText) return;
+    const kind = inferLimitingKind(raw.kind, rawText);
+    const tokens = semanticTokens(kind, rawText);
+    const key = `${kind}:${limitingPolarity(rawText)}:${tokens.join("+") || normalizeLimitingText(rawText).slice(0, 48)}`;
+    const text = canonicalLimitingText(kind, tokens, rawText);
     const next: LimitingFactor = {
       text,
       evidence: cleanStatement(raw.evidence || text, 80),
       hard: !!raw.hard,
       severity: raw.severity,
       importance: clamp01(raw.importance, raw.hard ? 0.84 : 0.74),
-      kind: cleanStatement(raw.kind || "other", 20).toLowerCase() || "other",
+      kind,
+      canonicalKey: key,
+      semanticTokens: tokens,
     };
     const prev = map.get(key);
     if (!prev) {
       map.set(key, next);
       return;
     }
-    map.set(key, {
-      text,
+    const candidate: LimitingFactor = {
+      text: limitingQuality(next) >= limitingQuality(prev) ? next.text : prev.text,
       evidence: next.evidence || prev.evidence,
       hard: prev.hard || next.hard,
       severity:
@@ -415,7 +550,13 @@ function collectLimitingFactors(signals: IntentSignals): LimitingFactor[] {
             ? "high"
             : prev.severity || next.severity,
       importance: Math.max(prev.importance, next.importance),
-      kind: prev.kind === "other" ? next.kind : prev.kind,
+      kind,
+      canonicalKey: key,
+      semanticTokens: Array.from(new Set([...prev.semanticTokens, ...next.semanticTokens])).slice(0, 4),
+    };
+    map.set(key, {
+      ...candidate,
+      kind: prev.kind === "other" ? kind : prev.kind,
     });
   };
 
@@ -455,17 +596,17 @@ function collectLimitingFactors(signals: IntentSignals): LimitingFactor[] {
 
   const ranked = Array.from(map.values())
     .sort((a, b) => {
-      const sevRank = (x?: "medium" | "high" | "critical") =>
-        x === "critical" ? 3 : x === "high" ? 2 : x === "medium" ? 1 : 0;
-      const sevDiff = sevRank(b.severity) - sevRank(a.severity);
+      const sevDiff = severityRank(b.severity) - severityRank(a.severity);
       if (sevDiff !== 0) return sevDiff;
       const hardDiff = (b.hard ? 1 : 0) - (a.hard ? 1 : 0);
       if (hardDiff !== 0) return hardDiff;
+      const tokenDiff = b.semanticTokens.length - a.semanticTokens.length;
+      if (tokenDiff !== 0) return tokenDiff;
       return b.importance - a.importance;
     })
     .slice(0, 12);
 
-  // near-duplicate suppression: same kind and high textual overlap keep the strongest one.
+  // near-duplicate suppression: same semantic family and overlapping token pattern keep the strongest one.
   const deduped: LimitingFactor[] = [];
   for (const cur of ranked) {
     const curNorm = normalizeLimitingText(cur.text);
@@ -473,6 +614,18 @@ function collectLimitingFactors(signals: IntentSignals): LimitingFactor[] {
       if (x.kind !== cur.kind) return false;
       const xNorm = normalizeLimitingText(x.text);
       if (!xNorm || !curNorm) return false;
+      if (x.canonicalKey === cur.canonicalKey) return true;
+      const overlap = overlapScore(x.semanticTokens, cur.semanticTokens);
+      if (overlap >= 0.5) return true;
+      if (
+        x.kind === "safety" &&
+        x.semanticTokens.includes("security") &&
+        cur.semanticTokens.includes("security") &&
+        (isSubsetTokens(x.semanticTokens, cur.semanticTokens) ||
+          isSubsetTokens(cur.semanticTokens, x.semanticTokens))
+      ) {
+        return true;
+      }
       return xNorm === curNorm || xNorm.includes(curNorm) || curNorm.includes(xNorm);
     });
     if (dupIdx < 0) {
@@ -480,14 +633,46 @@ function collectLimitingFactors(signals: IntentSignals): LimitingFactor[] {
       continue;
     }
     const prev = deduped[dupIdx];
-    const pickCur =
-      (cur.severity === "critical" && prev.severity !== "critical") ||
-      (cur.severity === "high" && prev.severity === "medium") ||
-      (cur.hard && !prev.hard) ||
-      cur.importance > prev.importance;
+    const pickCur = limitingQuality(cur) >= limitingQuality(prev);
     if (pickCur) deduped[dupIdx] = cur;
   }
-  return deduped.slice(0, 8);
+
+  // Final pass: merge near-identical factors by semantic signature so the
+  // limiting section remains concise (especially safety variants).
+  const bySignature = new Map<string, LimitingFactor>();
+  for (const item of deduped) {
+    const semanticSig =
+      item.kind === "other"
+        ? `other:${normalizeLimitingText(item.text).slice(0, 32)}`
+        : `${item.kind}:${item.semanticTokens.slice().sort().join("+") || "generic"}`;
+    const prev = bySignature.get(semanticSig);
+    if (!prev) {
+      bySignature.set(semanticSig, item);
+      continue;
+    }
+    const merged: LimitingFactor = {
+      text: limitingQuality(item) >= limitingQuality(prev) ? item.text : prev.text,
+      evidence: cleanStatement(`${prev.evidence}; ${item.evidence}`, 120),
+      hard: prev.hard || item.hard,
+      severity:
+        prev.severity === "critical" || item.severity === "critical"
+          ? "critical"
+          : prev.severity === "high" || item.severity === "high"
+            ? "high"
+            : prev.severity || item.severity,
+      importance: Math.max(prev.importance, item.importance),
+      kind: prev.kind,
+      canonicalKey: semanticSig,
+      semanticTokens: Array.from(new Set([...prev.semanticTokens, ...item.semanticTokens])).slice(0, 4),
+    };
+    bySignature.set(semanticSig, merged);
+  }
+
+  const compacted = Array.from(bySignature.values())
+    .sort((a, b) => limitingQuality(b) - limitingQuality(a))
+    .slice(0, 8);
+
+  return compacted;
 }
 
 export function buildSlotStateMachine(params: {
@@ -939,7 +1124,7 @@ export function buildSlotStateMachine(params: {
   const limitingFactors = collectLimitingFactors(params.signals);
   for (const factor of limitingFactors) {
     const kind = factor.kind || "other";
-    const slotKey = `slot:constraint:limiting:${slug(kind)}:${slug(factor.text)}`;
+    const slotKey = `slot:constraint:limiting:${slug(kind)}:${slug(factor.canonicalKey || factor.text)}`;
     const severity = factor.severity || (factor.hard ? "high" : "medium");
     const riskKind = new Set(["health", "safety", "legal", "mobility"]);
     const imp = clamp01(factor.importance, factor.hard ? 0.84 : 0.74);
