@@ -1,14 +1,6 @@
 import type { CDG, ConceptNode } from "../core/graph.js";
 
-export type ConceptKind =
-  | "intent"
-  | "requirement"
-  | "preference"
-  | "risk"
-  | "belief"
-  | "fact"
-  | "question"
-  | "other";
+export type ConceptKind = "belief" | "constraint" | "preference" | "factual_assertion";
 
 export type ConceptFamily =
   | "goal"
@@ -24,6 +16,7 @@ export type ConceptFamily =
   | "scenic_preference"
   | "generic_constraint"
   | "sub_location"
+  | "conflict"
   | "other";
 
 export type ConceptItem = {
@@ -98,6 +91,7 @@ function statementScore(n: ConceptNode): number {
 
 function slotFamily(key: string): ConceptFamily {
   if (!key) return "other";
+  if (key.startsWith("slot:conflict:")) return "conflict";
   if (key.startsWith("slot:destination:")) return "destination";
   if (key.startsWith("slot:duration_city:")) return "duration_city";
   if (key.startsWith("slot:meeting_critical:")) return "meeting_critical";
@@ -128,6 +122,43 @@ function normalizeDestination(raw: string): string {
     .replace(/\s+/g, " ");
 }
 
+function inferLimitingKindFromText(text: string): string {
+  const s = cleanText(text || "", 180);
+  if (/心脏|心肺|慢性病|过敏|医疗|health|medical|cardiac|allergy/i.test(s)) return "health";
+  if (/英语|语言|翻译|沟通|english|language|translate|communication/i.test(s)) return "language";
+  if (/饮食|忌口|清真|素食|halal|kosher|vegetarian|vegan|diet/i.test(s)) return "diet";
+  if (/宗教|礼拜|祷告|religion|prayer|ramadan|sabbath/i.test(s)) return "religion";
+  if (/签证|护照|入境|海关|法律|visa|passport|immigration|permit|legal/i.test(s)) return "legal";
+  if (/轮椅|无障碍|体力|行动不便|不能久走|mobility|wheelchair|accessibility/i.test(s)) return "mobility";
+  if (/治安|安全|安全感|危险|夜间|夜里|夜晚|security|safety|danger|risk|night/i.test(s)) return "safety";
+  if (/转机|换乘|托运|航班|火车|机场|时差|logistics|layover|flight|train/i.test(s)) return "logistics";
+  return "other";
+}
+
+function canonicalLimitingDetail(kind: string, detail: string): string {
+  const d = cleanText(detail || "", 140).toLowerCase();
+  if (!d) return "factor";
+  if (kind === "safety") {
+    const hasSecurity = /治安|安全|安全感|security|safety|danger|risk/.test(d);
+    const hasNight = /夜间|夜里|夜晚|night|late/.test(d);
+    const hasTransit = /出行|步行|打车|交通|transit|travel|walk|taxi/.test(d);
+    const hasLodging = /酒店|住宿|住在|区域|片区|地段|hotel|lodging|accommodation|area/.test(d);
+    if (hasSecurity && hasNight) return "security_night";
+    if (hasSecurity && hasTransit) return "security_transit";
+    if (hasSecurity && hasLodging) return "security_lodging";
+    if (hasSecurity) return "security";
+    return "safety";
+  }
+  if (kind === "language") return "language";
+  if (kind === "health") return "health";
+  if (kind === "diet") return "diet";
+  if (kind === "religion") return "religion";
+  if (kind === "legal") return "legal";
+  if (kind === "mobility") return "mobility";
+  if (kind === "logistics") return "logistics";
+  return slug(d) || "factor";
+}
+
 function parseSemanticKeyFromStatement(node: ConceptNode): string {
   const s = cleanText(node.statement || "", 180);
   if (!s) return "";
@@ -140,6 +171,10 @@ function parseSemanticKeyFromStatement(node: ConceptNode): string {
   if (m?.[1]) return `slot:duration_city:${slug(normalizeDestination(m[1])) || "unknown"}`;
 
   if (/^总行程时长[:：]\s*[0-9]{1,3}\s*天$/.test(s)) return "slot:duration_total";
+  if (/^(冲突提示|conflict warning)[:：]/i.test(s)) {
+    const x = s.split(/[:：]/)[1] || "conflict";
+    return `slot:conflict:${slug(x) || "default"}`;
+  }
   if (/^预算(?:上限)?[:：]/.test(s)) return "slot:budget";
   if (/^已花预算[:：]/.test(s)) return "slot:budget_spent";
   if (/^(?:剩余预算|可用预算)[:：]/.test(s)) return "slot:budget_remaining";
@@ -158,7 +193,8 @@ function parseSemanticKeyFromStatement(node: ConceptNode): string {
     /心脏|心肺|慢性病|过敏|宗教|饮食|清真|素食|语言|安全|签证|法律|禁忌/i.test(s)
   ) {
     const x = s.split(/[:：]/)[1] || s;
-    return `slot:constraint:limiting:other:${slug(x) || "factor"}`;
+    const kind = inferLimitingKindFromText(x);
+    return `slot:constraint:limiting:${kind}:${canonicalLimitingDetail(kind, x)}`;
   }
 
   return "";
@@ -167,6 +203,10 @@ function parseSemanticKeyFromStatement(node: ConceptNode): string {
 function canonicalSlotKey(key: string): string {
   const k = cleanText(key, 180).toLowerCase();
   if (!k.startsWith("slot:")) return "";
+  if (k.startsWith("slot:conflict:")) {
+    const rest = k.slice("slot:conflict:".length);
+    return `slot:conflict:${slug(rest) || "default"}`;
+  }
 
   if (k.startsWith("slot:destination:")) {
     return `slot:destination:${slug(k.slice("slot:destination:".length)) || "unknown"}`;
@@ -188,7 +228,7 @@ function canonicalSlotKey(key: string): string {
     const rest = k.slice("slot:constraint:limiting:".length);
     const parts = rest.split(":");
     const kind = slug(parts[0] || "other") || "other";
-    const detail = slug(parts.slice(1).join(":") || "factor") || "factor";
+    const detail = canonicalLimitingDetail(kind, parts.slice(1).join(":") || "factor");
     return `slot:constraint:limiting:${kind}:${detail}`;
   }
   if (k.startsWith("slot:constraint:")) {
@@ -233,38 +273,33 @@ export function stableConceptIdFromSemanticKey(semanticKey: string): string {
 }
 
 function conceptKindForNode(n: ConceptNode, family: ConceptFamily): ConceptKind {
-  if (family === "goal" || n.type === "goal" || (n as any).layer === "intent") return "intent";
+  if ((n as any).layer === "preference" || n.type === "preference") return "preference";
+  if (family === "scenic_preference" || family === "activity_preference") return "preference";
+  if (n.type === "belief") return "belief";
+  if (family === "goal" || n.type === "goal" || (n as any).layer === "intent") return "belief";
 
   if (
-    family === "destination" ||
-    family === "duration_city" ||
     family === "duration_total" ||
     family === "budget" ||
     family === "people" ||
     family === "lodging" ||
     family === "limiting_factor" ||
     family === "generic_constraint" ||
-    family === "sub_location"
+    family === "conflict" ||
+    family === "meeting_critical"
   ) {
-    return "requirement";
+    return "constraint";
   }
-  if (family === "scenic_preference" || family === "activity_preference") return "preference";
-  if (family === "meeting_critical") return "risk";
 
   if (
-    (n as any).layer === "risk" ||
-    /心脏|心肺|慢性病|过敏|急救|安全|危险|人身|法律|签证|风险|禁忌|critical|high risk/i.test(
+    /不能|不要|避免|必须|务必|硬约束|限制|约束|constraint|must|avoid|cannot|critical|high risk/i.test(
       cleanText(n.statement, 180)
     )
   ) {
-    return "risk";
+    return "constraint";
   }
 
-  if ((n as any).layer === "preference" || n.type === "preference") return "preference";
-  if (n.type === "belief") return "belief";
-  if (n.type === "question") return "question";
-  if (n.type === "fact") return "fact";
-  return "other";
+  return "factual_assertion";
 }
 
 function keywordTerms(input: string): string[] {
@@ -282,14 +317,10 @@ function shouldKeepNode(n: ConceptNode): boolean {
 }
 
 function rankKind(kind: ConceptKind): number {
-  if (kind === "intent") return 0;
-  if (kind === "requirement") return 1;
-  if (kind === "risk") return 2;
-  if (kind === "preference") return 3;
-  if (kind === "belief") return 4;
-  if (kind === "fact") return 5;
-  if (kind === "question") return 6;
-  return 7;
+  if (kind === "constraint") return 0;
+  if (kind === "belief") return 1;
+  if (kind === "preference") return 2;
+  return 3;
 }
 
 function readNodePaused(n: ConceptNode): boolean {
@@ -311,6 +342,162 @@ function conceptDescriptionFromNode(n: ConceptNode, kind: ConceptKind): string {
   const confidence = clamp01((n as any).confidence, 0.65);
   const label = meta.length ? `${meta.join(" · ")} · c=${confidence.toFixed(2)}` : `c=${confidence.toFixed(2)}`;
   return cleanText(label, 120);
+}
+
+function normalizeConceptMergeText(input: string): string {
+  return cleanText(input, 220)
+    .toLowerCase()
+    .replace(/[“”"'"`]/g, "")
+    .replace(/^限制因素[:：]?\s*/g, "")
+    .replace(/^limiting factor[:：]?\s*/g, "")
+    .replace(/^目的地[:：]?\s*/g, "")
+    .replace(/^destination[:：]?\s*/g, "")
+    .replace(/^总行程时长[:：]?\s*/g, "")
+    .replace(/^total duration[:：]?\s*/g, "")
+    .replace(/^预算(?:上限)?[:：]?\s*/g, "")
+    .replace(/^budget(?: cap)?[:：]?\s*/g, "")
+    .replace(/^子地点[:：]?\s*/g, "")
+    .replace(/^sub-location[:：]?\s*/g, "")
+    .replace(/^冲突提示[:：]?\s*/g, "")
+    .replace(/^conflict warning[:：]?\s*/g, "")
+    .replace(/^(需要|尽量|希望|想要|请|please)\s*/g, "")
+    .replace(/\b(要|去|在|和|与|的|了|吧|一下|一个)\b/g, " ")
+    .replace(/[（(][^)）]{0,40}[)）]/g, " ")
+    .replace(/[，。,；;！!？?\-_/]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function mergeTokens(text: string): string[] {
+  const normalized = normalizeConceptMergeText(text);
+  if (!normalized) return [];
+  const zh = normalized.match(/[\u4e00-\u9fa5]{2,8}/g) || [];
+  const en = normalized.match(/[a-z][a-z0-9]{2,24}/g) || [];
+  return uniq([...zh, ...en], 16);
+}
+
+function jaccardTokens(a: string[], b: string[]): number {
+  if (!a.length || !b.length) return 0;
+  const sa = new Set(a);
+  const sb = new Set(b);
+  let inter = 0;
+  for (const x of sa) if (sb.has(x)) inter += 1;
+  const union = new Set([...sa, ...sb]).size;
+  return union ? inter / union : 0;
+}
+
+function budgetSlotCategory(key: string): "total" | "spent" | "remaining" | "pending" | "other" {
+  const k = canonicalSlotKey(key);
+  if (k === "slot:budget") return "total";
+  if (k === "slot:budget_spent") return "spent";
+  if (k === "slot:budget_remaining") return "remaining";
+  if (k === "slot:budget_pending") return "pending";
+  return "other";
+}
+
+function charNgrams(text: string, n = 2): string[] {
+  const x = normalizeConceptMergeText(text).replace(/\s+/g, "");
+  if (!x) return [];
+  if (x.length <= n) return [x];
+  const grams: string[] = [];
+  for (let i = 0; i <= x.length - n; i += 1) grams.push(x.slice(i, i + n));
+  return uniq(grams, 64);
+}
+
+function hasNegationSignal(text: string): boolean {
+  return /(不|不能|不要|避免|别|禁止|must not|cannot|don't|avoid|no\b|without)/i.test(cleanText(text, 220));
+}
+
+function mergeFamilyCompatible(a: ConceptItem, b: ConceptItem): boolean {
+  if (a.family === b.family) {
+    if (a.family === "budget") {
+      return budgetSlotCategory(a.semanticKey) === budgetSlotCategory(b.semanticKey);
+    }
+    return true;
+  }
+  const pair = new Set([a.family, b.family]);
+  if (pair.has("limiting_factor") && pair.has("generic_constraint")) return true;
+  return false;
+}
+
+function limitingKindFromSemanticKey(key: string): string {
+  const k = canonicalSlotKey(key);
+  const m = k.match(/^slot:constraint:limiting:([^:]+):/);
+  return m?.[1] || "";
+}
+
+function conceptSimilarity(a: ConceptItem, b: ConceptItem): number {
+  const rawA = cleanText(`${a.title} ${a.description}`, 220);
+  const rawB = cleanText(`${b.title} ${b.description}`, 220);
+  const ta = normalizeConceptMergeText(rawA);
+  const tb = normalizeConceptMergeText(rawB);
+  if (!ta || !tb) return 0;
+  if ((a.family === "limiting_factor" || b.family === "limiting_factor") && hasNegationSignal(rawA) !== hasNegationSignal(rawB)) {
+    return 0;
+  }
+  if (ta === tb) return 1;
+  const include = ta.includes(tb) || tb.includes(ta);
+  const tokenJ = jaccardTokens(mergeTokens(ta), mergeTokens(tb));
+  const gramJ = jaccardTokens(charNgrams(ta), charNgrams(tb));
+  const j = Math.max(tokenJ, gramJ * 0.92);
+  const sameLimitingKind =
+    a.family === "limiting_factor" &&
+    b.family === "limiting_factor" &&
+    limitingKindFromSemanticKey(a.semanticKey) &&
+    limitingKindFromSemanticKey(a.semanticKey) === limitingKindFromSemanticKey(b.semanticKey);
+  if (sameLimitingKind && j >= 0.36) return Math.max(j, 0.82);
+  if (include && Math.min(ta.length, tb.length) >= 6) return Math.max(j, 0.86);
+  return j;
+}
+
+function mergeConceptItems(primary: ConceptItem, secondary: ConceptItem): ConceptItem {
+  const primaryIsBetter = primary.score >= secondary.score;
+  const keep = primaryIsBetter ? primary : secondary;
+  const add = primaryIsBetter ? secondary : primary;
+  const mergedNodeIds = uniq([...(keep.nodeIds || []), ...(add.nodeIds || [])], 180);
+  const mergedPrimary = mergedNodeIds.includes(keep.primaryNodeId || "") ? keep.primaryNodeId : mergedNodeIds[0];
+  return {
+    ...keep,
+    title: keep.title || add.title,
+    description: keep.description || add.description,
+    score: Math.max(keep.score, add.score),
+    nodeIds: mergedNodeIds,
+    primaryNodeId: mergedPrimary || undefined,
+    evidenceTerms: uniq([...(keep.evidenceTerms || []), ...(add.evidenceTerms || [])], 28),
+    sourceMsgIds: uniq([...(keep.sourceMsgIds || []), ...(add.sourceMsgIds || [])], 96),
+    motifIds: uniq([...(keep.motifIds || []), ...(add.motifIds || [])], 64),
+    locked: !!keep.locked || !!add.locked,
+    paused: !!keep.paused && !!add.paused,
+  };
+}
+
+function mergeSimilarConcepts(input: ConceptItem[]): ConceptItem[] {
+  const ordered = input.slice().sort((a, b) => b.score - a.score || a.id.localeCompare(b.id));
+  const out: ConceptItem[] = [];
+  for (const cur of ordered) {
+    const idx = out.findIndex((x) => {
+      if (x.kind !== cur.kind) return false;
+      if (!mergeFamilyCompatible(x, cur)) return false;
+      const sim = conceptSimilarity(x, cur);
+      const sameLimitingKind =
+        x.family === "limiting_factor" &&
+        cur.family === "limiting_factor" &&
+        limitingKindFromSemanticKey(x.semanticKey) &&
+        limitingKindFromSemanticKey(x.semanticKey) === limitingKindFromSemanticKey(cur.semanticKey);
+      const threshold = sameLimitingKind
+        ? 0.4
+        : x.family === "limiting_factor" || cur.family === "limiting_factor"
+        ? 0.56
+        : 0.72;
+      return sim >= threshold;
+    });
+    if (idx < 0) {
+      out.push(cur);
+      continue;
+    }
+    out[idx] = mergeConceptItems(out[idx], cur);
+  }
+  return out;
 }
 
 function betterNode(a: ConceptNode, b: ConceptNode): ConceptNode {
@@ -412,14 +599,16 @@ export function deriveConceptsFromGraph(graph: CDG): ConceptItem[] {
     });
   }
 
-  concepts.sort(
+  const merged = mergeSimilarConcepts(concepts);
+
+  merged.sort(
     (a, b) =>
       rankKind(a.kind) - rankKind(b.kind) ||
       b.score - a.score ||
       a.title.localeCompare(b.title) ||
       a.id.localeCompare(b.id)
   );
-  return concepts.slice(0, 180);
+  return merged.slice(0, 180);
 }
 
 export function normalizeConceptsForGraph(input: any, graph: CDG): ConceptItem[] {
@@ -467,18 +656,18 @@ export function normalizeConceptsForGraph(input: any, graph: CDG): ConceptItem[]
       (mergedNodeIds[0] && nodesById.get(mergedNodeIds[0])) ||
       null;
     const family = semanticFamilyFromKey(semanticKey);
-    const inferredKind = primaryNode ? conceptKindForNode(primaryNode, family) : "other";
+    const inferredKind: ConceptKind = primaryNode ? conceptKindForNode(primaryNode, family) : "factual_assertion";
     const rawKind = cleanText((raw as any)?.kind, 20).toLowerCase();
     const kind: ConceptKind =
-      rawKind === "intent" ||
-      rawKind === "requirement" ||
-      rawKind === "preference" ||
-      rawKind === "risk" ||
-      rawKind === "belief" ||
-      rawKind === "fact" ||
-      rawKind === "question"
-        ? (rawKind as ConceptKind)
-        : inferredKind;
+      rawKind === "belief"
+        ? "belief"
+        : rawKind === "preference"
+          ? "preference"
+          : rawKind === "constraint" || rawKind === "intent" || rawKind === "requirement" || rawKind === "risk"
+            ? "constraint"
+            : rawKind === "factual_assertion" || rawKind === "fact" || rawKind === "question" || rawKind === "other"
+              ? "factual_assertion"
+              : inferredKind;
 
     out.push({
       id: conceptId,

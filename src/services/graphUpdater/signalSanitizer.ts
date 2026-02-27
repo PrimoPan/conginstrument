@@ -9,7 +9,7 @@ const COUNTRY_OR_REGION_RE =
 const SUB_LOCATION_HINT_RE =
   /(球场|体育场|会展中心|会议中心|大学|学院|博物馆|公园|海滩|车站|机场|码头|教堂|广场|大道|街区|酒店|剧院|stadium|arena|museum|park|beach|district|quarter|square|centre|center|ccib|fira)/i;
 const NON_CITY_NOISE_RE =
-  /(人民币|预算|经费|花费|费用|准备|打算|计划|安排|行程|其中|其余|其他时候|顺带|顺便|顺路|顺道|之前|之后|此前|此后|这天|那天|总共|一共|总计|整体|全程|参会|开会|会议|发表|演讲|汇报|论文|报告|安全一点|安静一点|方便一点|便宜一点|舒适一点|热闹一点|语地区)/i;
+  /(人民币|预算|经费|花费|费用|准备|打算|计划|安排|行程|其中|其余|其他时候|顺带|顺便|顺路|顺道|之前|之后|此前|此后|这天|那天|总共|一共|总计|整体|全程|参会|开会|会议|发表|演讲|汇报|论文|报告|安全一点|安静一点|方便一点|便宜一点|舒适一点|热闹一点|语地区|比较好|更好|好一点|更合适|比较合适)/i;
 const ABSTRACT_PLACE_RE =
   /(西班牙语地区|英语地区|法语地区|德语地区|语地区)|(安全|安静|方便|便宜|舒适|舒服|热闹|清净|治安|人少|不拥挤|离.*近|靠近|附近).{0,10}(地方|位置|区域)?/i;
 
@@ -71,6 +71,9 @@ function isNoiseCityLike(name: string): boolean {
   const s = normalizeDestination(name || "");
   if (!s) return true;
   if (NON_CITY_NOISE_RE.test(s)) return true;
+  if (/^(?:比(?:较)?|更|比较|尽量|优先|最好|稍微)?\s*(?:好|更好|好点|好一点|好些|合适|更合适|比较合适)(?:的地方|一点)?(?:吧|呢|呀|啊|吗)?$/i.test(s)) {
+    return true;
+  }
   if (/^(更|比较|尽量|优先|最好|稍微)?\s*(安全|安静|方便|便宜|舒适|舒服|热闹|清净|治安|人少|近一点|远一点)$/i.test(s)) return true;
   if (/^(安全|安静|方便|便宜|舒适|舒服|热闹|清净|治安|人少)/i.test(s) && s.length <= 10) return true;
   if (/^[0-9]+$/.test(s)) return true;

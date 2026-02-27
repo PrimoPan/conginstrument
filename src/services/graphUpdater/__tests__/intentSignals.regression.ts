@@ -337,6 +337,29 @@ const cases: Case[] = [
     },
   },
   {
+    name: "comparative phrase like '比较好' should not be parsed as destination",
+    run: () => {
+      const merged = extractIntentSignalsWithRecency(
+        "我4月10日到4月12日在米兰，4月13日离开米兰",
+        "我4月12日晚想看AC米兰和都灵队比赛，票价多少线下体验比较好？治安安全吗？"
+      );
+      assert.deepEqual(merged.destinations || [], ["米兰"]);
+      assert.equal((merged.destinations || []).includes("比较好"), false);
+      assert.equal((merged.destinations || []).includes("比比较好"), false);
+      assert.equal(merged.destination, "米兰");
+    },
+  },
+  {
+    name: "comparative destination noise should not trigger duration-destination conflict",
+    run: () => {
+      const conflicts = analyzeConstraintConflicts({
+        totalDays: 3,
+        destinations: ["米兰", "比较好"],
+      });
+      assert.equal(conflicts.some((x) => x.key === "duration_destination_density"), false);
+    },
+  },
+  {
     name: "history budget delta should not be re-applied when merged with function-slot budget",
     run: () => {
       const textSignals = extractIntentSignalsWithRecency(

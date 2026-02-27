@@ -236,31 +236,6 @@ function motifPriorityQuestion(params: {
     };
   }
 
-  const conflictEdges = (params.graph.edges || [])
-    .filter((e) => e.type === "conflicts_with")
-    .slice()
-    .sort((a, b) => (Number(b.confidence) || 0) - (Number(a.confidence) || 0) || a.id.localeCompare(b.id));
-  if (conflictEdges.length) {
-    const top = conflictEdges[0];
-    const nodeById = new Map((params.graph.nodes || []).map((n) => [n.id, n]));
-    const left = cleanText(nodeById.get(top.from)?.statement || "", 72);
-    const right = cleanText(nodeById.get(top.to)?.statement || "", 72);
-    const pairHint =
-      left && right
-        ? t(params.locale, `冲突信念：A=「${left}」 vs B=「${right}」`, `Conflicting beliefs: A="${left}" vs B="${right}"`)
-        : "";
-    return {
-      motifs,
-      contexts,
-      question: t(
-        params.locale,
-        `检测到两条冲突信念。继续规划前请先确认保留哪一侧。${pairHint}`.trim(),
-        `Two conflicting beliefs were detected. Before continuing, please confirm which side to keep. ${pairHint}`.trim()
-      ),
-      rationale: `concept_conflict:${top.id}`,
-    };
-  }
-
   const uncertain = motifs
     .filter((m) => m.status === "uncertain")
     .slice()

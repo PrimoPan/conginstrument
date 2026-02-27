@@ -32,6 +32,32 @@ export type CognitiveModel = {
   contexts: ContextItem[];
 };
 
+function isConflictNode(graphNode: any): boolean {
+  const key = String(graphNode?.key || "").toLowerCase();
+  const statement = String(graphNode?.statement || "").toLowerCase();
+  return key.startsWith("slot:conflict:") || /^冲突提示[:：]/.test(statement) || /^conflict warning[:：]/.test(statement);
+}
+
+function syncGraphConflictsWithMotifs(graph: CDG, motifs: ConceptMotif[]): CDG {
+  const hasUnresolvedMotifConflict = (motifs || []).some((m) => m.status === "deprecated" && !m.resolved);
+  if (hasUnresolvedMotifConflict) return graph;
+
+  const removable = new Set(
+    (graph.nodes || [])
+      .filter((n) => isConflictNode(n) && !n.locked)
+      .map((n) => n.id)
+  );
+  if (!removable.size) return graph;
+
+  const nodes = (graph.nodes || []).filter((n) => !removable.has(n.id));
+  const edges = (graph.edges || []).filter((e) => !removable.has(e.from) && !removable.has(e.to));
+  return {
+    ...graph,
+    nodes,
+    edges,
+  };
+}
+
 export function buildCognitiveModel(params: {
   graph: CDG;
   prevConcepts?: any;
@@ -41,21 +67,47 @@ export function buildCognitiveModel(params: {
   baseContexts?: any;
   locale?: AppLocale;
 }): CognitiveModel {
-  const nextConceptsDraft = reconcileConceptsWithGraph({
+  const nextConceptsDraftPass1 = reconcileConceptsWithGraph({
     graph: params.graph,
     baseConcepts: params.baseConcepts,
   });
-  const graphWithConceptState = applyConceptStateToGraph({
+  const graphWithConceptStatePass1 = applyConceptStateToGraph({
     graph: params.graph,
     prevConcepts: params.prevConcepts,
-    nextConcepts: nextConceptsDraft,
+    nextConcepts: nextConceptsDraftPass1,
   });
-  const motifs = reconcileMotifsWithGraph({
-    graph: graphWithConceptState,
-    concepts: nextConceptsDraft,
+  const motifsPass1 = reconcileMotifsWithGraph({
+    graph: graphWithConceptStatePass1,
+    concepts: nextConceptsDraftPass1,
     baseMotifs: params.baseMotifs,
     locale: params.locale,
   });
+
+  const graphSynced = syncGraphConflictsWithMotifs(graphWithConceptStatePass1, motifsPass1);
+  const graphChanged = graphSynced !== graphWithConceptStatePass1;
+
+  const nextConceptsDraft = graphChanged
+    ? reconcileConceptsWithGraph({
+        graph: graphSynced,
+        baseConcepts: params.baseConcepts,
+      })
+    : nextConceptsDraftPass1;
+  const graphWithConceptState = graphChanged
+    ? applyConceptStateToGraph({
+        graph: graphSynced,
+        prevConcepts: params.prevConcepts,
+        nextConcepts: nextConceptsDraft,
+      })
+    : graphWithConceptStatePass1;
+  const motifs = graphChanged
+    ? reconcileMotifsWithGraph({
+        graph: graphWithConceptState,
+        concepts: nextConceptsDraft,
+        baseMotifs: params.baseMotifs,
+        locale: params.locale,
+      })
+    : motifsPass1;
+
   const motifLinks = reconcileMotifLinks({
     motifs,
     baseLinks: params.baseMotifLinks,

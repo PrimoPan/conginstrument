@@ -35,7 +35,7 @@ export type ConflictAnalyzeInput = {
 const LUXURY_LODGING_RE = /五星|豪华|高档|奢华|五星级|luxury|five\s*star/i;
 const HIGH_INTENSITY_SCENIC_RE = /徒步|爬山|登山|高强度|长距离|暴走|越野|探险|hiking|trekking/i;
 const DESTINATION_NOISE_RE =
-  /(一个人|独自|自己|我们|我和|父母|家人|全家|去|前往|抵达|飞到|旅游|旅行|游玩|玩|现场观看|看球|比赛|球赛|预算|人民币|安全一点|地方吧|当地|本地|本市|本城|这边|那边|只含当地|仅含当地)/i;
+  /(一个人|独自|自己|我们|我和|父母|家人|全家|去|前往|抵达|飞到|旅游|旅行|游玩|玩|现场观看|看球|比赛|球赛|预算|人民币|安全一点|地方吧|当地|本地|本市|本城|这边|那边|只含当地|仅含当地|比较好|更好|好一点|更合适|比较合适)/i;
 
 function clamp01(x: any, fallback = 0.72) {
   const n = Number(x);
