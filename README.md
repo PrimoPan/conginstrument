@@ -132,7 +132,8 @@ Base URL 示例：`http://localhost:3001`
 | `PUT` | `/api/conversations/:id/graph` | 是 | 保存前端编辑后的整图快照（可选触发“基于新图”的建议） |
 | `PUT` | `/api/conversations/:id/concepts` | 是 | 保存中间 Concept 模块状态（锁定/暂停/编辑） |
 | `GET` | `/api/conversations/:id/turns?limit=30` | 是 | 历史轮次 |
-| `GET` | `/api/conversations/:id/travel-plan/export.pdf` | 是 | 导出旅行计划 PDF（按会话 locale 输出中/英文） |
+| `GET` | `/api/conversations/:id/travel-plan/export` | 是 | 导出旅行计划 PDF（推荐路径，按会话 locale 输出中/英文） |
+| `GET` | `/api/conversations/:id/travel-plan/export.pdf` | 是 | 兼容路径（等价于 `/export`） |
 | `POST` | `/api/conversations/:id/turn` | 是 | 非流式单轮 |
 | `POST` | `/api/conversations/:id/turn/stream` | 是 | SSE 流式单轮 |
 

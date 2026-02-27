@@ -1454,6 +1454,7 @@ export function normalizeDestination(raw: string): string {
 export function isLikelyDestinationCandidate(x: string): boolean {
   const s = normalizeDestination(x);
   if (!s) return false;
+  if (/(^|.*)(只含当地|仅含当地|当地|本地|本市|本城|这边|那边)(.*|$)/i.test(s)) return false;
   if (s.length < 2 || s.length > 16) return false;
   if (/^的/.test(s)) return false;
   if (NON_PLACE_TOKEN_RE.test(s)) return false;

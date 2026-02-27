@@ -317,6 +317,16 @@ const cases: Case[] = [
     },
   },
   {
+    name: "locality phrase '只含当地' should not be counted as a destination",
+    run: () => {
+      const conflicts = analyzeConstraintConflicts({
+        totalDays: 3,
+        destinations: ["米兰", "只含当地"],
+      });
+      assert.equal(conflicts.some((x) => x.key === "duration_destination_density"), false);
+    },
+  },
+  {
     name: "safety wording should not be parsed as destination",
     run: () => {
       const s = extractIntentSignals(

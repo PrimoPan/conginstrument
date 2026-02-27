@@ -552,7 +552,7 @@ convRouter.get("/:id/turns", async (req: AuthedRequest, res) => {
 });
 
 // 导出当前旅行计划 PDF（含中文自然语言与按天行程）
-convRouter.get("/:id/travel-plan/export.pdf", async (req: AuthedRequest, res) => {
+async function handleTravelPlanPdfExport(req: AuthedRequest, res: any) {
   try {
     const userId = req.userId!;
     const id = req.params.id;
@@ -616,7 +616,12 @@ convRouter.get("/:id/travel-plan/export.pdf", async (req: AuthedRequest, res) =>
         "travel plan pdf export failed",
     });
   }
-});
+}
+
+// Keep both paths for compatibility. Prefer `/export` on frontend to avoid
+// static-server extension interception on some nginx setups.
+convRouter.get("/:id/travel-plan/export", handleTravelPlanPdfExport);
+convRouter.get("/:id/travel-plan/export.pdf", handleTravelPlanPdfExport);
 
 // ==========================
 // Turn - Non-stream (CLI/debug)
