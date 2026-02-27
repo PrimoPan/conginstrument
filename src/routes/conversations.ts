@@ -622,6 +622,8 @@ async function handleTravelPlanPdfExport(req: AuthedRequest, res: any) {
 // static-server extension interception on some nginx setups.
 convRouter.get("/:id/travel-plan/export", handleTravelPlanPdfExport);
 convRouter.get("/:id/travel-plan/export.pdf", handleTravelPlanPdfExport);
+convRouter.post("/:id/travel-plan/export", handleTravelPlanPdfExport);
+convRouter.post("/:id/travel-plan/export.pdf", handleTravelPlanPdfExport);
 
 // ==========================
 // Turn - Non-stream (CLI/debug)
