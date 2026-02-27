@@ -96,6 +96,39 @@ function parseMoney(raw: string): number | undefined {
   return undefined;
 }
 
+const FX_SNAPSHOT_RATE_TO_CNY: Record<string, number> = {
+  CNY: 1,
+  RMB: 1,
+  EUR: 7.9,
+  USD: 7.2,
+  GBP: 9.1,
+  HKD: 0.92,
+  JPY: 0.05,
+  KRW: 0.0054,
+  SGD: 5.35,
+};
+
+function normalizeCurrency(raw: string): string {
+  const s = String(raw || "").trim().toLowerCase();
+  if (!s) return "";
+  if (s === "€" || s === "eur" || s === "欧元") return "EUR";
+  if (s === "$" || s === "usd" || s === "美元") return "USD";
+  if (s === "£" || s === "gbp" || s === "英镑") return "GBP";
+  if (s === "hkd" || s === "港币" || s === "港元") return "HKD";
+  if (s === "jpy" || s === "yen" || s === "円" || s === "日元") return "JPY";
+  if (s === "krw" || s === "韩元") return "KRW";
+  if (s === "sgd" || s === "新币" || s === "新加坡元") return "SGD";
+  if (s === "人民币" || s === "元" || s === "块" || s === "cny" || s === "rmb") return "CNY";
+  return "";
+}
+
+type ParsedBudgetAmount = {
+  amountCny?: number;
+  amountOriginal?: number;
+  currency?: string;
+  hasExplicitCurrency: boolean;
+};
+
 function parseDays(raw: string): number | undefined {
   const n = Number(raw);
   if (Number.isFinite(n) && n > 0 && n <= 365) return Math.round(n);
@@ -125,13 +158,33 @@ function statementBodyByPrefixes(statement: string, prefixes: string[]): string 
   return "";
 }
 
-function parseAmountFromNodeStatement(node: ConceptNode | undefined, prefixes: string[]): number | undefined {
-  if (!node) return undefined;
+function parseAmountFromNodeStatement(node: ConceptNode | undefined, prefixes: string[]): ParsedBudgetAmount {
+  if (!node) return { hasExplicitCurrency: false };
   const body = statementBodyByPrefixes(String(node.statement || ""), prefixes);
-  if (!body) return undefined;
-  const m = body.match(/([0-9]{1,12}(?:\\.[0-9]{1,2})?)/);
-  if (!m?.[1]) return undefined;
-  return parseMoney(m[1]);
+  if (!body) return { hasExplicitCurrency: false };
+
+  const withCurrency = body.match(
+    /([0-9]{1,12}(?:\.[0-9]{1,2})?)\s*(欧元|eur|€|美元|usd|\$|英镑|gbp|£|港币|港元|hkd|日元|jpy|yen|円|韩元|krw|新币|新加坡元|sgd|人民币|cny|rmb|元|块)/i
+  );
+  if (withCurrency?.[1] && withCurrency?.[2]) {
+    const amountOriginal = parseMoney(withCurrency[1]);
+    const currency = normalizeCurrency(withCurrency[2]);
+    const rate = currency ? FX_SNAPSHOT_RATE_TO_CNY[currency] : undefined;
+    if (amountOriginal != null && Number.isFinite(Number(rate)) && Number(rate) > 0) {
+      return {
+        amountCny: Math.round(amountOriginal * Number(rate)),
+        amountOriginal,
+        currency,
+        hasExplicitCurrency: currency !== "CNY",
+      };
+    }
+  }
+
+  const m = body.match(/([0-9]{1,12}(?:\.[0-9]{1,2})?)/);
+  if (!m?.[1]) return { hasExplicitCurrency: false };
+  const amountCny = parseMoney(m[1]);
+  if (amountCny == null) return { hasExplicitCurrency: false };
+  return { amountCny, hasExplicitCurrency: false };
 }
 
 function parseDaysFromNodeStatement(node: ConceptNode | undefined, prefixes: string[]): number | undefined {
@@ -572,10 +625,25 @@ export function buildTravelPlanState(params: {
   const remainNode = nodeByKey(graph, "slot:budget_remaining");
   const pendingNode = nodeByKey(graph, "slot:budget_pending");
 
-  const totalBudget = parseAmountFromNodeStatement(budgetNode, ["预算上限", "预算", "Budget cap", "Budget"]);
-  const spentBudget = parseAmountFromNodeStatement(spentNode, ["已花预算", "Spent budget"]);
-  let remainingBudget = parseAmountFromNodeStatement(remainNode, ["剩余预算", "可用预算", "Remaining budget", "Available budget"]);
-  const pendingBudget = parseAmountFromNodeStatement(pendingNode, ["待确认预算", "待确认支出", "Pending budget", "Pending spending"]);
+  const totalBudgetParsed = parseAmountFromNodeStatement(budgetNode, ["预算上限", "预算", "Budget cap", "Budget"]);
+  const spentBudgetParsed = parseAmountFromNodeStatement(spentNode, ["已花预算", "Spent budget"]);
+  const remainingBudgetParsed = parseAmountFromNodeStatement(remainNode, [
+    "剩余预算",
+    "可用预算",
+    "Remaining budget",
+    "Available budget",
+  ]);
+  const pendingBudgetParsed = parseAmountFromNodeStatement(pendingNode, [
+    "待确认预算",
+    "待确认支出",
+    "Pending budget",
+    "Pending spending",
+  ]);
+
+  const totalBudget = totalBudgetParsed.amountCny;
+  const spentBudget = spentBudgetParsed.amountCny;
+  let remainingBudget = remainingBudgetParsed.amountCny;
+  const pendingBudget = pendingBudgetParsed.amountCny;
   if (remainingBudget == null && totalBudget != null && spentBudget != null) {
     remainingBudget = Math.max(0, totalBudget - spentBudget);
   }
@@ -634,14 +702,37 @@ export function buildTravelPlanState(params: {
   const dateAnchor = parseDateRangeFromTurns(turns);
   dayPlans = addDateLabelsToDayPlans(dayPlans, dateAnchor);
 
+  const hasGraphCurrencyOverride =
+    totalBudgetParsed.hasExplicitCurrency ||
+    spentBudgetParsed.hasExplicitCurrency ||
+    remainingBudgetParsed.hasExplicitCurrency ||
+    pendingBudgetParsed.hasExplicitCurrency;
+
+  let effectiveTotal = ledgerTotal ?? totalBudget;
+  let effectiveSpent = ledgerSpent ?? spentBudget;
+  let effectiveRemaining = ledgerRemaining ?? remainingBudget;
+  let effectivePending = ledgerPending ?? pendingBudget;
+
+  // Manual graph edits with explicit foreign currency (e.g., "60 EUR") should override
+  // stale turn-derived ledger values for this export/state snapshot.
+  if (hasGraphCurrencyOverride) {
+    if (totalBudget != null) effectiveTotal = totalBudget;
+    if (spentBudget != null) effectiveSpent = spentBudget;
+    if (pendingBudget != null) effectivePending = pendingBudget;
+    if (remainingBudget != null) effectiveRemaining = remainingBudget;
+    if (effectiveTotal != null && effectiveSpent != null) {
+      effectiveRemaining = Math.max(0, effectiveTotal - effectiveSpent);
+    }
+  }
+
   const summary = buildSummary({
     locale,
     goalStatement,
     destinations,
     totalDays,
-    totalBudget: ledgerTotal ?? totalBudget,
-    spentBudget: ledgerSpent ?? spentBudget,
-    remainingBudget: ledgerRemaining ?? remainingBudget,
+    totalBudget: effectiveTotal,
+    spentBudget: effectiveSpent,
+    remainingBudget: effectiveRemaining,
     constraints: normalizedConstraints,
   });
 
@@ -650,10 +741,10 @@ export function buildTravelPlanState(params: {
     : params.previous?.source?.lastTurnAt;
 
   const effectiveBudget = {
-    totalCny: ledgerTotal ?? totalBudget,
-    spentCny: ledgerSpent ?? spentBudget,
-    remainingCny: ledgerRemaining ?? remainingBudget,
-    pendingCny: ledgerPending ?? pendingBudget,
+    totalCny: effectiveTotal,
+    spentCny: effectiveSpent,
+    remainingCny: effectiveRemaining,
+    pendingCny: effectivePending,
   };
   const evidenceAppendix: Array<{ title: string; content: string; source: "dialogue" | "budget" | "graph" }> = [];
   for (const ev of budgetLedger.events.slice(-10)) {

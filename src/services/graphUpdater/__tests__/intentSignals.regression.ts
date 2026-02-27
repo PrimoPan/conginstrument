@@ -556,6 +556,78 @@ const cases: Case[] = [
     },
   },
   {
+    name: "travel plan state should honor graph foreign-currency spent override and recompute remaining",
+    run: () => {
+      const state = buildTravelPlanState({
+        graph: {
+          id: "g4",
+          version: 1,
+          nodes: [
+            {
+              id: "n_goal",
+              type: "goal",
+              layer: "intent",
+              statement: "意图：去米兰旅游3天",
+              status: "confirmed",
+              confidence: 0.86,
+              importance: 0.84,
+              key: "slot:goal",
+            } as any,
+            {
+              id: "n_budget",
+              type: "constraint",
+              layer: "requirement",
+              statement: "预算上限: 10000元",
+              status: "confirmed",
+              confidence: 0.9,
+              importance: 0.78,
+              key: "slot:budget",
+            } as any,
+            {
+              id: "n_spent_manual",
+              type: "constraint",
+              layer: "requirement",
+              statement: "已花预算: 60欧元",
+              status: "confirmed",
+              confidence: 0.9,
+              importance: 0.78,
+              key: "slot:budget_spent",
+            } as any,
+            {
+              id: "n_remaining_stale",
+              type: "constraint",
+              layer: "requirement",
+              statement: "剩余预算: 9940元",
+              status: "confirmed",
+              confidence: 0.9,
+              importance: 0.78,
+              key: "slot:budget_remaining",
+            } as any,
+          ],
+          edges: [],
+        },
+        turns: [
+          {
+            createdAt: "2026-02-26T10:00:00.000Z",
+            userText: "预算10000元",
+            assistantText: "收到",
+          },
+          {
+            createdAt: "2026-02-26T10:05:00.000Z",
+            userText: "我花60元买了球票",
+            assistantText: "收到",
+          },
+        ],
+        previous: null,
+      });
+
+      // 60 EUR * 7.9 = 474 CNY, remaining should be 10000 - 474 = 9526.
+      assert.equal(state.budget?.totalCny, 10000);
+      assert.equal(state.budget?.spentCny, 474);
+      assert.equal(state.budget?.remainingCny, 9526);
+    },
+  },
+  {
     name: "near-duplicate safety limiting factors should collapse to one concept",
     run: () => {
       const merged = extractIntentSignalsWithRecency(
