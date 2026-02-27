@@ -290,7 +290,9 @@ function buildGoalNode(params: {
     ...params.signals,
     durationDays: params.totalDays || params.signals.durationDays,
   };
-  const rawIntent = buildTravelIntentStatement(signalsForIntent, params.userText) || cleanStatement(params.userText, 88);
+  const rawIntent =
+    buildTravelIntentStatement(signalsForIntent, params.userText, params.locale) ||
+    cleanStatement(params.userText, 88);
   const intent = compactIntentDuration(rawIntent, params.totalDays);
   const successCriteria: string[] = [];
   if (params.signals.destinations?.length) {
@@ -1107,6 +1109,7 @@ export function buildSlotStateMachine(params: {
     totalDays: durationState.totalDays,
     destinations,
     limitingFactors: conflictInputs,
+    locale: params.locale,
   });
 
   const relatedSlotMap: Record<

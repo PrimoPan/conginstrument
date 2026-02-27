@@ -1,5 +1,6 @@
 import type { CDG, EdgeType } from "../../core/graph.js";
 import type { ConceptItem } from "../concepts.js";
+import { isEnglishLocale, type AppLocale } from "../../i18n/locale.js";
 
 export type ConceptMotifType = "pair" | "triad";
 export type MotifLifecycleStatus = "active" | "uncertain" | "deprecated" | "disabled" | "cancelled";
@@ -80,15 +81,19 @@ function stableId(input: string): string {
   return `m_${safe.slice(0, 120) || "motif"}`;
 }
 
-function relationLabel(type: EdgeType): string {
-  if (type === "constraint") return "限制";
-  if (type === "enable") return "支持";
-  if (type === "determine") return "决定";
-  if (type === "conflicts_with") return "冲突";
+function t(locale: AppLocale | undefined, zh: string, en: string): string {
+  return isEnglishLocale(locale) ? en : zh;
+}
+
+function relationLabel(type: EdgeType, locale?: AppLocale): string {
+  if (type === "constraint") return t(locale, "限制", "constraints");
+  if (type === "enable") return t(locale, "支持", "enables");
+  if (type === "determine") return t(locale, "决定", "determines");
+  if (type === "conflicts_with") return t(locale, "冲突", "conflicts with");
   return type;
 }
 
-function relationTheoryHint(type: EdgeType, motifType: ConceptMotifType): string {
+function relationTheoryHint(type: EdgeType, motifType: ConceptMotifType, locale?: AppLocale): string {
   if (type === "enable") return motifType === "triad" ? "Enable · Mediated causation" : "Enable · Direct causation";
   if (type === "constraint") return "Constraint · Confounding";
   if (type === "determine") return "Determine · Intervention";
@@ -105,21 +110,21 @@ function motifDependencyClass(m: Pick<ConceptMotif, "relation" | "dependencyClas
   return normalizeDependencyClass(m.dependencyClass, m.relation);
 }
 
-function familyLabel(family: ConceptItem["family"]): string {
-  if (family === "goal") return "目标";
-  if (family === "destination") return "目的地";
-  if (family === "duration_total") return "总时长";
-  if (family === "duration_city") return "城市时长";
-  if (family === "budget") return "预算";
-  if (family === "people") return "人数";
-  if (family === "lodging") return "住宿";
-  if (family === "meeting_critical") return "关键日程";
-  if (family === "limiting_factor") return "限制因素";
-  if (family === "scenic_preference") return "景点偏好";
-  if (family === "activity_preference") return "活动偏好";
-  if (family === "generic_constraint") return "通用约束";
-  if (family === "sub_location") return "子地点";
-  return "概念";
+function familyLabel(family: ConceptItem["family"], locale?: AppLocale): string {
+  if (family === "goal") return t(locale, "目标", "Goal");
+  if (family === "destination") return t(locale, "目的地", "Destination");
+  if (family === "duration_total") return t(locale, "总时长", "Total duration");
+  if (family === "duration_city") return t(locale, "城市时长", "City duration");
+  if (family === "budget") return t(locale, "预算", "Budget");
+  if (family === "people") return t(locale, "人数", "Party size");
+  if (family === "lodging") return t(locale, "住宿", "Lodging");
+  if (family === "meeting_critical") return t(locale, "关键日程", "Critical day");
+  if (family === "limiting_factor") return t(locale, "限制因素", "Limiting factor");
+  if (family === "scenic_preference") return t(locale, "景点偏好", "Scenic preference");
+  if (family === "activity_preference") return t(locale, "活动偏好", "Activity preference");
+  if (family === "generic_constraint") return t(locale, "通用约束", "General constraint");
+  if (family === "sub_location") return t(locale, "子地点", "Sub-location");
+  return t(locale, "概念", "Concept");
 }
 
 function conceptScore(c: ConceptItem): number {
@@ -234,7 +239,11 @@ function causalFormula(m: ConceptMotif, conceptById: Map<string, ConceptItem>): 
   return `${a} x ${target}`;
 }
 
-function withCausalSemantics(m: ConceptMotif, conceptById: Map<string, ConceptItem>): ConceptMotif {
+function withCausalSemantics(
+  m: ConceptMotif,
+  conceptById: Map<string, ConceptItem>,
+  locale?: AppLocale
+): ConceptMotif {
   const dep = motifDependencyClass(m);
   const op = inferCausalOperator(m);
   return {
@@ -244,7 +253,7 @@ function withCausalSemantics(m: ConceptMotif, conceptById: Map<string, ConceptIt
     causalFormula: causalFormula(m, conceptById),
     description:
       cleanText(m.description, 220) ||
-      cleanText(`${relationTheoryHint(dep, m.motifType)} · ${causalFormula(m, conceptById)}`, 220),
+      cleanText(`${relationTheoryHint(dep, m.motifType, locale)} · ${causalFormula(m, conceptById)}`, 220),
   };
 }
 
@@ -274,7 +283,11 @@ function sourceTitlesFromConcepts(conceptIds: string[], anchorId: string, concep
     .filter(Boolean);
 }
 
-function aggregateToPatternMotifs(instances: ConceptMotif[], concepts: ConceptItem[]): ConceptMotif[] {
+function aggregateToPatternMotifs(
+  instances: ConceptMotif[],
+  concepts: ConceptItem[],
+  locale?: AppLocale
+): ConceptMotif[] {
   const byId = new Map((concepts || []).map((c) => [c.id, c]));
   const groups = new Map<
     string,
@@ -331,22 +344,32 @@ function aggregateToPatternMotifs(instances: ConceptMotif[], concepts: ConceptIt
           return conceptScore(cb || ({} as any)) - conceptScore(ca || ({} as any)) || a.localeCompare(b);
         })
         .find((id) => conceptIds.includes(id)) || conceptIds[conceptIds.length - 1];
-    const anchorTitle = cleanText(byId.get(anchorId)?.title, 56) || familyLabel(canonicalConceptFamily(byId.get(anchorId)) as any);
+    const anchorTitle =
+      cleanText(byId.get(anchorId)?.title, 56) ||
+      familyLabel(canonicalConceptFamily(byId.get(anchorId)) as any, locale);
     const sourceTitles = sourceTitlesFromConcepts(conceptIds, anchorId, byId);
-    const srcA = sourceTitles[0] || familyLabel(sourceFamiliesForPattern({ ...({} as any), conceptIds, anchorConceptId: anchorId } as any, byId)[0] as any);
+    const srcA =
+      sourceTitles[0] ||
+      familyLabel(
+        sourceFamiliesForPattern(
+          { ...({} as any), conceptIds, anchorConceptId: anchorId } as any,
+          byId
+        )[0] as any,
+        locale
+      );
     const srcB = sourceTitles[1] || "";
     const title =
       sourceTitles.length >= 2 || g.motifType === "triad"
-        ? `${srcA}${srcB ? ` + ${srcB}` : ""} ${relationLabel(g.relation)} ${anchorTitle}`
-        : `${srcA} ${relationLabel(g.relation)} ${anchorTitle}`;
+        ? `${srcA}${srcB ? ` + ${srcB}` : ""} ${relationLabel(g.relation, locale)} ${anchorTitle}`
+        : `${srcA} ${relationLabel(g.relation, locale)} ${anchorTitle}`;
 
     const sourceFamilyText = sourceFamiliesForPattern(
       { ...({} as any), conceptIds, anchorConceptId: anchorId } as any,
       byId
     )
-      .map((x) => familyLabel(x as any))
+      .map((x) => familyLabel(x as any, locale))
       .join(" + ");
-    const anchorFamilyText = familyLabel(canonicalConceptFamily(byId.get(anchorId)) as any);
+    const anchorFamilyText = familyLabel(canonicalConceptFamily(byId.get(anchorId)) as any, locale);
     const avg = g.confidenceSum / Math.max(1, g.count);
     const confidence = clamp01(g.confidenceMax * 0.68 + avg * 0.32 + relationTypeBoost(g.relation), 0.72);
     out.push({
@@ -358,10 +381,18 @@ function aggregateToPatternMotifs(instances: ConceptMotif[], concepts: ConceptIt
       anchorConceptId: anchorId,
       title: cleanText(title, 160),
       description: cleanText(
-        `模式：${sourceFamilyText || "概念"} ${relationLabel(g.relation)} ${anchorFamilyText}（${relationTheoryHint(
-          g.relation,
-          g.motifType
-        )}）`,
+        t(
+          locale,
+          `模式：${sourceFamilyText || "概念"} ${relationLabel(g.relation, locale)} ${anchorFamilyText}（${relationTheoryHint(
+            g.relation,
+            g.motifType,
+            locale
+          )}）`,
+          `Pattern: ${sourceFamilyText || "Concept"} ${relationLabel(
+            g.relation,
+            locale
+          )} ${anchorFamilyText} (${relationTheoryHint(g.relation, g.motifType, locale)})`
+        ),
         220
       ),
       confidence,
@@ -401,7 +432,7 @@ function buildNodeToConcepts(concepts: ConceptItem[]): Map<string, string[]> {
   return out;
 }
 
-function buildPairMotifs(graph: CDG, concepts: ConceptItem[]): ConceptMotif[] {
+function buildPairMotifs(graph: CDG, concepts: ConceptItem[], locale?: AppLocale): ConceptMotif[] {
   const byId = new Map((concepts || []).map((c) => [c.id, c]));
   const nodeToConcepts = buildNodeToConcepts(concepts);
   const bucket = new Map<string, PairAccum>();
@@ -461,10 +492,18 @@ function buildPairMotifs(graph: CDG, concepts: ConceptItem[]): ConceptMotif[] {
       relation: pair.relation,
       conceptIds: [pair.fromId, pair.toId],
       anchorConceptId: pair.toId,
-      title: `${fromConcept.title} ${relationLabel(pair.relation)} ${toConcept.title}`,
-      description: `${familyLabel(fromConcept.family)} ${relationLabel(pair.relation)} ${familyLabel(
-        toConcept.family
-      )}（${relationTheoryHint(pair.relation, "pair")}）`,
+      title: `${fromConcept.title} ${relationLabel(pair.relation, locale)} ${toConcept.title}`,
+      description: t(
+        locale,
+        `${familyLabel(fromConcept.family, locale)} ${relationLabel(pair.relation, locale)} ${familyLabel(
+          toConcept.family,
+          locale
+        )}（${relationTheoryHint(pair.relation, "pair", locale)}）`,
+        `${familyLabel(fromConcept.family, locale)} ${relationLabel(pair.relation, locale)} ${familyLabel(
+          toConcept.family,
+          locale
+        )} (${relationTheoryHint(pair.relation, "pair", locale)})`
+      ),
       confidence,
       supportEdgeIds: uniq(pair.supportEdgeIds, 32),
       supportNodeIds: uniq(pair.supportNodeIds, 32),
@@ -476,7 +515,7 @@ function buildPairMotifs(graph: CDG, concepts: ConceptItem[]): ConceptMotif[] {
   return out;
 }
 
-function buildTriadMotifs(pairMotifs: ConceptMotif[], concepts: ConceptItem[]): ConceptMotif[] {
+function buildTriadMotifs(pairMotifs: ConceptMotif[], concepts: ConceptItem[], locale?: AppLocale): ConceptMotif[] {
   const byId = new Map((concepts || []).map((c) => [c.id, c]));
   const incoming = new Map<string, ConceptMotif[]>();
   const now = new Date().toISOString();
@@ -535,10 +574,29 @@ function buildTriadMotifs(pairMotifs: ConceptMotif[], concepts: ConceptItem[]): 
         relation,
         conceptIds: [...orderedSourceIds, target.id],
         anchorConceptId: target.id,
-        title: `${sourceConcepts[0].title} + ${sourceConcepts[1].title} ${relationLabel(relation)} ${target.title}`,
-        description: `复合结构：${familyLabel(sourceConcepts[0].family)} + ${familyLabel(
-          sourceConcepts[1].family
-        )} ${relationLabel(relation)} ${familyLabel(target.family)}（${relationTheoryHint(relation, "triad")}）`,
+        title: `${sourceConcepts[0].title} + ${sourceConcepts[1].title} ${relationLabel(
+          relation,
+          locale
+        )} ${target.title}`,
+        description: t(
+          locale,
+          `复合结构：${familyLabel(sourceConcepts[0].family, locale)} + ${familyLabel(
+            sourceConcepts[1].family,
+            locale
+          )} ${relationLabel(relation, locale)} ${familyLabel(target.family, locale)}（${relationTheoryHint(
+            relation,
+            "triad",
+            locale
+          )}）`,
+          `Composite: ${familyLabel(sourceConcepts[0].family, locale)} + ${familyLabel(
+            sourceConcepts[1].family,
+            locale
+          )} ${relationLabel(relation, locale)} ${familyLabel(target.family, locale)} (${relationTheoryHint(
+            relation,
+            "triad",
+            locale
+          )})`
+        ),
         confidence,
         supportEdgeIds: uniq(top.flatMap((m) => m.supportEdgeIds), 36),
         supportNodeIds: uniq(top.flatMap((m) => m.supportNodeIds), 36),
@@ -718,6 +776,10 @@ function motifPriorityScore(m: ConceptMotif): number {
       : 0;
   const typeBoost = m.motifType === "pair" ? 0.015 : 0;
   return m.confidence + relationBoost + typeBoost;
+}
+
+function hasCjk(text: string): boolean {
+  return /[\u3400-\u9fff]/.test(String(text || ""));
 }
 
 function applyRedundancyDeprecation(motifs: ConceptMotif[], conceptById: Map<string, ConceptItem>): ConceptMotif[] {
@@ -963,11 +1025,16 @@ export function reconcileMotifsWithGraph(params: {
   graph: CDG;
   concepts: ConceptItem[];
   baseMotifs?: any;
+  locale?: AppLocale;
 }): ConceptMotif[] {
   const now = new Date().toISOString();
-  const pairInstances = buildPairMotifs(params.graph, params.concepts);
-  const triadInstances = buildTriadMotifs(pairInstances, params.concepts);
-  const derived = aggregateToPatternMotifs([...pairInstances, ...triadInstances], params.concepts);
+  const pairInstances = buildPairMotifs(params.graph, params.concepts, params.locale);
+  const triadInstances = buildTriadMotifs(pairInstances, params.concepts, params.locale);
+  const derived = aggregateToPatternMotifs(
+    [...pairInstances, ...triadInstances],
+    params.concepts,
+    params.locale
+  );
   const base = normalizeMotifs(params.baseMotifs);
   const baseById = new Map(base.map((m) => [m.id, m]));
   const conceptById = new Map((params.concepts || []).map((c) => [c.id, c]));
@@ -976,6 +1043,11 @@ export function reconcileMotifsWithGraph(params: {
     const prev = baseById.get(m.id);
     const inferred = inferBaseStatus(m, prev, conceptById);
     const status = inferred.status;
+    const preferDerivedTitle = isEnglishLocale(params.locale) && hasCjk(prev?.title || "");
+    const preferDerivedDescription =
+      isEnglishLocale(params.locale) &&
+      (hasCjk(prev?.description || "") ||
+        /模式：|复合结构：|限制|支持|决定|冲突/.test(cleanText(prev?.description, 160)));
     const changed =
       !!prev &&
       (Math.abs((prev.confidence || 0) - (m.confidence || 0)) >= 0.04 ||
@@ -983,8 +1055,9 @@ export function reconcileMotifsWithGraph(params: {
         isSupportChanged(prev, m));
     return {
       ...m,
-      title: prev?.title || m.title,
-      description: prev?.description || m.description,
+      title: prev?.title && !preferDerivedTitle ? prev.title : m.title,
+      description:
+        prev?.description && !preferDerivedDescription ? prev.description : m.description,
       status,
       statusReason: inferred.reason || prev?.statusReason,
       resolved: !!prev?.resolved && status !== "deprecated",
@@ -1020,7 +1093,7 @@ export function reconcileMotifsWithGraph(params: {
     }));
 
   const all = [...softPrunedCollapsed, ...cancelledFromHistory]
-    .map((m) => withCausalSemantics(m, conceptById))
+    .map((m) => withCausalSemantics(m, conceptById, params.locale))
     .map((m) => appendStatusHistory(m, baseById.get(m.id)));
   return all
     .slice()

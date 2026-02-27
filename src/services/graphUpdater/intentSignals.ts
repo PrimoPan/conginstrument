@@ -20,6 +20,7 @@ import {
   type GenericConstraintKind,
 } from "./constraintClassifier.js";
 import { cleanStatement, sentenceParts } from "./text.js";
+import { isEnglishLocale, type AppLocale } from "../../i18n/locale.js";
 
 type BudgetMatch = { value: number; evidence: string; index: number };
 type BudgetDeltaMatch = { delta: number; evidence: string; index: number };
@@ -1772,7 +1773,11 @@ export function isTravelIntentText(text: string, signals: IntentSignals) {
   return /旅游|旅行|出行|行程|景点|酒店|攻略|目的地|去|玩/i.test(String(text || ""));
 }
 
-export function buildTravelIntentStatement(signals: IntentSignals, userText: string): string | null {
+export function buildTravelIntentStatement(
+  signals: IntentSignals,
+  userText: string,
+  locale?: AppLocale
+): string | null {
   if (!isTravelIntentText(userText, signals)) return null;
 
   const subLocationNames = new Set(
@@ -1799,21 +1804,28 @@ export function buildTravelIntentStatement(signals: IntentSignals, userText: str
     !Array.from(subLocationNames).some((sub) => sub && sub.length >= 2 && normalizedPrimary.includes(sub))
       ? normalizedPrimary
       : "";
+  const en = isEnglishLocale(locale);
   const destinationPhrase =
     destinations.length >= 2
-      ? `${destinations.slice(0, 3).join("和")}`
+      ? en
+        ? destinations.slice(0, 3).join(" and ")
+        : destinations.slice(0, 3).join("和")
       : primaryDestination || destinations[0] || "";
 
   if (destinationPhrase && signals.durationDays) {
-    return `意图：去${destinationPhrase}旅游${signals.durationDays}天`;
+    return en
+      ? `Intent: travel to ${destinationPhrase} for ${signals.durationDays} days`
+      : `意图：去${destinationPhrase}旅游${signals.durationDays}天`;
   }
   if (destinationPhrase) {
-    return `意图：去${destinationPhrase}旅游`;
+    return en ? `Intent: travel to ${destinationPhrase}` : `意图：去${destinationPhrase}旅游`;
   }
   if (signals.durationDays) {
-    return `意图：制定${signals.durationDays}天旅行计划`;
+    return en
+      ? `Intent: create a ${signals.durationDays}-day travel plan`
+      : `意图：制定${signals.durationDays}天旅行计划`;
   }
-  return "意图：制定旅行计划";
+  return en ? "Intent: create a travel plan" : "意图：制定旅行计划";
 }
 
 export function hasHardDayReservationSignal(text: string): boolean {
@@ -1825,7 +1837,7 @@ export function hasHardDayReservationSignal(text: string): boolean {
   return hasDay && hasForce && hasAction;
 }
 
-export function normalizePreferenceStatement(raw: string) {
+export function normalizePreferenceStatement(raw: string, locale?: AppLocale) {
   const s = cleanStatement(raw, 160);
   if (!s) return null;
 
@@ -1836,12 +1848,19 @@ export function normalizePreferenceStatement(raw: string) {
   if (!PREFERENCE_MARKER_RE.test(s) && !HARD_REQUIRE_RE.test(s) && !HARD_CONSTRAINT_RE.test(s)) return null;
 
   const hard = HARD_REQUIRE_RE.test(s) || HARD_CONSTRAINT_RE.test(s);
+  const en = isEnglishLocale(locale);
   const statement =
     hasCulture && dislikeNature
-      ? "景点偏好：优先人文景观，减少纯自然景观"
+      ? en
+        ? "Scenic preference: prioritize cultural/human attractions and reduce pure nature-only spots"
+        : "景点偏好：优先人文景观，减少纯自然景观"
       : hasCulture
-        ? "景点偏好：人文景观优先"
-        : "景点偏好：尽量避免纯自然景观";
+        ? en
+          ? "Scenic preference: cultural attractions first"
+          : "景点偏好：人文景观优先"
+        : en
+          ? "Scenic preference: avoid pure nature-only attractions when possible"
+          : "景点偏好：尽量避免纯自然景观";
   return {
     statement,
     hard,
@@ -1849,7 +1868,7 @@ export function normalizePreferenceStatement(raw: string) {
   };
 }
 
-export function normalizeLodgingPreferenceStatement(raw: string) {
+export function normalizeLodgingPreferenceStatement(raw: string, locale?: AppLocale) {
   const s = cleanStatement(raw, 160);
   if (!s) return null;
   const hasLodging =
@@ -1864,29 +1883,30 @@ export function normalizeLodgingPreferenceStatement(raw: string) {
   if (!hasLodging) return null;
   if (isExpenseOnly) return null;
   const hard = HARD_REQUIRE_RE.test(s) || HARD_CONSTRAINT_RE.test(s);
+  const en = isEnglishLocale(locale);
 
   if (/(五星|5星|豪华|高端)/i.test(s)) {
     return {
-      statement: "住宿偏好：全程高星级酒店优先",
+      statement: en ? "Lodging preference: prioritize high-star hotels for the whole trip" : "住宿偏好：全程高星级酒店优先",
       hard,
       evidence: s,
     };
   }
   if (/(经济型|省钱|便宜|青年旅舍|青旅)/i.test(s)) {
     return {
-      statement: "住宿偏好：优先经济型住宿",
+      statement: en ? "Lodging preference: prioritize budget accommodation" : "住宿偏好：优先经济型住宿",
       hard,
       evidence: s,
     };
   }
   return {
-    statement: "住宿偏好：需满足指定住宿标准",
+    statement: en ? "Lodging preference: must satisfy specified lodging standards" : "住宿偏好：需满足指定住宿标准",
     hard,
     evidence: s,
   };
 }
 
-function normalizeActivityPreferenceStatement(raw: string) {
+function normalizeActivityPreferenceStatement(raw: string, locale?: AppLocale) {
   const s = cleanStatement(raw, 180);
   if (!s) return null;
   const hasSports = /球迷|看球|观赛|比赛|球赛|主场|客场|德比|门票|球票|足球|篮球|赛事/i.test(s);
@@ -1911,11 +1931,18 @@ function normalizeActivityPreferenceStatement(raw: string) {
     s.match(/([\u4e00-\u9fffA-Za-z]{2,16})\s*(?:球迷|粉丝|主队)/i)?.[1] ||
     "";
   const team = normalizeTeamName(teamRaw);
+  const en = isEnglishLocale(locale);
   const statement = hasSports
     ? team
-      ? `活动偏好：${cleanStatement(team, 20)}相关赛事优先`
-      : "活动偏好：体育赛事优先"
-    : "活动偏好：演出展览优先";
+      ? en
+        ? `Activity preference: prioritize ${cleanStatement(team, 20)} related matches`
+        : `活动偏好：${cleanStatement(team, 20)}相关赛事优先`
+      : en
+        ? "Activity preference: prioritize sports events"
+        : "活动偏好：体育赛事优先"
+    : en
+      ? "Activity preference: prioritize live performances and exhibitions"
+      : "活动偏好：演出展览优先";
   return {
     statement,
     hard,
@@ -2062,7 +2089,7 @@ function detectDurationUpdateCue(text: string): boolean {
   return false;
 }
 
-export function extractIntentSignals(userText: string, opts?: { historyMode?: boolean }): IntentSignals {
+export function extractIntentSignals(userText: string, opts?: { historyMode?: boolean; locale?: AppLocale }): IntentSignals {
   const text = String(userText || "");
   const out: IntentSignals = {};
   out.hasTemporalAnchor =
@@ -2157,7 +2184,11 @@ export function extractIntentSignals(userText: string, opts?: { historyMode?: bo
         ((out.durationStrength || 0) <= 0.78 && Math.abs(sumDays - (out.durationDays || 0)) <= 2);
       if (shouldTakeSegments) {
         out.durationDays = sumDays;
-        out.durationEvidence = citySegments.map((x) => `${x.city}${x.days}天`).join(" + ");
+        out.durationEvidence = citySegments
+          .map((x) =>
+            isEnglishLocale(opts?.locale) ? `${x.city} ${x.days} days` : `${x.city}${x.days}天`
+          )
+          .join(" + ");
         out.durationStrength = Math.max(out.durationStrength || 0, segmentStrength);
       }
     }
@@ -2183,7 +2214,11 @@ export function extractIntentSignals(userText: string, opts?: { historyMode?: bo
         {
           city: remapBySubLocationParent(out.destination, out.subLocations),
           days: out.durationDays,
-          evidence: out.durationEvidence || `${out.destination}${out.durationDays}天`,
+          evidence:
+            out.durationEvidence ||
+            (isEnglishLocale(opts?.locale)
+              ? `${out.destination} ${out.durationDays} days`
+              : `${out.destination}${out.durationDays}天`),
           kind: /(会议|开会|chi|conference|workshop|论坛|参会)/i.test(text) ? "meeting" : "travel",
         },
       ];
@@ -2209,7 +2244,7 @@ export function extractIntentSignals(userText: string, opts?: { historyMode?: bo
   if (!out.durationDays && /几天|多少天|天数待定|时长待定/i.test(text)) {
     out.durationUnknown = true;
     const du = text.match(/几天|多少天|天数待定|时长待定/i);
-    out.durationUnknownEvidence = du?.[0] || "时长待确认";
+    out.durationUnknownEvidence = du?.[0] || (isEnglishLocale(opts?.locale) ? "duration pending confirmation" : "时长待确认");
   }
 
   const budgetDelta = pickBudgetDeltaFromText(text);
@@ -2307,7 +2342,7 @@ export function extractIntentSignals(userText: string, opts?: { historyMode?: bo
   }
   out.genericConstraints = mergeGenericConstraints(undefined, genericConstraints);
 
-  const prefClause = sentenceParts(text).map(normalizePreferenceStatement).find(Boolean);
+  const prefClause = sentenceParts(text).map((x) => normalizePreferenceStatement(x, opts?.locale)).find(Boolean);
   if (prefClause) {
     out.scenicPreference = prefClause.statement;
     out.scenicPreferenceHard = prefClause.hard;
@@ -2315,7 +2350,7 @@ export function extractIntentSignals(userText: string, opts?: { historyMode?: bo
     out.scenicPreferenceImportance = prefClause.hard ? 0.8 : 0.68;
   }
 
-  const lodgingClause = sentenceParts(text).map(normalizeLodgingPreferenceStatement).find(Boolean);
+  const lodgingClause = sentenceParts(text).map((x) => normalizeLodgingPreferenceStatement(x, opts?.locale)).find(Boolean);
   if (lodgingClause) {
     out.lodgingPreference = lodgingClause.statement;
     out.lodgingPreferenceHard = lodgingClause.hard;
@@ -2323,7 +2358,7 @@ export function extractIntentSignals(userText: string, opts?: { historyMode?: bo
     out.lodgingPreferenceImportance = lodgingClause.hard ? 0.82 : 0.66;
   }
 
-  const activityClause = sentenceParts(text).map(normalizeActivityPreferenceStatement).find(Boolean);
+  const activityClause = sentenceParts(text).map((x) => normalizeActivityPreferenceStatement(x, opts?.locale)).find(Boolean);
   if (activityClause) {
     out.activityPreference = activityClause.statement;
     out.activityPreferenceEvidence = activityClause.evidence;
@@ -2716,7 +2751,11 @@ function mergeSignalsWithLatest(history: IntentSignals, latest: IntentSignals): 
   return out;
 }
 
-export function extractIntentSignalsWithRecency(historyText: string, latestUserText: string): IntentSignals {
+export function extractIntentSignalsWithRecency(
+  historyText: string,
+  latestUserText: string,
+  opts?: { locale?: AppLocale }
+): IntentSignals {
   const chunks = String(historyText || "")
     .split(/\n+/)
     .map((x) => String(x || "").trim())
@@ -2724,13 +2763,13 @@ export function extractIntentSignalsWithRecency(historyText: string, latestUserT
   let fromHistory: IntentSignals = {};
   if (chunks.length) {
     for (const chunk of chunks) {
-      const turnSignals = extractIntentSignals(chunk, { historyMode: true });
+      const turnSignals = extractIntentSignals(chunk, { historyMode: true, locale: opts?.locale });
       fromHistory = mergeSignalsWithLatest(fromHistory, turnSignals);
     }
   } else {
-    fromHistory = extractIntentSignals(historyText, { historyMode: true });
+    fromHistory = extractIntentSignals(historyText, { historyMode: true, locale: opts?.locale });
   }
-  const fromLatest = extractIntentSignals(latestUserText);
+  const fromLatest = extractIntentSignals(latestUserText, { locale: opts?.locale });
   return mergeSignalsWithLatest(fromHistory, fromLatest);
 }
 

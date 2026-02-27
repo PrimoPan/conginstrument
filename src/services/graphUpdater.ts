@@ -176,10 +176,10 @@ async function buildSignals(params: {
   // 按轮次顺序累计历史信号，避免把历史增量（例如“再加5000预算”）在后续轮次重复累计。
   let accumulatedHistorySignals: IntentSignals = {};
   for (const turnText of historyUserTexts) {
-    const turnSignals = extractIntentSignals(turnText, { historyMode: true });
+    const turnSignals = extractIntentSignals(turnText, { historyMode: true, locale: params.locale });
     accumulatedHistorySignals = mergeIntentSignals(accumulatedHistorySignals, turnSignals);
   }
-  const latestSignals = extractIntentSignals(params.userText);
+  const latestSignals = extractIntentSignals(params.userText, { locale: params.locale });
   const textSignals = mergeIntentSignals(accumulatedHistorySignals, latestSignals);
   let signals = textSignals;
 
@@ -265,7 +265,7 @@ async function buildSignals(params: {
     signals.budgetPendingEvidence = undefined;
   }
 
-  const canonicalIntent = buildTravelIntentStatement(signals, signalText);
+  const canonicalIntent = buildTravelIntentStatement(signals, signalText, params.locale);
   if (canonicalIntent && !signals.destinationEvidence) {
     signals.destinationEvidence = canonicalIntent;
   }

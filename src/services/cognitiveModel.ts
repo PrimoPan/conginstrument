@@ -21,6 +21,7 @@ import {
   reconcileContextsWithGraph,
   type ContextItem,
 } from "./contexts.js";
+import type { AppLocale } from "../i18n/locale.js";
 
 export type CognitiveModel = {
   graph: CDG;
@@ -38,6 +39,7 @@ export function buildCognitiveModel(params: {
   baseMotifs?: any;
   baseMotifLinks?: any;
   baseContexts?: any;
+  locale?: AppLocale;
 }): CognitiveModel {
   const nextConceptsDraft = reconcileConceptsWithGraph({
     graph: params.graph,
@@ -52,6 +54,7 @@ export function buildCognitiveModel(params: {
     graph: graphWithConceptState,
     concepts: nextConceptsDraft,
     baseMotifs: params.baseMotifs,
+    locale: params.locale,
   });
   const motifLinks = reconcileMotifLinks({
     motifs,
@@ -61,6 +64,7 @@ export function buildCognitiveModel(params: {
     concepts: nextConceptsDraft,
     motifs,
     motifLinks,
+    locale: params.locale,
   });
   const concepts = attachMotifIdsToConcepts(nextConceptsDraft, motifs);
   const contexts = reconcileContextsWithGraph({

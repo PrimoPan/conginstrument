@@ -1,5 +1,6 @@
 import { cleanStatement } from "./text.js";
 import { isLikelyDestinationCandidate, normalizeDestination } from "./intentSignals.js";
+import { isEnglishLocale, type AppLocale } from "../../i18n/locale.js";
 
 export type LimitingFactorInput = {
   text: string;
@@ -28,6 +29,7 @@ export type ConflictAnalyzeInput = {
   totalDays?: number;
   destinations?: string[];
   limitingFactors?: LimitingFactorInput[];
+  locale?: AppLocale;
 };
 
 const LUXURY_LODGING_RE = /五星|豪华|高档|奢华|五星级|luxury|five\s*star/i;
@@ -87,7 +89,12 @@ function compactDestinationsForConflict(list: string[]): string[] {
   return Array.from(new Set(out)).slice(0, 8);
 }
 
+function t(locale: AppLocale | undefined, zh: string, en: string): string {
+  return isEnglishLocale(locale) ? en : zh;
+}
+
 export function analyzeConstraintConflicts(input: ConflictAnalyzeInput): ConflictInsight[] {
+  const locale = input.locale;
   const out: ConflictInsight[] = [];
   const destinations = compactDestinationsForConflict(input.destinations || []);
   const limiting = input.limitingFactors || [];
@@ -101,12 +108,16 @@ export function analyzeConstraintConflicts(input: ConflictAnalyzeInput): Conflic
       const high = perPersonPerDay < 900;
       out.push({
         key: "budget_lodging",
-        statement: `预算与住宿偏好可能冲突（估算人均日预算约${Math.round(perPersonPerDay)}元）`,
+        statement: t(
+          locale,
+          `预算与住宿偏好可能冲突（估算人均日预算约${Math.round(perPersonPerDay)}元）`,
+          `Budget may conflict with lodging preference (estimated per-person daily budget: ${Math.round(perPersonPerDay)} CNY)`
+        ),
         severity: high ? "high" : "medium",
         importance: high ? 0.86 : 0.78,
         relatedTypes: ["budget", "lodging"],
         evidence: [
-          cleanStatement(`预算${input.budgetCny}元`, 40),
+          cleanStatement(t(locale, `预算${input.budgetCny}元`, `Budget ${input.budgetCny} CNY`), 40),
           cleanStatement(input.lodgingPreference, 40),
         ],
       });
@@ -116,11 +127,18 @@ export function analyzeConstraintConflicts(input: ConflictAnalyzeInput): Conflic
   if (destinations.length >= 2 && input.totalDays && input.totalDays < destinations.length * 2) {
     out.push({
       key: "duration_destination_density",
-      statement: `目的地数量与总时长可能冲突（${destinations.length}个目的地仅${input.totalDays}天）`,
+      statement: t(
+        locale,
+        `目的地数量与总时长可能冲突（${destinations.length}个目的地仅${input.totalDays}天）`,
+        `Destination count may conflict with total duration (${destinations.length} destinations in ${input.totalDays} days)`
+      ),
       severity: "high",
       importance: 0.84,
       relatedTypes: ["duration_total", "destination"],
-      evidence: [cleanStatement(destinations.join("、"), 60), `${input.totalDays}天`],
+      evidence: [
+        cleanStatement(destinations.join(isEnglishLocale(locale) ? " / " : "、"), 60),
+        t(locale, `${input.totalDays}天`, `${input.totalDays} days`),
+      ],
     });
   }
 
@@ -131,7 +149,11 @@ export function analyzeConstraintConflicts(input: ConflictAnalyzeInput): Conflic
     if (hasMobilityRisk) {
       out.push({
         key: "mobility_scenic_conflict",
-        statement: "活动强度偏好与限制因素可能冲突（需降低强度或调整节奏）",
+        statement: t(
+          locale,
+          "活动强度偏好与限制因素可能冲突（需降低强度或调整节奏）",
+          "Activity intensity preference may conflict with constraints (reduce intensity or adjust pace)"
+        ),
         severity: "high",
         importance: 0.88,
         relatedTypes: ["scenic_preference", "limiting_factor"],
@@ -146,11 +168,18 @@ export function analyzeConstraintConflicts(input: ConflictAnalyzeInput): Conflic
   if (hardLimiting.length >= 3 && (input.totalDays || 0) > 0 && (input.totalDays || 0) <= 5) {
     out.push({
       key: "too_many_hard_constraints",
-      statement: "硬限制较多且时长较短，行程可执行性风险较高",
+      statement: t(
+        locale,
+        "硬限制较多且时长较短，行程可执行性风险较高",
+        "Many hard constraints with short duration may reduce plan feasibility"
+      ),
       severity: "medium",
       importance: 0.8,
       relatedTypes: ["limiting_factor", "duration_total"],
-      evidence: [`硬限制数量: ${hardLimiting.length}`, `${input.totalDays}天`],
+      evidence: [
+        t(locale, `硬限制数量: ${hardLimiting.length}`, `Hard constraints: ${hardLimiting.length}`),
+        t(locale, `${input.totalDays}天`, `${input.totalDays} days`),
+      ],
     });
   }
 

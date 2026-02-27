@@ -282,6 +282,7 @@ convRouter.post("/", async (req: AuthedRequest, res) => {
     baseMotifs: (conv as any).motifs || [],
     baseMotifLinks: (conv as any).motifLinks || [],
     baseContexts: (conv as any).contexts || [],
+    locale,
   });
 
   res.json({
@@ -308,6 +309,7 @@ convRouter.get("/:id", async (req: AuthedRequest, res) => {
 
   const conv = await collections.conversations.findOne({ _id: oid, userId });
   if (!conv) return res.status(404).json({ error: "conversation not found" });
+  const locale = normalizeLocale((conv as any).locale);
 
   const model = buildCognitiveModel({
     graph: conv.graph,
@@ -316,12 +318,13 @@ convRouter.get("/:id", async (req: AuthedRequest, res) => {
     baseMotifs: (conv as any).motifs || [],
     baseMotifLinks: (conv as any).motifLinks || [],
     baseContexts: (conv as any).contexts || [],
+    locale,
   });
 
   res.json({
     conversationId: id,
     title: conv.title,
-    locale: normalizeLocale((conv as any).locale),
+    locale,
     systemPrompt: conv.systemPrompt,
     graph: model.graph,
     concepts: model.concepts,
@@ -342,6 +345,7 @@ convRouter.put("/:id/graph", async (req: AuthedRequest, res) => {
 
   const conv = await collections.conversations.findOne({ _id: oid, userId });
   if (!conv) return res.status(404).json({ error: "conversation not found" });
+  const locale = normalizeLocale((conv as any).locale);
 
   const incomingGraph = req.body?.graph;
   if (!incomingGraph || typeof incomingGraph !== "object") {
@@ -370,12 +374,12 @@ convRouter.put("/:id/graph", async (req: AuthedRequest, res) => {
     baseMotifs: Array.isArray(req.body?.motifs) ? req.body.motifs : (conv as any).motifs || [],
     baseMotifLinks: Array.isArray(req.body?.motifLinks) ? req.body.motifLinks : (conv as any).motifLinks || [],
     baseContexts: Array.isArray(req.body?.contexts) ? req.body.contexts : (conv as any).contexts || [],
+    locale,
   });
   model.graph.version = prevGraph.version + (graphChanged(prevGraph, model.graph) ? 1 : 0);
 
   const requestAdvice = parseBoolFlag(req.body?.requestAdvice);
   const advicePrompt = String(req.body?.advicePrompt || "").trim().slice(0, 1200);
-  const locale = normalizeLocale((conv as any).locale);
   const travelPlanState = await computeTravelPlanState({
     conversationId: oid,
     userId,
@@ -459,6 +463,7 @@ convRouter.put("/:id/concepts", async (req: AuthedRequest, res) => {
 
   const conv = await collections.conversations.findOne({ _id: oid, userId });
   if (!conv) return res.status(404).json({ error: "conversation not found" });
+  const locale = normalizeLocale((conv as any).locale);
 
   if (!Array.isArray(req.body?.concepts)) {
     return res.status(400).json({ error: "concepts array required" });
@@ -477,6 +482,7 @@ convRouter.put("/:id/concepts", async (req: AuthedRequest, res) => {
     baseMotifs: (conv as any).motifs || [],
     baseMotifLinks: (conv as any).motifLinks || [],
     baseContexts: (conv as any).contexts || [],
+    locale,
   });
   model.graph.version = prevGraph.version + (graphChanged(prevGraph, model.graph) ? 1 : 0);
   const travelPlanState = await computeTravelPlanState({
@@ -484,7 +490,7 @@ convRouter.put("/:id/concepts", async (req: AuthedRequest, res) => {
     userId,
     graph: model.graph,
     previous: (conv as any).travelPlanState || null,
-    locale: normalizeLocale((conv as any).locale),
+    locale,
   });
 
   const now = new Date();
@@ -506,7 +512,7 @@ convRouter.put("/:id/concepts", async (req: AuthedRequest, res) => {
 
   res.json({
     conversationId: id,
-    locale: normalizeLocale((conv as any).locale),
+    locale,
     graph: model.graph,
     concepts: model.concepts,
     motifs: model.motifs,
@@ -658,6 +664,7 @@ convRouter.post("/:id/turn", async (req: AuthedRequest, res) => {
     baseMotifs: (conv as any).motifs || [],
     baseMotifLinks: (conv as any).motifLinks || [],
     baseContexts: (conv as any).contexts || [],
+    locale,
   });
   const conflictGate = toConflictGatePayload(preModel.motifs, locale);
   if (conflictGate) {
@@ -714,6 +721,7 @@ convRouter.post("/:id/turn", async (req: AuthedRequest, res) => {
     baseMotifs: (conv as any).motifs || [],
     baseMotifLinks: (conv as any).motifLinks || [],
     baseContexts: (conv as any).contexts || [],
+    locale,
   });
   model.graph.version = merged.newGraph.version + (graphChanged(merged.newGraph, model.graph) ? 1 : 0);
 
@@ -796,6 +804,7 @@ convRouter.post("/:id/turn/stream", async (req: AuthedRequest, res) => {
     baseMotifs: (conv as any).motifs || [],
     baseMotifLinks: (conv as any).motifLinks || [],
     baseContexts: (conv as any).contexts || [],
+    locale,
   });
   const conflictGate = toConflictGatePayload(preModel.motifs, locale);
   if (conflictGate) {
@@ -902,6 +911,7 @@ convRouter.post("/:id/turn/stream", async (req: AuthedRequest, res) => {
       baseMotifs: (conv as any).motifs || [],
       baseMotifLinks: (conv as any).motifLinks || [],
       baseContexts: (conv as any).contexts || [],
+      locale,
     });
     model.graph.version = merged.newGraph.version + (graphChanged(merged.newGraph, model.graph) ? 1 : 0);
 
@@ -960,6 +970,7 @@ convRouter.post("/:id/turn/stream", async (req: AuthedRequest, res) => {
           baseMotifs: (conv as any).motifs || [],
           baseMotifLinks: (conv as any).motifLinks || [],
           baseContexts: (conv as any).contexts || [],
+          locale,
         });
         model2.graph.version = merged2.newGraph.version + (graphChanged(merged2.newGraph, model2.graph) ? 1 : 0);
 

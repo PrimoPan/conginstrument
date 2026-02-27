@@ -1,6 +1,7 @@
 import type { ConceptItem } from "../concepts.js";
 import type { ConceptMotif } from "./conceptMotifs.js";
 import type { MotifLink, MotifLinkType } from "./motifLinks.js";
+import { isEnglishLocale, type AppLocale } from "../../i18n/locale.js";
 
 export type MotifReasoningNode = {
   id: string;
@@ -67,20 +68,20 @@ function sourceRefToken(sourceMsgId: string): string {
 }
 
 function motifPattern(m: ConceptMotif, conceptTitles: string[]): string {
-  if (!Array.isArray(m.conceptIds) || !m.conceptIds.length) return "C1 -> C2";
+  if (!Array.isArray(m.conceptIds) || !m.conceptIds.length) return "concept_a -> concept_b";
   const anchorId = cleanText(m.anchorConceptId, 96);
   const ids = m.conceptIds.slice();
   const sources = ids.filter((x) => x !== anchorId);
   const target = ids.find((x) => x === anchorId) || ids[ids.length - 1];
-  if (!sources.length) return "C1 -> C2";
+  if (!sources.length) return "concept_a -> concept_b";
 
   const titleById = new Map<string, string>();
   for (let i = 0; i < ids.length; i += 1) {
     const title = cleanText(conceptTitles[i], 48);
     if (title) titleById.set(ids[i], title);
   }
-  const sourceTerms = sources.map((sid, idx) => `C${idx + 1}:${titleById.get(sid) || "source"}`);
-  const targetTerm = `C${sourceTerms.length + 1}:${titleById.get(target) || "target"}`;
+  const sourceTerms = sources.map((sid) => `${sid}:${titleById.get(sid) || "source"}`);
+  const targetTerm = `${target}:${titleById.get(target) || "target"}`;
   return `${sourceTerms.join(" + ")} -> ${targetTerm}`;
 }
 
@@ -96,6 +97,7 @@ export function buildMotifReasoningView(params: {
   concepts: ConceptItem[];
   motifs: ConceptMotif[];
   motifLinks: MotifLink[];
+  locale?: AppLocale;
 }): MotifReasoningView {
   const conceptById = new Map((params.concepts || []).map((c) => [c.id, c]));
   const motifs = (params.motifs || []).filter((m) => m.status !== "cancelled");
@@ -116,7 +118,7 @@ export function buildMotifReasoningView(params: {
       return {
         id: `rm_${cleanText(m.id, 120)}`,
         motifId: m.id,
-        title: cleanText(m.title, 160) || cleanText(m.templateKey, 120) || "motif",
+        title: cleanText(m.title, 160) || cleanText(m.templateKey, 120) || (isEnglishLocale(params.locale) ? "motif" : "母题"),
         relation: m.relation,
         dependencyClass: m.dependencyClass || m.relation,
         causalOperator: m.causalOperator,
