@@ -1,7 +1,6 @@
 import type { IntentSignals } from "./intentSignals.js";
 import { buildTravelIntentStatement, isLikelyDestinationCandidate, normalizeDestination } from "./intentSignals.js";
 import { cleanStatement } from "./text.js";
-import { analyzeConstraintConflicts, type LimitingFactorInput } from "./conflictAnalyzer.js";
 import type { SlotEdgeSpec, SlotGraphState, SlotNodeSpec } from "./slotTypes.js";
 import { isEnglishLocale, type AppLocale } from "../../i18n/locale.js";
 
@@ -1279,76 +1278,12 @@ export function buildSlotStateMachine(params: {
     pushEdge(edges, "slot:lodging", "slot:goal", params.signals.lodgingPreferenceHard ? "constraint" : "enable", 0.76);
   }
 
-  const conflictInputs: LimitingFactorInput[] = limitingFactors.map((x) => ({
-    text: x.text,
-    kind: x.kind,
-    hard: x.hard,
-    severity: x.severity,
-    importance: x.importance,
-  }));
-  const conflicts = analyzeConstraintConflicts({
-    budgetCny: params.signals.budgetCny,
-    lodgingPreference: params.signals.lodgingPreference,
-    scenicPreference: params.signals.scenicPreference,
-    peopleCount: params.signals.peopleCount,
-    totalDays: durationState.totalDays,
-    destinations,
-    limitingFactors: conflictInputs,
-    locale: params.locale,
-  });
-
-  const relatedSlotMap: Record<
-    "budget" | "lodging" | "duration_total" | "destination" | "scenic_preference" | "limiting_factor" | "people",
-    string[]
-  > = {
-    budget: budgetSlotKey ? [budgetSlotKey] : [],
-    lodging: lodgingSlotKey ? [lodgingSlotKey] : [],
-    duration_total: durationTotalSlotKey ? [durationTotalSlotKey] : [],
-    destination: destinationSlotKeys.slice(),
-    scenic_preference: scenicSlotKey ? [scenicSlotKey] : [],
-    limiting_factor: limitingFactorSlotKeys.slice(),
-    people: peopleSlotKey ? [peopleSlotKey] : [],
-  };
-
-  for (const c of conflicts) {
-    const slotKey = `slot:conflict:${slug(c.key)}`;
-    nodes.push({
-      slotKey,
-      type: "constraint",
-      layer: c.severity === "critical" || c.severity === "high" ? "risk" : "requirement",
-      strength: "hard",
-      severity: c.severity,
-      statement: statementWithPrefix(params.locale, "冲突提示: ", "Conflict warning: ", cleanStatement(c.statement, 120)),
-      confidence: 0.88,
-      importance: clamp01(c.importance, 0.8),
-      tags: ["conflict", "planner"],
-      evidenceIds: c.evidence.map((x) => cleanStatement(x, 60)).filter(Boolean),
-      sourceMsgIds: ["latest_user"],
-      key: slotKey,
-      motifType: "hypothesis",
-      claim: cleanStatement(c.statement, 120),
-      evidence: c.evidence.length ? c.evidence.map((x) => ({ quote: cleanStatement(x, 80), source: "dialogue" })) : undefined,
-      linkedIntentIds: ["slot:goal"],
-      revisionHistory: [{ at: now, action: "updated", by: "system", reason: "conflict_analyzer" }],
-      priority: clamp01(c.importance, 0.8),
-      rebuttalPoints: [
-        isEnglishLocale(params.locale)
-          ? "Resolve by adjusting budget, duration, or constraint priority"
-          : "可通过调整预算/时长/约束优先级来消解冲突",
-      ],
-    });
-    pushEdge(edges, slotKey, "slot:goal", "constraint", 0.9);
-
-    for (const related of c.relatedTypes) {
-      for (const targetSlot of relatedSlotMap[related] || []) {
-        pushEdge(edges, slotKey, targetSlot, "conflicts_with", 0.84);
-      }
-    }
-  }
-
   return {
     nodes,
     edges,
-    notes: ["slot_state_machine_v3_limiting_conflict_aware"],
+    notes: [
+      "slot_state_machine_v4_single_conflict_engine",
+      "conflicts_are_derived_from_motif_only",
+    ],
   };
 }

@@ -49,6 +49,12 @@ Atomic cognitive unit:
 - `preference`
 - `factual assertion`
 
+Concept extraction pipeline is fixed to three stages:
+
+1. **Identification** (system-automatic): detect candidate concept spans from dialogue/graph evidence.
+2. **Disambiguation** (system-automatic): normalize, deduplicate, and map each candidate to exactly one of the four concept classes.
+3. **Validation** (user-facing): trigger explicit confirmation only for low-confidence or conflicting candidates.
+
 ## 3.2 Motif
 
 Reusable dependency pattern built from concepts:

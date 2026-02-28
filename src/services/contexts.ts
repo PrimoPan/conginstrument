@@ -229,22 +229,22 @@ function globalContext(params: {
   const status = contextStatusFromMotifs(motifs, false);
   const confidence = contextConfidence(motifs);
   const openQuestions = buildOpenQuestions(motifs, 6);
-  const beliefs = concepts
-    .filter((c) => c.family === "goal" || c.kind === "belief")
+  const beliefTop = concepts
+    .filter((c) => c.kind === "belief")
     .map((c) => cleanText(c.title, 28))
     .slice(0, 3);
-  const constraints = concepts.filter((c) => c.kind === "constraint").length;
-  const preferences = concepts.filter((c) => c.kind === "preference").length;
-  const factual = concepts.filter((c) => c.kind === "factual_assertion").length;
+  const constraintCount = concepts.filter((c) => c.kind === "constraint").length;
+  const preferenceCount = concepts.filter((c) => c.kind === "preference").length;
+  const factualCount = concepts.filter((c) => c.kind === "factual_assertion").length;
 
   return {
     id: stableId("global_planning"),
     key: "global_planning",
     title: "Context：全局任务情境",
     summary: cleanText(
-      `当前任务图包含 ${params.graph.nodes?.length || 0} 个节点、${params.graph.edges?.length || 0} 条边；核心信念：${
-        beliefs.join("、") || "待确认"
-      }；Constraint ${constraints} 项，Preference ${preferences} 项，Factual ${factual} 项。`,
+      `当前任务图包含 ${params.graph.nodes?.length || 0} 个节点、${params.graph.edges?.length || 0} 条边；Belief：${
+        beliefTop.join("、") || "待确认"
+      }；Constraint ${constraintCount} 项，Preference ${preferenceCount} 项，Factual assertion ${factualCount} 项。`,
       220
     ),
     status,
@@ -252,7 +252,7 @@ function globalContext(params: {
     conceptIds,
     motifIds,
     nodeIds,
-    tags: uniq(["global", "planning", ...beliefs], 20),
+    tags: uniq(["global", "planning", ...beliefTop], 20),
     openQuestions,
     locked: false,
     paused: false,

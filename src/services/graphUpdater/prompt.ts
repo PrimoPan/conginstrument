@@ -12,9 +12,13 @@ export const GRAPH_SYSTEM_PROMPT_ZH = `
 规则：
 - 默认只使用 add_node / update_node / add_edge 三种操作。
 - 禁止 remove_node/remove_edge（除非用户明确要求删除且你非常确定）。
-- 节点类型：goal / constraint / preference / belief / fact / question
+- 节点类型（只允许四类）：belief / constraint / preference / factual_assertion
+- Concept Extraction 三阶段（必须遵守）：
+  1) Identification（系统自动）：先识别可能 concept 片段
+  2) Disambiguation（系统自动）：去歧义、去重、规范到四类之一
+  3) Validation（向用户提问或显示）：仅在不确定或冲突时触发确认
 - 节点分层：layer 可选，取值 intent / requirement / preference / risk（未提供时后端会自动推断）
-- 建议映射：goal -> intent；硬约束/结构化事实 -> requirement；偏好表达 -> preference；高风险/健康/安全 -> risk
+- 建议映射：意图与假设 -> belief；硬约束/风险限制 -> constraint；偏好表达 -> preference；结构化事实 -> factual_assertion
 - constraint 可带 strength: hard|soft
 - 若信息包含健康/安全/法律等高风险因素，务必设置 severity（high 或 critical），并可补 tags（如 ["health"]）。
 - 若信息表达“不能/必须/禁忌”等限制，优先用 constraint，且 strength 优先 hard。
@@ -25,7 +29,7 @@ export const GRAPH_SYSTEM_PROMPT_ZH = `
 - “必须留一天做某事/发表/见人”属于关键约束，不等于总行程时长，不能覆盖 total duration。
 - 避免把“第一天/第二天/详细行程建议”这类叙事文本直接建成节点。
 - 对同一槽位（预算/时长/人数/目的地/住宿偏好）优先 update 旧节点，不要重复 add。
-- 意图（goal）作为根节点，子节点尽量与根节点连通，避免孤立节点。
+- 意图节点作为根节点（类型建议 belief），子节点尽量与根节点连通，避免孤立节点。
 - 若有健康/安全硬约束，可作为第三层约束节点，第二层关键节点可用 determine 指向它。
 - 非核心细节节点优先挂到相关二级节点（determine），不要全部直接连到根节点。
 - 节点尽量附 evidenceIds（来自用户原句的短片段），用于前端高亮证据文本。
@@ -36,7 +40,7 @@ export const GRAPH_SYSTEM_PROMPT_ZH = `
   - determine：A 的取值直接决定 B（对应干预：do(A) -> B）
   - conflicts_with：仅用于显式冲突标注，不是稳定因果依赖
 - 去重：已有等价节点优先 update_node
-- 连边克制：有 root_goal_id 时，constraint/preference/fact/belief 可以连到 root_goal_id
+- 连边克制：有 root_goal_id 时，constraint/preference/factual_assertion/belief 可以连到 root_goal_id
 - 每轮 op 建议 1~6 个，少而准。
 `.trim();
 
@@ -53,13 +57,17 @@ Do not output any other text, no markdown, no explanation.
 Rules:
 - Default to only add_node / update_node / add_edge.
 - Do not emit remove_node/remove_edge unless the user explicitly requests deletion and confidence is very high.
-- Node type: goal / constraint / preference / belief / fact / question.
+- Node type (strict 4-class): belief / constraint / preference / factual_assertion.
+- Concept Extraction has exactly three stages (must follow):
+  1) Identification (system-automatic): detect candidate concept spans.
+  2) Disambiguation (system-automatic): deduplicate and normalize into one of the 4 concept classes.
+  3) Validation (ask user or explicit UI confirmation): only when confidence is low or conflicts exist.
 - Node layer: intent / requirement / preference / risk (backend may infer if absent).
 - Suggested mapping:
-  - goal -> intent
-  - hard constraints + structural facts -> requirement
+  - intent and assumptions -> belief
+  - hard constraints and risk limits -> constraint
   - user taste / ranking -> preference
-  - health/safety/legal high-risk factors -> risk
+  - structural facts -> factual_assertion
 - constraint may include strength: hard|soft.
 - If high-risk health/safety/legal content appears, set severity (high or critical), with tags when useful (e.g. ["health"]).
 - If text indicates "must / cannot / forbidden", prefer constraint with hard strength.
@@ -81,7 +89,7 @@ Rules:
   - determine: A directly commits B (intervention-style dependency).
   - conflicts_with: explicit contradiction marker only, not stable causal dependency.
 - Deduplicate: update equivalent existing nodes first.
-- Sparse edges: with root_goal_id, constraints/preferences/facts/beliefs may connect to root.
+- Sparse edges: with root_goal_id, constraints/preferences/factual_assertions/beliefs may connect to root.
 - Keep each round compact: usually 1~6 ops.
 `.trim();
 
