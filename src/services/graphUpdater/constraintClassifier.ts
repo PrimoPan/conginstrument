@@ -60,6 +60,47 @@ function normalizeConstraintText(input: string): string {
   return s;
 }
 
+function semanticTokenize(text: string): string[] {
+  const reduced = text
+    .toLowerCase()
+    .replace(
+      /(所以|因此|就是|然后|这个|那个|尽量|需要|必须|最好|希望|我要|我们|我|请|一下|有点|比较|更|特别|都要|都得|that|this|need|must|please|just|really|kind of|sort of|a little|more|very|much|prefer|want)/g,
+      " "
+    )
+    .replace(/[^\p{L}\p{N}\s]/gu, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (!reduced) return [];
+  const raw = reduced.match(/[\u4e00-\u9fa5]{1,4}|[a-z0-9]{2,20}/g) || [];
+  return Array.from(new Set(raw)).slice(0, 10);
+}
+
+function tokenOverlap(a: string[], b: string[]): number {
+  if (!a.length || !b.length) return 0;
+  const sa = new Set(a);
+  const sb = new Set(b);
+  let inter = 0;
+  for (const x of sa) if (sb.has(x)) inter += 1;
+  const union = new Set([...sa, ...sb]).size;
+  return union > 0 ? inter / union : 0;
+}
+
+function semanticConstraintFingerprint(text: string): string {
+  const s = normalizeConstraintText(text);
+  if (!s) return "";
+  if (MEDICAL_HEALTH_RE.test(s)) return "health:core";
+  if (LANGUAGE_CONSTRAINT_RE.test(s)) return "language:core";
+  const { kind } = inferGenericKind(s);
+  const tokens = semanticTokenize(s);
+  if (kind === "safety") {
+    const hasNight = /夜|night|late/i.test(s);
+    const hasArea = /区域|片区|地段|社区|neighborhood|district|area|酒店|住宿|hotel|lodging|accommodation/i.test(s);
+    return `safety:${hasNight ? "night" : "general"}:${hasArea ? "area" : "core"}`;
+  }
+  const core = tokens.slice(0, 4).join("+") || "core";
+  return `${kind}:${core}`;
+}
+
 function inferHardness(text: string): boolean {
   return HARD_REQUIRE_RE.test(text) || HARD_CONSTRAINT_RE.test(text);
 }
@@ -137,12 +178,26 @@ export function classifyConstraintText(params: {
 
 export function dedupeClassifiedConstraints<T extends { text: string }>(items: T[]): T[] {
   const seen = new Set<string>();
+  const accepted: Array<{ item: T; tokens: string[]; kindKey: string }> = [];
   const out: T[] = [];
   for (const it of items) {
     const key = normalizeConstraintText(it.text).toLowerCase();
     if (!key || seen.has(key)) continue;
-    seen.add(key);
+    const kindKey = semanticConstraintFingerprint(key);
+    if (kindKey && seen.has(kindKey)) continue;
+
+    const tokens = semanticTokenize(key);
+    const nearDup = accepted.some((x) => {
+      if (kindKey && x.kindKey && kindKey.split(":")[0] !== x.kindKey.split(":")[0]) return false;
+      const overlap = tokenOverlap(tokens, x.tokens);
+      return overlap >= 0.75 || key.includes(normalizeConstraintText(x.item.text).toLowerCase()) || normalizeConstraintText(x.item.text).toLowerCase().includes(key);
+    });
+    if (nearDup) continue;
+
     out.push(it);
+    accepted.push({ item: it, tokens, kindKey });
+    seen.add(key);
+    if (kindKey) seen.add(kindKey);
   }
   return out;
 }

@@ -9,7 +9,6 @@ import {
   HARD_REQUIRE_RE,
   LANGUAGE_CONSTRAINT_RE,
   MEDICAL_HEALTH_RE,
-  NON_DESTINATION_COMPARATIVE_RE,
   NATURE_TOPIC_RE,
   NON_PLACE_TOKEN_RE,
   PLACE_STOPWORD_RE,
@@ -1455,7 +1454,7 @@ export function normalizeDestination(raw: string): string {
 export function isLikelyDestinationCandidate(x: string): boolean {
   const s = normalizeDestination(x);
   if (!s) return false;
-  if (NON_DESTINATION_COMPARATIVE_RE.test(s)) return false;
+  if (/^(?:只|仅)?含当地$|^当地(?:游|玩)?$|^本地(?:游|玩)?$/i.test(s)) return false;
   if (/(^|.*)(只含当地|仅含当地|当地|本地|本市|本城|这边|那边)(.*|$)/i.test(s)) return false;
   if (s.length < 2 || s.length > 16) return false;
   if (/^的/.test(s)) return false;
@@ -1481,9 +1480,6 @@ export function isLikelyDestinationCandidate(x: string): boolean {
   if (/^(更|比较|尽量|优先|最好|稍微)?\s*(安全|安静|方便|便宜|舒适|舒服|热闹|清净|治安|人少|离中心近|靠近中心)$/i.test(s)) {
     return false;
   }
-  if (/^(?:比(?:较)?|更|比较)?\s*(好|更好|好一点|好些|合适|更合适|比较合适)(?:的地方)?(?:吧|呢|呀|啊|吗)?$/i.test(s)) {
-    return false;
-  }
   if (/^(安全|安静|方便|便宜|舒适|舒服|热闹|清净|治安|人少|近一点|远一点)/i.test(s) && s.length <= 8) {
     return false;
   }
@@ -1502,6 +1498,12 @@ export function isLikelyDestinationCandidate(x: string): boolean {
       s
     )
   ) {
+    return false;
+  }
+  if (/^(?:比较|更|稍微|尽量|优先|最好)?\s*(?:好|安全|安静|方便|便宜|舒适|舒服|热闹|清净|治安)(?:一点)?$/i.test(s)) {
+    return false;
+  }
+  if (/(比较好|更好|好一点|安全一点|安静一点|方便一点|便宜一点|舒适一点|清净一点|稳妥一点)/i.test(s)) {
     return false;
   }
   return true;

@@ -151,6 +151,19 @@ function normalizeConstraintDetail(raw: string): string {
   return slug(tokens.join("_")) || "factor";
 }
 
+function inferLimitingKindFromText(raw: string): string {
+  const s = cleanText(raw || "", 180);
+  if (/心脏|心肺|慢性病|过敏|糖尿病|哮喘|医疗|病史|health|medical|cardiac|allergy/i.test(s)) return "health";
+  if (/英语|语言|翻译|沟通|外语|english|language|translate|communication/i.test(s)) return "language";
+  if (/饮食|忌口|清真|素食|过敏原|halal|kosher|vegetarian|vegan|diet/i.test(s)) return "diet";
+  if (/宗教|礼拜|祷告|斋月|安息日|religion|prayer|ramadan|sabbath/i.test(s)) return "religion";
+  if (/签证|护照|入境|海关|法律|visa|passport|immigration|permit|legal/i.test(s)) return "legal";
+  if (/轮椅|无障碍|体力|行动不便|不能久走|mobility|wheelchair|accessibility/i.test(s)) return "mobility";
+  if (/治安|安全|安全感|危险|夜间|夜里|夜晚|抢劫|诈骗|security|safety|danger|risk|night/i.test(s)) return "safety";
+  if (/转机|换乘|托运|航班|火车|机场|时差|logistics|layover|flight|train/i.test(s)) return "logistics";
+  return "other";
+}
+
 function semanticFreeformSignature(raw: string): string {
   const text = cleanText(raw, 240).toLowerCase();
   if (!text) return "node";
@@ -199,6 +212,8 @@ function parseSemanticKeyFromStatement(node: ConceptNode): string {
     /心脏|心肺|慢性病|过敏|宗教|饮食|清真|素食|语言|安全|签证|法律|禁忌/i.test(s)
   ) {
     const x = s.split(/[:：]/)[1] || s;
+    const kind = inferLimitingKindFromText(x);
+    if (kind !== "other") return `slot:constraint:limiting:${kind}`;
     return `slot:constraint:limiting:other:${normalizeConstraintDetail(x)}`;
   }
 
@@ -229,6 +244,17 @@ function canonicalSlotKey(key: string): string {
     const rest = k.slice("slot:constraint:limiting:".length);
     const parts = rest.split(":");
     const kind = slug(parts[0] || "other") || "other";
+    const semanticKinds = new Set([
+      "health",
+      "language",
+      "diet",
+      "religion",
+      "legal",
+      "mobility",
+      "safety",
+      "logistics",
+    ]);
+    if (semanticKinds.has(kind)) return `slot:constraint:limiting:${kind}`;
     const detail = normalizeConstraintDetail(parts.slice(1).join(":") || "factor");
     return `slot:constraint:limiting:${kind}:${detail}`;
   }

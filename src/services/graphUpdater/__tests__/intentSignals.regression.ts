@@ -13,6 +13,8 @@ import { compileSlotStateToPatch } from "../slotGraphCompiler.js";
 import { planUncertaintyQuestion } from "../../uncertainty/questionPlanner.js";
 import { reconcileConceptsWithGraph } from "../../concepts.js";
 import { reconcileMotifsWithGraph } from "../../motif/conceptMotifs.js";
+import { reconcileMotifLinks } from "../../motif/motifLinks.js";
+import { buildMotifReasoningView } from "../../motif/reasoningView.js";
 
 type Case = {
   name: string;
@@ -928,6 +930,70 @@ const cases: Case[] = [
       assert.equal(
         motifs.some((m) => m.status === "deprecated" && String(m.statusReason || "").startsWith("relation_conflict_with:")),
         true
+      );
+    },
+  },
+  {
+    name: "motif reasoning view should keep semantic motif links and structured explanations only",
+    run: () => {
+      const graph = {
+        id: "g_reasoning_view_semantic",
+        version: 1,
+        nodes: [
+          {
+            id: "n_goal",
+            type: "goal",
+            layer: "intent",
+            statement: "意图: 去米兰旅游3天",
+            status: "confirmed",
+            confidence: 0.86,
+            importance: 0.84,
+            key: "slot:goal",
+          },
+          {
+            id: "n_budget",
+            type: "constraint",
+            layer: "requirement",
+            statement: "预算上限: 10000元",
+            status: "confirmed",
+            confidence: 0.92,
+            importance: 0.8,
+            key: "slot:budget",
+          },
+          {
+            id: "n_lodging",
+            type: "preference",
+            layer: "preference",
+            statement: "住宿偏好: 安全区域优先",
+            status: "confirmed",
+            confidence: 0.86,
+            importance: 0.76,
+            key: "slot:lodging",
+          },
+        ] as any,
+        edges: [
+          { id: "e1", from: "n_budget", to: "n_goal", type: "enable", confidence: 0.9 },
+          { id: "e2", from: "n_budget", to: "n_lodging", type: "determine", confidence: 0.86 },
+        ] as any,
+      } as any;
+
+      const concepts = reconcileConceptsWithGraph({ graph, baseConcepts: [] });
+      const motifs = reconcileMotifsWithGraph({ graph, concepts, baseMotifs: [] });
+      const motifLinks = reconcileMotifLinks({ motifs, baseLinks: [] });
+      const view = buildMotifReasoningView({ concepts, motifs, motifLinks, locale: "zh-CN" as any });
+
+      assert.equal(
+        view.edges.every((e) => ["enable", "constraint", "determine", "conflicts_with"].includes(String(e.type))),
+        true
+      );
+      assert.equal(view.steps.length > 0, true);
+      assert.equal(
+        view.steps.every((s) => /第\d+步|Step\s+\d+/i.test(String(s.explanation || ""))),
+        true
+      );
+      assert.equal(
+        view.steps.some((s) => /我想|I want|because|推理过程|chain of thought/i.test(String(s.explanation || ""))),
+        false
       );
     },
   },

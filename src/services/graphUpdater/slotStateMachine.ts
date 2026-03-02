@@ -636,38 +636,62 @@ function collectLimitingFactors(signals: IntentSignals): LimitingFactor[] {
     if (pickCur) deduped[dupIdx] = cur;
   }
 
-  // Final pass: merge near-identical factors by semantic signature so the
-  // limiting section remains concise (especially safety variants).
-  const bySignature = new Map<string, LimitingFactor>();
+  // Final pass: semantic merge by kind + intent-equivalence to aggressively
+  // suppress near-duplicate constraints (especially safety phrasing variants).
+  const sameSemanticFactor = (a: LimitingFactor, b: LimitingFactor): boolean => {
+    if (a.kind !== b.kind) return false;
+    const aNorm = normalizeLimitingText(a.text);
+    const bNorm = normalizeLimitingText(b.text);
+    if (!aNorm || !bNorm) return false;
+    if (aNorm === bNorm || aNorm.includes(bNorm) || bNorm.includes(aNorm)) return true;
+    const overlap = overlapScore(a.semanticTokens, b.semanticTokens);
+    if (a.kind === "safety") {
+      const aHasSecurity = a.semanticTokens.includes("security") || /治安|安全|安全感|security|safety|safe/i.test(a.text);
+      const bHasSecurity = b.semanticTokens.includes("security") || /治安|安全|安全感|security|safety|safe/i.test(b.text);
+      // For safety constraints we prefer a single canonical slot unless
+      // semantics are clearly unrelated.
+      if (aHasSecurity && bHasSecurity) return true;
+      return overlap >= 0.5;
+    }
+    if (a.kind !== "other") return overlap >= 0.5;
+    return overlap >= 0.66;
+  };
+
+  const mergeFactor = (a: LimitingFactor, b: LimitingFactor): LimitingFactor => {
+    const preferred = limitingQuality(a) >= limitingQuality(b) ? a : b;
+    const normalizedTokens = Array.from(new Set([...a.semanticTokens, ...b.semanticTokens])).slice(0, 4);
+    const canonicalKey =
+      preferred.kind === "other"
+        ? `other:${normalizeLimitingText(preferred.text).slice(0, 32)}`
+        : `${preferred.kind}:${normalizedTokens.join("+") || "generic"}`;
+    return {
+      text: preferred.text,
+      evidence: cleanStatement(`${a.evidence}; ${b.evidence}`, 120),
+      hard: a.hard || b.hard,
+      severity:
+        a.severity === "critical" || b.severity === "critical"
+          ? "critical"
+          : a.severity === "high" || b.severity === "high"
+            ? "high"
+            : a.severity || b.severity,
+      importance: Math.max(a.importance, b.importance),
+      kind: preferred.kind,
+      canonicalKey,
+      semanticTokens: normalizedTokens,
+    };
+  };
+
+  const compactedBySemantic: LimitingFactor[] = [];
   for (const item of deduped) {
-    const semanticSig =
-      item.kind === "other"
-        ? `other:${normalizeLimitingText(item.text).slice(0, 32)}`
-        : `${item.kind}:${item.semanticTokens.slice().sort().join("+") || "generic"}`;
-    const prev = bySignature.get(semanticSig);
-    if (!prev) {
-      bySignature.set(semanticSig, item);
+    const idx = compactedBySemantic.findIndex((x) => sameSemanticFactor(x, item));
+    if (idx < 0) {
+      compactedBySemantic.push(item);
       continue;
     }
-    const merged: LimitingFactor = {
-      text: limitingQuality(item) >= limitingQuality(prev) ? item.text : prev.text,
-      evidence: cleanStatement(`${prev.evidence}; ${item.evidence}`, 120),
-      hard: prev.hard || item.hard,
-      severity:
-        prev.severity === "critical" || item.severity === "critical"
-          ? "critical"
-          : prev.severity === "high" || item.severity === "high"
-            ? "high"
-            : prev.severity || item.severity,
-      importance: Math.max(prev.importance, item.importance),
-      kind: prev.kind,
-      canonicalKey: semanticSig,
-      semanticTokens: Array.from(new Set([...prev.semanticTokens, ...item.semanticTokens])).slice(0, 4),
-    };
-    bySignature.set(semanticSig, merged);
+    compactedBySemantic[idx] = mergeFactor(compactedBySemantic[idx], item);
   }
 
-  const compacted = Array.from(bySignature.values())
+  const compacted = compactedBySemantic
     .sort((a, b) => limitingQuality(b) - limitingQuality(a))
     .slice(0, 8);
 
@@ -1123,7 +1147,13 @@ export function buildSlotStateMachine(params: {
   const limitingFactors = collectLimitingFactors(params.signals);
   for (const factor of limitingFactors) {
     const kind = factor.kind || "other";
-    const slotKey = `slot:constraint:limiting:${slug(kind)}:${slug(factor.canonicalKey || factor.text)}`;
+    const semanticKind = slug(kind) || "other";
+    // Keep one active slot per semantic limiting category to avoid repeated
+    // near-duplicate safety/language/health concepts in graph.
+    const slotKey =
+      semanticKind === "other"
+        ? `slot:constraint:limiting:${semanticKind}:${slug(factor.canonicalKey || factor.text)}`
+        : `slot:constraint:limiting:${semanticKind}`;
     const severity = factor.severity || (factor.hard ? "high" : "medium");
     const riskKind = new Set(["health", "safety", "legal", "mobility"]);
     const imp = clamp01(factor.importance, factor.hard ? 0.84 : 0.74);

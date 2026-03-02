@@ -28,9 +28,27 @@ export type MotifReasoningEdge = {
   confidence: number;
 };
 
+export type MotifReasoningStepRole = "premise" | "bridge" | "decision" | "isolated";
+
+export type MotifReasoningStep = {
+  id: string;
+  order: number;
+  motifId: string;
+  motifNodeId: string;
+  role: MotifReasoningStepRole;
+  status: ConceptMotif["status"];
+  dependencyClass: ConceptMotif["dependencyClass"];
+  causalOperator: ConceptMotif["causalOperator"];
+  dependsOnMotifIds: string[];
+  usedConceptIds: string[];
+  usedConceptTitles: string[];
+  explanation: string;
+};
+
 export type MotifReasoningView = {
   nodes: MotifReasoningNode[];
   edges: MotifReasoningEdge[];
+  steps: MotifReasoningStep[];
 };
 
 function cleanText(input: any, max = 140): string {
@@ -57,6 +75,21 @@ function uniq(arr: string[], max = 40): string[] {
     if (out.length >= max) break;
   }
   return out;
+}
+
+function t(locale: AppLocale | undefined, zh: string, en: string): string {
+  return isEnglishLocale(locale) ? en : zh;
+}
+
+function normalizeLinkType(input: string): MotifLinkType {
+  const raw = cleanText(input, 32).toLowerCase();
+  if (raw === "enable" || raw === "constraint" || raw === "determine" || raw === "conflicts_with") {
+    return raw as MotifLinkType;
+  }
+  // Backward compatibility with old persisted values.
+  if (raw === "conflicts") return "conflicts_with";
+  if (raw === "depends_on" || raw === "refines") return "determine";
+  return "enable";
 }
 
 function sourceRefToken(sourceMsgId: string): string {
@@ -86,11 +119,132 @@ function motifPattern(m: ConceptMotif, conceptTitles: string[]): string {
 }
 
 function statusRank(s: ConceptMotif["status"]): number {
-  if (s === "deprecated") return 5;
+  if (s === "active") return 5;
   if (s === "uncertain") return 4;
-  if (s === "active") return 3;
-  if (s === "disabled") return 2;
+  if (s === "disabled") return 3;
+  if (s === "deprecated") return 2;
   return 1;
+}
+
+function dependencyLabel(dep: ConceptMotif["dependencyClass"], locale?: AppLocale): string {
+  if (dep === "constraint") return t(locale, "约束依赖", "constraint dependency");
+  if (dep === "determine") return t(locale, "决定依赖", "determine dependency");
+  if (dep === "conflicts_with") return t(locale, "冲突依赖", "conflict dependency");
+  return t(locale, "使能依赖", "enable dependency");
+}
+
+function operatorLabel(op: ConceptMotif["causalOperator"], locale?: AppLocale): string {
+  if (op === "direct_causation") return t(locale, "直接因果", "direct causation");
+  if (op === "mediated_causation") return t(locale, "中介因果", "mediated causation");
+  if (op === "confounding") return t(locale, "混杂", "confounding");
+  if (op === "intervention") return t(locale, "干预", "intervention");
+  if (op === "contradiction") return t(locale, "矛盾", "contradiction");
+  return t(locale, "未指定", "unspecified");
+}
+
+function stepRole(indeg: number, outdeg: number): MotifReasoningStepRole {
+  if (indeg <= 0 && outdeg <= 0) return "isolated";
+  if (indeg <= 0 && outdeg > 0) return "premise";
+  if (indeg > 0 && outdeg > 0) return "bridge";
+  return "decision";
+}
+
+function roleLabel(role: MotifReasoningStepRole, locale?: AppLocale): string {
+  if (role === "premise") return t(locale, "前提", "premise");
+  if (role === "bridge") return t(locale, "桥接", "bridge");
+  if (role === "decision") return t(locale, "决策", "decision");
+  return t(locale, "独立", "isolated");
+}
+
+function buildReasoningSteps(params: {
+  nodes: MotifReasoningNode[];
+  edges: MotifReasoningEdge[];
+  locale?: AppLocale;
+}): MotifReasoningStep[] {
+  const nodeById = new Map((params.nodes || []).map((n) => [n.id, n]));
+  const indeg = new Map<string, number>();
+  const outdeg = new Map<string, number>();
+  const incoming = new Map<string, string[]>();
+  const outgoing = new Map<string, string[]>();
+  for (const n of params.nodes || []) {
+    indeg.set(n.id, 0);
+    outdeg.set(n.id, 0);
+    incoming.set(n.id, []);
+    outgoing.set(n.id, []);
+  }
+  for (const e of params.edges || []) {
+    if (!nodeById.has(e.from) || !nodeById.has(e.to) || e.from === e.to) continue;
+    indeg.set(e.to, (indeg.get(e.to) || 0) + 1);
+    outdeg.set(e.from, (outdeg.get(e.from) || 0) + 1);
+    incoming.get(e.to)!.push(e.from);
+    outgoing.get(e.from)!.push(e.to);
+  }
+
+  const remainingIndeg = new Map(indeg);
+  const queue = (params.nodes || [])
+    .filter((n) => (remainingIndeg.get(n.id) || 0) <= 0)
+    .sort((a, b) => statusRank(b.status) - statusRank(a.status) || b.confidence - a.confidence || a.id.localeCompare(b.id))
+    .map((n) => n.id);
+
+  const orderedIds: string[] = [];
+  const visited = new Set<string>();
+  while (queue.length) {
+    const cur = queue.shift() as string;
+    if (visited.has(cur)) continue;
+    visited.add(cur);
+    orderedIds.push(cur);
+    for (const nxt of outgoing.get(cur) || []) {
+      remainingIndeg.set(nxt, (remainingIndeg.get(nxt) || 0) - 1);
+      if ((remainingIndeg.get(nxt) || 0) <= 0) queue.push(nxt);
+    }
+    queue.sort((a, b) => {
+      const na = nodeById.get(a)!;
+      const nb = nodeById.get(b)!;
+      return statusRank(nb.status) - statusRank(na.status) || nb.confidence - na.confidence || a.localeCompare(b);
+    });
+  }
+
+  for (const n of params.nodes || []) {
+    if (visited.has(n.id)) continue;
+    orderedIds.push(n.id);
+  }
+
+  return orderedIds
+    .map((nodeId, idx) => {
+      const n = nodeById.get(nodeId);
+      if (!n) return null;
+      const role = stepRole(indeg.get(nodeId) || 0, outdeg.get(nodeId) || 0);
+      const deps = (incoming.get(nodeId) || [])
+        .map((pid) => nodeById.get(pid))
+        .filter(Boolean)
+        .map((x) => x!.motifId);
+      const depText =
+        deps.length > 0
+          ? t(params.locale, `依赖 ${deps.length} 个前置 motif`, `depends on ${deps.length} prior motif(s)`)
+          : t(params.locale, "无前置依赖", "no prior dependency");
+      const explanation = cleanText(
+        `${t(params.locale, "第", "Step ")}${idx + 1}${t(params.locale, "步", "")} · ${roleLabel(role, params.locale)} · ${dependencyLabel(
+          n.dependencyClass || n.relation,
+          params.locale
+        )} / ${operatorLabel(n.causalOperator, params.locale)}；${depText}。`,
+        220
+      );
+      return {
+        id: `step_${cleanText(n.motifId, 64) || idx + 1}`,
+        order: idx + 1,
+        motifId: n.motifId,
+        motifNodeId: n.id,
+        role,
+        status: n.status,
+        dependencyClass: n.dependencyClass || n.relation,
+        causalOperator: n.causalOperator,
+        dependsOnMotifIds: deps,
+        usedConceptIds: (n.conceptIds || []).slice(0, 8),
+        usedConceptTitles: (n.conceptTitles || []).slice(0, 8),
+        explanation,
+      } as MotifReasoningStep;
+    })
+    .filter(Boolean) as MotifReasoningStep[];
 }
 
 export function buildMotifReasoningView(params: {
@@ -100,7 +254,7 @@ export function buildMotifReasoningView(params: {
   locale?: AppLocale;
 }): MotifReasoningView {
   const conceptById = new Map((params.concepts || []).map((c) => [c.id, c]));
-  const motifs = (params.motifs || []).filter((m) => m.status !== "cancelled");
+  const motifs = (params.motifs || []).slice();
   const motifById = new Map(motifs.map((m) => [m.id, m]));
 
   const nodes: MotifReasoningNode[] = motifs
@@ -153,14 +307,17 @@ export function buildMotifReasoningView(params: {
         id: cleanText(idRaw, 120),
         from,
         to,
-        type:
-          typeRaw === "depends_on" || typeRaw === "conflicts" || typeRaw === "refines"
-            ? typeRaw
-            : "supports",
+        type: normalizeLinkType(typeRaw),
         confidence: 0.72,
       } as MotifReasoningEdge;
     })
     .filter((e) => nodeIdSet.has(e.from) && nodeIdSet.has(e.to) && e.from !== e.to);
 
-  return { nodes, edges };
+  const steps = buildReasoningSteps({
+    nodes,
+    edges,
+    locale: params.locale,
+  });
+
+  return { nodes, edges, steps };
 }
