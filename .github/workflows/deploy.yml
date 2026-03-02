@@ -1,0 +1,29 @@
+name: Deploy Backend
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: SSH deploy backend
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.DEPLOY_HOST }}
+          username: ${{ secrets.DEPLOY_USER }}
+          key: ${{ secrets.DEPLOY_SSH_KEY }}
+          port: ${{ secrets.DEPLOY_PORT || 22 }}
+          script: |
+            set -e
+            cd /home/ubuntu/conginstrument
+            git fetch origin main
+            git checkout main
+            git reset --hard origin/main
+            npm ci
+            pm2 startOrReload ecosystem.config.cjs --env production
+            pm2 save
+            pm2 status
+            curl -fsS http://127.0.0.1:3001/healthz
