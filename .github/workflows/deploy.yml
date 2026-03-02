@@ -18,12 +18,31 @@ jobs:
           port: ${{ secrets.DEPLOY_PORT || 22 }}
           script: |
             set -e
+            export PATH="/usr/local/bin:/usr/bin:/bin:$PATH"
+            if [ -s "$HOME/.nvm/nvm.sh" ]; then
+              . "$HOME/.nvm/nvm.sh"
+            fi
+            if command -v nvm >/dev/null 2>&1; then
+              nvm use --lts >/dev/null 2>&1 || nvm use default >/dev/null 2>&1 || true
+            fi
+            if ! command -v npm >/dev/null 2>&1; then
+              echo "ERROR: npm not found on remote host PATH=$PATH"
+              exit 127
+            fi
             cd /home/ubuntu/conginstrument
             git fetch origin main
             git checkout main
             git reset --hard origin/main
             npm ci
-            pm2 startOrReload ecosystem.config.cjs --env production
-            pm2 save
-            pm2 status
+            if command -v pm2 >/dev/null 2>&1; then
+              PM2_BIN="pm2"
+            elif [ -x "$(npm prefix -g)/bin/pm2" ]; then
+              PM2_BIN="$(npm prefix -g)/bin/pm2"
+            else
+              echo "ERROR: pm2 not found for current node environment"
+              exit 127
+            fi
+            "$PM2_BIN" startOrReload ecosystem.config.cjs --env production
+            "$PM2_BIN" save
+            "$PM2_BIN" status
             curl -fsS http://127.0.0.1:3001/healthz
