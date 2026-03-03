@@ -728,6 +728,219 @@ const cases: Case[] = [
     },
   },
   {
+    name: "latest opposite limiting factor should revoke previous axis without creating opposite node",
+    run: () => {
+      const merged = extractIntentSignalsWithRecency(
+        "限制因素：一定要坐船",
+        "限制因素：不坐船了"
+      );
+      const state = buildSlotStateMachine({
+        userText: "限制因素：不坐船了",
+        recentTurns: [
+          { role: "user", content: "限制因素：一定要坐船" },
+          { role: "assistant", content: "收到" },
+          { role: "user", content: "限制因素：不坐船了" },
+        ],
+        signals: merged,
+      });
+
+      const boatNodes = state.nodes.filter((n: any) => {
+        const key = String(n?.slotKey || "");
+        const statement = String(n?.statement || "");
+        return key.startsWith("slot:constraint:limiting:") && /坐船|乘船|ferry|boat/i.test(statement);
+      });
+      assert.equal(boatNodes.length, 0);
+      assert.equal((merged.revokedConstraintAxes || []).length > 0, true);
+    },
+  },
+  {
+    name: "opposite limiting factor update should remove stale node and detach stale edge",
+    run: () => {
+      const merged = extractIntentSignalsWithRecency(
+        "限制因素：一定要坐船",
+        "限制因素：不坐船了"
+      );
+      const state = buildSlotStateMachine({
+        userText: "限制因素：不坐船了",
+        recentTurns: [
+          { role: "user", content: "限制因素：一定要坐船" },
+          { role: "assistant", content: "收到" },
+          { role: "user", content: "限制因素：不坐船了" },
+        ],
+        signals: merged,
+      });
+      const graph = {
+        id: "g_opposite_limit_patch",
+        version: 1,
+        nodes: [
+          {
+            id: "n_goal",
+            type: "belief",
+            layer: "intent",
+            statement: "意图: 旅行计划",
+            status: "confirmed",
+            confidence: 0.86,
+            importance: 0.84,
+            key: "slot:goal",
+          },
+          {
+            id: "n_old_boat",
+            type: "constraint",
+            layer: "requirement",
+            statement: "限制因素: 一定要坐船",
+            status: "confirmed",
+            confidence: 0.88,
+            importance: 0.8,
+            key: "slot:constraint:limiting:other:otherpos要坐船",
+          },
+        ],
+        edges: [
+          { id: "e_old_boat_goal", from: "n_old_boat", to: "n_goal", type: "constraint", confidence: 0.9 },
+        ],
+      } as any;
+
+      const patch = compileSlotStateToPatch({ graph, state });
+      assert.equal(
+        patch.ops.some((op: any) => op.op === "remove_node" && op.id === "n_old_boat"),
+        true
+      );
+      assert.equal(
+        patch.ops.some((op: any) => op.op === "remove_edge" && op.id === "e_old_boat_goal"),
+        true
+      );
+      assert.equal(
+        patch.ops.some(
+          (op: any) =>
+            op.op === "add_node" && /坐船|乘船|ferry|boat/i.test(String(op.node?.statement || ""))
+        ),
+        false
+      );
+    },
+  },
+  {
+    name: "car opposite update should also revoke old axis without creating opposite node",
+    run: () => {
+      const merged = extractIntentSignalsWithRecency(
+        "限制因素：一定要坐车",
+        "限制因素：不坐车了"
+      );
+      const state = buildSlotStateMachine({
+        userText: "限制因素：不坐车了",
+        recentTurns: [
+          { role: "user", content: "限制因素：一定要坐车" },
+          { role: "assistant", content: "收到" },
+          { role: "user", content: "限制因素：不坐车了" },
+        ],
+        signals: merged,
+      });
+      const carNodes = state.nodes.filter((n: any) => {
+        const key = String(n?.slotKey || "");
+        const statement = String(n?.statement || "");
+        return key.startsWith("slot:constraint:limiting:") && /坐车|乘车|car|taxi|drive/i.test(statement);
+      });
+      assert.equal(carNodes.length, 0);
+    },
+  },
+  {
+    name: "revocation-only input should not overwrite existing goal statement",
+    run: () => {
+      const merged = extractIntentSignalsWithRecency(
+        "限制因素：一定要坐车",
+        "不坐车了"
+      );
+      const state = buildSlotStateMachine({
+        userText: "不坐车了",
+        recentTurns: [
+          { role: "user", content: "限制因素：一定要坐车" },
+          { role: "assistant", content: "收到" },
+          { role: "user", content: "不坐车了" },
+        ],
+        signals: merged,
+      });
+      const graph = {
+        id: "g_goal_preserve",
+        version: 1,
+        nodes: [
+          {
+            id: "n_goal",
+            type: "belief",
+            layer: "intent",
+            statement: "意图：去米兰旅游",
+            status: "confirmed",
+            confidence: 0.9,
+            importance: 0.88,
+            key: "slot:goal",
+          },
+        ],
+        edges: [],
+      } as any;
+      const patch = compileSlotStateToPatch({ graph, state });
+      assert.equal(
+        patch.ops.some(
+          (op: any) => op.op === "update_node" && op.id === "n_goal" && op.patch && typeof op.patch.statement === "string"
+        ),
+        false
+      );
+    },
+  },
+  {
+    name: "scenic preference opposite update should revoke old preference without creating opposite node",
+    run: () => {
+      const merged = extractIntentSignalsWithRecency(
+        "景点偏好：人文景观优先",
+        "不喜欢人文了"
+      );
+      const state = buildSlotStateMachine({
+        userText: "不喜欢人文了",
+        recentTurns: [
+          { role: "user", content: "景点偏好：人文景观优先" },
+          { role: "assistant", content: "收到" },
+          { role: "user", content: "不喜欢人文了" },
+        ],
+        signals: merged,
+      });
+      assert.equal(state.nodes.some((n: any) => String(n?.slotKey || "") === "slot:scenic_preference"), false);
+    },
+  },
+  {
+    name: "lodging preference opposite update should revoke old preference without creating opposite node",
+    run: () => {
+      const merged = extractIntentSignalsWithRecency(
+        "住宿偏好：全程高星级酒店优先",
+        "不要高星级酒店了"
+      );
+      const state = buildSlotStateMachine({
+        userText: "不要高星级酒店了",
+        recentTurns: [
+          { role: "user", content: "住宿偏好：全程高星级酒店优先" },
+          { role: "assistant", content: "收到" },
+          { role: "user", content: "不要高星级酒店了" },
+        ],
+        signals: merged,
+      });
+      assert.equal(state.nodes.some((n: any) => String(n?.slotKey || "") === "slot:lodging"), false);
+    },
+  },
+  {
+    name: "activity preference opposite update should revoke old preference without creating opposite node",
+    run: () => {
+      const merged = extractIntentSignalsWithRecency(
+        "活动偏好：体育赛事优先",
+        "不看球了"
+      );
+      const state = buildSlotStateMachine({
+        userText: "不看球了",
+        recentTurns: [
+          { role: "user", content: "活动偏好：体育赛事优先" },
+          { role: "assistant", content: "收到" },
+          { role: "user", content: "不看球了" },
+        ],
+        signals: merged,
+      });
+      assert.equal(state.nodes.some((n: any) => String(n?.slotKey || "") === "slot:activity_preference"), false);
+    },
+  },
+  {
     name: "highly similar freeform concepts should be deduplicated",
     run: () => {
       const graph = {

@@ -277,21 +277,44 @@ function compactIntentDuration(intent: string, totalDays?: number): string {
   return out || s;
 }
 
+function hasActivePlanningSignals(signals: IntentSignals): boolean {
+  if (signals.destination || signals.destinations?.length) return true;
+  if (signals.durationDays || signals.cityDurations?.length) return true;
+  if (signals.peopleCount) return true;
+  if (signals.budgetCny != null || signals.budgetSpentCny != null || signals.budgetPendingCny != null) return true;
+  if (signals.healthConstraint || signals.languageConstraint) return true;
+  if (signals.genericConstraints?.length) return true;
+  if (signals.scenicPreference || signals.lodgingPreference || signals.activityPreference) return true;
+  if (signals.subLocations?.length) return true;
+  if (signals.criticalPresentation) return true;
+  return false;
+}
+
+function isRevocationOnlyTurn(signals: IntentSignals): boolean {
+  const hasRevocation =
+    (signals.revokedConstraintAxes?.length || 0) > 0 ||
+    (signals.revokedPreferenceAxes?.length || 0) > 0;
+  if (!hasRevocation) return false;
+  return !hasActivePlanningSignals(signals);
+}
+
 function buildGoalNode(params: {
   userText: string;
   signals: IntentSignals;
   totalDays?: number;
   now: string;
   locale?: AppLocale;
+  preserveExistingStatement?: boolean;
 }): SlotNodeSpec {
   // 目标标题里的时长强制对齐状态机总时长，避免“意图6天 vs 总时长3天”这类显示分叉。
   const signalsForIntent: IntentSignals = {
     ...params.signals,
     durationDays: params.totalDays || params.signals.durationDays,
   };
-  const rawIntent =
-    buildTravelIntentStatement(signalsForIntent, params.userText, params.locale) ||
-    cleanStatement(params.userText, 88);
+  const generatedIntent = buildTravelIntentStatement(signalsForIntent, params.userText, params.locale);
+  const rawIntent = params.preserveExistingStatement
+    ? generatedIntent || tr(params.locale, "制定任务计划", "Plan this task")
+    : generatedIntent || cleanStatement(params.userText, 88);
   const intent = compactIntentDuration(rawIntent, params.totalDays);
   const successCriteria: string[] = [];
   if (params.signals.destinations?.length) {
@@ -336,6 +359,7 @@ function buildGoalNode(params: {
     revisionHistory: [{ at: params.now, action: "updated", by: "system", reason: "slot_state_machine" }],
     priority: 0.9,
     successCriteria: successCriteria.length ? successCriteria : undefined,
+    preserveExistingStatement: !!params.preserveExistingStatement,
   };
 }
 
@@ -708,6 +732,7 @@ export function buildSlotStateMachine(params: {
   const nodes: SlotNodeSpec[] = [];
   const edges: SlotEdgeSpec[] = [];
   const now = nowISO();
+  const preserveGoalStatement = isRevocationOnlyTurn(params.signals);
 
   const durationState = buildDurationState(params.signals, params.locale);
   const goal = buildGoalNode({
@@ -716,6 +741,7 @@ export function buildSlotStateMachine(params: {
     totalDays: durationState.totalDays,
     now,
     locale: params.locale,
+    preserveExistingStatement: preserveGoalStatement,
   });
   nodes.push(goal);
 

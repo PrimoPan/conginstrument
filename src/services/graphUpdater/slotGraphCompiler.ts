@@ -11,6 +11,7 @@ function getNodeSlotKey(node: ConceptNode): string | null {
 
 function nodePatchFromSpec(existing: ConceptNode | null, spec: SlotNodeSpec): Partial<ConceptNode> | null {
   if (!existing) return null;
+  if (spec.slotKey === "slot:goal" && spec.preserveExistingStatement) return null;
   const patch: Partial<ConceptNode> = {};
   const setIfChanged = <K extends keyof ConceptNode>(key: K, val: ConceptNode[K]) => {
     const cur = existing[key];

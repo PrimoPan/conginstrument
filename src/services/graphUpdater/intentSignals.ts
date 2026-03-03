@@ -129,6 +129,8 @@ export type IntentSignals = {
   activityPreferenceEvidence?: string;
   activityPreferenceHard?: boolean;
   activityPreferenceImportance?: number;
+  revokedConstraintAxes?: string[];
+  revokedPreferenceAxes?: string[];
   goalImportance?: number;
 };
 
@@ -2011,23 +2013,327 @@ function isVenueOrExperienceRequirement(text: string): boolean {
   return hasExperienceCue && !hasRiskCue;
 }
 
+function hasConstraintDeclarationCue(text: string): boolean {
+  const s = cleanStatement(text || "", 160);
+  if (!s) return false;
+  return /^(?:限制因素|limiting factor|constraint)[:：]/i.test(s);
+}
+
+function hasExplicitConstraintNegationCue(text: string): boolean {
+  const s = cleanStatement(text || "", 160);
+  if (!s) return false;
+  if (/请确认|是否|是不是|不确定|不知道|吗[？?]?$/i.test(s)) return false;
+  if (/(?:不要|不能|不可|不得|别再?|勿|避免|禁止|取消|去掉|不用|无需|不再|不必|不想)\s*[^\s，。,；;！!？?]{1,20}/i.test(s)) {
+    return true;
+  }
+  if (
+    hasStandaloneChineseNegation(s) &&
+    /(?:坐|住|去|乘|搭|选|用|安排|计划|考虑|包含|参加|看|玩|带|吃|喝|买|订|book|take|go|stay|use|choose|include)/i.test(
+      s
+    )
+  ) {
+    return true;
+  }
+  return /\b(?:don't|do not|must not|cannot|can't|avoid|without|exclude|never|no)\b/i.test(s);
+}
+
+type PreferenceAxis = "preference:scenic" | "preference:lodging" | "preference:activity";
+type GenericConstraintPolarity = "positive" | "negative" | "neutral";
+
+type NormalizedGenericConstraint = {
+  text: string;
+  evidence: string;
+  kind: GenericConstraintKind;
+  hard: boolean;
+  severity?: "medium" | "high" | "critical";
+  importance: number;
+  polarity: GenericConstraintPolarity;
+  axisKey: string;
+};
+
+const NEGATIVE_PREFIX_RE =
+  /(?:不要|不能|不可|不得|别再?|勿|避免|禁止|禁用|排除|取消|去掉|不用|无需|不再|不必|不想|must not|do not|don't|cannot|can't|avoid|without|exclude|never|no)/gi;
+const POSITIVE_PREFIX_RE =
+  /(?:必须|务必|一定|需要|要|应当|应该|优先|尽量|最好|must|need|should|prefer|required|include|with)/gi;
+const NON_NEGATION_IDIOM_RE = /(?:不但|不光|不仅|不止|不得不|不少|不错|不一定|不太|不够)/i;
+const LEADING_NOISE_RE =
+  /^(?:我|我们|希望|想|要|需要|必须|务必|一定|请|尽量|最好|优先|一般|通常|可能|也许|先|再|然后|另外|顺便|限制因素|limiting|factor|constraint)+/i;
+const AXIS_STOPWORDS = new Set([
+  "限制因素",
+  "limiting",
+  "factor",
+  "constraint",
+  "constraints",
+  "requirement",
+  "requirements",
+  "trip",
+  "travel",
+  "plan",
+  "itinerary",
+  "please",
+  "want",
+  "need",
+  "must",
+  "should",
+  "prefer",
+  "and",
+  "or",
+  "the",
+  "a",
+  "to",
+]);
+
+const SCENIC_PREF_NEGATION_RE =
+  /(?:不喜欢|不想|不要|不再|不考虑|取消|去掉|避免|stop|don't|do not|avoid|no longer)[^，。；;\n]{0,12}(?:人文|文化|景点|自然|徒步|博物馆|展览|scenic|attraction|culture|nature)/i;
+const LODGING_PREF_NEGATION_RE =
+  /(?:不住|不要|不要住|不想|不想住|不再|不再住|不考虑|不考虑住|不选|取消|去掉|avoid|don't|do not|no longer)[^，。；;\n]{0,14}(?:酒店|民宿|住宿|房型|星级|高星|青旅|hotel|lodging|accommodation)/i;
+const ACTIVITY_PREF_NEGATION_RE =
+  /(?:不看|不要看|不想看|不再看|不安排|不参加|取消|去掉|avoid|don't|do not|no longer)[^，。；;\n]{0,14}(?:球|比赛|球赛|演出|演唱会|展览|赛事|match|game|concert|show|event)/i;
+
+function normalizeAxis(raw: string): string {
+  return cleanStatement(raw || "", 80).toLowerCase();
+}
+
+function mergeAxisList(a?: string[], b?: string[]): string[] | undefined {
+  const out = new Set<string>();
+  for (const axis of [...(a || []), ...(b || [])]) {
+    const normalized = normalizeAxis(axis);
+    if (!normalized) continue;
+    out.add(normalized);
+  }
+  return out.size ? Array.from(out).slice(0, 12) : undefined;
+}
+
+function normalizePreferenceAxis(raw: string): PreferenceAxis | null {
+  const s = normalizeAxis(raw);
+  if (s === "preference:scenic") return "preference:scenic";
+  if (s === "preference:lodging") return "preference:lodging";
+  if (s === "preference:activity") return "preference:activity";
+  return null;
+}
+
+function detectPreferenceRevocationAxesFromText(raw: string): PreferenceAxis[] {
+  const s = cleanStatement(raw || "", 160);
+  if (!s) return [];
+  const hasNegation =
+    /(不喜欢|不想|不要|不能|不再|取消|去掉|避免|stop|don't|do not|must not|cannot|can't|avoid|no longer|without)/i.test(s) ||
+    hasStandaloneChineseNegation(s);
+  if (!hasNegation) return [];
+
+  const out: PreferenceAxis[] = [];
+  if (SCENIC_PREF_NEGATION_RE.test(s)) out.push("preference:scenic");
+  if (LODGING_PREF_NEGATION_RE.test(s)) out.push("preference:lodging");
+  if (ACTIVITY_PREF_NEGATION_RE.test(s)) out.push("preference:activity");
+  return out;
+}
+
+function normalizeGenericConstraintKind(kind: any, text: string): GenericConstraintKind {
+  const raw = cleanStatement(kind || "", 40).toLowerCase();
+  const mapped =
+    raw === "security" || raw === "travel_safety" || raw === "safety_risk"
+      ? "safety"
+      : raw === "medical"
+        ? "health"
+        : raw === "lang"
+          ? "language"
+          : raw;
+  if (["legal", "safety", "mobility", "logistics", "diet", "religion", "other"].includes(mapped)) {
+    return mapped as GenericConstraintKind;
+  }
+  const classified = classifyConstraintText({ text, evidence: text });
+  if (classified?.family === "generic" && classified.kind) return classified.kind;
+  return "other";
+}
+
+function hasStandaloneChineseNegation(text: string): boolean {
+  if (!text.includes("不")) return false;
+  if (NON_NEGATION_IDIOM_RE.test(text)) return false;
+  if (/(^|[，。,；;、\s])不(?=[\u4e00-\u9fa5a-z])/i.test(text)) return true;
+  return /不(?:再|坐|住|去|看|玩|选|用|买|吃|喝|带|做|安排|计划|走|乘)/i.test(text);
+}
+
+function genericConstraintPolarity(text: string): GenericConstraintPolarity {
+  const s = cleanStatement(text || "", 180).toLowerCase();
+  if (!s) return "neutral";
+  const hasNeg =
+    NEGATIVE_PREFIX_RE.test(s) ||
+    hasStandaloneChineseNegation(s);
+  NEGATIVE_PREFIX_RE.lastIndex = 0;
+  if (hasNeg) return "negative";
+  const hasPos = POSITIVE_PREFIX_RE.test(s);
+  POSITIVE_PREFIX_RE.lastIndex = 0;
+  if (hasPos) return "positive";
+  return "neutral";
+}
+
+function normalizeConstraintAxisText(text: string): string {
+  let s = cleanStatement(text || "", 200).toLowerCase();
+  if (!s) return "";
+  s = s.replace(/^限制因素[:：]?\s*/i, "").replace(/^limiting factor[:：]?\s*/i, "").trim();
+
+  const normalizedChunks = s
+    .split(/[。！？!?；;，,\n]/)
+    .map((part) => cleanStatement(part, 120))
+    .filter(Boolean)
+    .map((part) =>
+      part
+        .replace(NEGATIVE_PREFIX_RE, " ")
+        .replace(POSITIVE_PREFIX_RE, " ")
+        .replace(LEADING_NOISE_RE, " ")
+        .replace(/(^|[，。,；;、\s])不(?=[\u4e00-\u9fa5a-z])/gi, "$1")
+        .replace(/[^\p{L}\p{N}\s]/gu, " ")
+        .replace(/\s+/g, " ")
+        .trim()
+    )
+    .filter(Boolean);
+  NEGATIVE_PREFIX_RE.lastIndex = 0;
+  POSITIVE_PREFIX_RE.lastIndex = 0;
+
+  if (!normalizedChunks.length) return "";
+
+  const tokens = normalizedChunks
+    .flatMap((part) => part.match(/[\u4e00-\u9fa5]{1,8}|[a-z0-9]{2,24}/g) || [])
+    .map((token) =>
+      token
+        .replace(/^(?:不再|不要|不能|不可|不得|别|勿|避免|禁止|取消|去掉|不用|无需|不必|不想|不)/, "")
+        .replace(/(?:了|吧|呢|呀|啊)$/g, "")
+        .trim()
+    )
+    .filter((token) => token && !AXIS_STOPWORDS.has(token));
+
+  const uniq = Array.from(new Set(tokens)).slice(0, 5);
+  return uniq.join("_");
+}
+
+function normalizeGenericConstraintItem(
+  raw: NonNullable<IntentSignals["genericConstraints"]>[number]
+): NormalizedGenericConstraint | null {
+  const text = cleanStatement(raw?.text || "", 120);
+  if (!text) return null;
+  const kind = normalizeGenericConstraintKind(raw?.kind, text);
+  const polarity = genericConstraintPolarity(text);
+  const axisCore = normalizeConstraintAxisText(text);
+  const fallbackAxis = text.toLowerCase().replace(/[^\p{L}\p{N}]+/gu, "").slice(0, 36) || "factor";
+  const axisKey = `${kind}:${axisCore || fallbackAxis}`;
+  return {
+    text,
+    evidence: cleanStatement(raw?.evidence || text, 80),
+    kind,
+    hard: !!raw?.hard,
+    severity: raw?.severity,
+    importance: clampImportance(raw?.importance, raw?.hard ? 0.84 : 0.72),
+    polarity,
+    axisKey,
+  };
+}
+
 function mergeGenericConstraints(
   a?: IntentSignals["genericConstraints"],
   b?: IntentSignals["genericConstraints"]
 ): IntentSignals["genericConstraints"] | undefined {
-  const pool = dedupeClassifiedConstraints([...(a || []), ...(b || [])].map((x) => ({
-    text: cleanStatement(x?.text || "", 120),
-    evidence: cleanStatement(x?.evidence || x?.text || "", 80),
-    kind: x?.kind || "other",
-    hard: !!x?.hard,
-    severity: x?.severity,
-    importance: clampImportance(x?.importance, x?.hard ? 0.84 : 0.72),
-  })));
+  const history = (a || [])
+    .map((item) => normalizeGenericConstraintItem(item as any))
+    .filter((item): item is NormalizedGenericConstraint => !!item);
+  const latest = (b || [])
+    .map((item) => normalizeGenericConstraintItem(item as any))
+    .filter((item): item is NormalizedGenericConstraint => !!item);
+
+  const merged: NormalizedGenericConstraint[] = [...history];
+
+  // latest-wins on the same semantic axis:
+  // when users revise or negate a previous constraint, we keep only the newest one.
+  for (const cur of latest) {
+    for (let i = merged.length - 1; i >= 0; i -= 1) {
+      if (merged[i].axisKey === cur.axisKey) merged.splice(i, 1);
+    }
+    merged.push(cur);
+  }
+
+  const pool = dedupeClassifiedConstraints(
+    merged
+      .slice()
+      .reverse()
+      .map((item) => ({
+        text: item.text,
+        evidence: item.evidence,
+        kind: item.kind,
+        hard: item.hard,
+        severity: item.severity,
+        importance: item.importance,
+      }))
+  ).reverse();
+
   const out = pool
     .filter((x) => !!x.text)
     .sort((x, y) => (Number(y.importance) || 0) - (Number(x.importance) || 0))
     .slice(0, 6);
   return out.length ? out : undefined;
+}
+
+function mergeGenericConstraintsWithRevocation(params: {
+  history?: IntentSignals["genericConstraints"];
+  latest?: IntentSignals["genericConstraints"];
+  latestRevokedAxes?: string[];
+}): { constraints?: IntentSignals["genericConstraints"]; revokedAxes?: string[] } {
+  const history = (params.history || [])
+    .map((item) => normalizeGenericConstraintItem(item as any))
+    .filter((item): item is NormalizedGenericConstraint => !!item);
+  const latest = (params.latest || [])
+    .map((item) => normalizeGenericConstraintItem(item as any))
+    .filter((item): item is NormalizedGenericConstraint => !!item);
+
+  const historyAxes = new Set(history.map((item) => item.axisKey));
+  const requestedRevoked = new Set((params.latestRevokedAxes || []).map((x) => normalizeAxis(x)).filter(Boolean));
+  const appliedRevoked = new Set<string>();
+
+  const merged: NormalizedGenericConstraint[] = [...history];
+  for (const axis of requestedRevoked) {
+    if (!historyAxes.has(axis)) continue;
+    for (let i = merged.length - 1; i >= 0; i -= 1) {
+      if (merged[i].axisKey === axis) merged.splice(i, 1);
+    }
+    appliedRevoked.add(axis);
+  }
+
+  for (const cur of latest) {
+    const shouldRevoke =
+      requestedRevoked.has(cur.axisKey) &&
+      historyAxes.has(cur.axisKey) &&
+      cur.polarity === "negative";
+    if (shouldRevoke) {
+      for (let i = merged.length - 1; i >= 0; i -= 1) {
+        if (merged[i].axisKey === cur.axisKey) merged.splice(i, 1);
+      }
+      appliedRevoked.add(cur.axisKey);
+      continue;
+    }
+
+    for (let i = merged.length - 1; i >= 0; i -= 1) {
+      if (merged[i].axisKey === cur.axisKey) merged.splice(i, 1);
+    }
+    merged.push(cur);
+  }
+
+  const pool = dedupeClassifiedConstraints(
+    merged.map((item) => ({
+      text: item.text,
+      evidence: item.evidence,
+      kind: item.kind,
+      hard: item.hard,
+      severity: item.severity,
+      importance: item.importance,
+    }))
+  );
+
+  const constraints = pool
+    .filter((x) => !!x.text)
+    .sort((x, y) => (Number(y.importance) || 0) - (Number(x.importance) || 0))
+    .slice(0, 6);
+
+  return {
+    constraints: constraints.length ? constraints : undefined,
+    revokedAxes: appliedRevoked.size ? Array.from(appliedRevoked).slice(0, 12) : undefined,
+  };
 }
 
 export function extractCriticalPresentationRequirement(text: string): { days: number; reason: string; evidence: string; city?: string } | null {
@@ -2307,6 +2613,14 @@ export function extractIntentSignals(userText: string, opts?: { historyMode?: bo
     out.languageEvidence = languageClause;
   }
 
+  const revokedConstraintAxes = new Set<string>();
+  const revokedPreferenceAxes = new Set<PreferenceAxis>();
+  for (const part of sentenceParts(text)) {
+    for (const axis of detectPreferenceRevocationAxesFromText(part)) {
+      revokedPreferenceAxes.add(axis);
+    }
+  }
+
   const genericConstraints: NonNullable<IntentSignals["genericConstraints"]> = [];
   for (const part of sentenceParts(text)) {
     const s = cleanStatement(part, 120);
@@ -2316,6 +2630,8 @@ export function extractIntentSignals(userText: string, opts?: { historyMode?: bo
     const likelyConstraintCue =
       HARD_CONSTRAINT_RE.test(s) ||
       HARD_REQUIRE_RE.test(s) ||
+      hasConstraintDeclarationCue(s) ||
+      hasExplicitConstraintNegationCue(s) ||
       /签证|护照|入境|治安|安全|轮椅|无障碍|转机|换乘|托运|语言障碍|不会英语|翻译|饮食|忌口|素食|清真|宗教|礼拜|祷告|斋月|安息日|halal|kosher|vegetarian|vegan|religion|prayer|visa|passport|safety|logistics/i.test(
         s
       );
@@ -2338,6 +2654,17 @@ export function extractIntentSignals(userText: string, opts?: { historyMode?: bo
       continue;
     }
     if (c.family === "generic") {
+      const normalized = normalizeGenericConstraintItem({
+        text: c.text,
+        evidence: c.evidence,
+        kind: c.kind,
+        hard: c.hard,
+        severity: c.severity,
+        importance: c.importance,
+      } as any);
+      if (normalized && normalized.polarity === "negative" && hasExplicitConstraintNegationCue(s)) {
+        revokedConstraintAxes.add(normalized.axisKey);
+      }
       genericConstraints.push({
         text: c.text,
         evidence: c.evidence,
@@ -2351,7 +2678,7 @@ export function extractIntentSignals(userText: string, opts?: { historyMode?: bo
   out.genericConstraints = mergeGenericConstraints(undefined, genericConstraints);
 
   const prefClause = sentenceParts(text).map((x) => normalizePreferenceStatement(x, opts?.locale)).find(Boolean);
-  if (prefClause) {
+  if (prefClause && !revokedPreferenceAxes.has("preference:scenic")) {
     out.scenicPreference = prefClause.statement;
     out.scenicPreferenceHard = prefClause.hard;
     out.scenicPreferenceEvidence = prefClause.evidence;
@@ -2359,7 +2686,7 @@ export function extractIntentSignals(userText: string, opts?: { historyMode?: bo
   }
 
   const lodgingClause = sentenceParts(text).map((x) => normalizeLodgingPreferenceStatement(x, opts?.locale)).find(Boolean);
-  if (lodgingClause) {
+  if (lodgingClause && !revokedPreferenceAxes.has("preference:lodging")) {
     out.lodgingPreference = lodgingClause.statement;
     out.lodgingPreferenceHard = lodgingClause.hard;
     out.lodgingPreferenceEvidence = lodgingClause.evidence;
@@ -2367,14 +2694,48 @@ export function extractIntentSignals(userText: string, opts?: { historyMode?: bo
   }
 
   const activityClause = sentenceParts(text).map((x) => normalizeActivityPreferenceStatement(x, opts?.locale)).find(Boolean);
-  if (activityClause) {
+  if (activityClause && !revokedPreferenceAxes.has("preference:activity")) {
     out.activityPreference = activityClause.statement;
     out.activityPreferenceEvidence = activityClause.evidence;
     out.activityPreferenceHard = activityClause.hard;
     out.activityPreferenceImportance = activityClause.hard ? 0.84 : 0.7;
   }
 
+  if (revokedConstraintAxes.size) {
+    out.revokedConstraintAxes = Array.from(revokedConstraintAxes).slice(0, 12);
+  }
+  if (revokedPreferenceAxes.size) {
+    out.revokedPreferenceAxes = Array.from(revokedPreferenceAxes).slice(0, 8);
+  }
+
   return out;
+}
+
+function hasPreferenceStateForAxis(signals: IntentSignals, axis: PreferenceAxis): boolean {
+  if (axis === "preference:scenic") return !!cleanStatement(signals.scenicPreference || "", 120);
+  if (axis === "preference:lodging") return !!cleanStatement(signals.lodgingPreference || "", 120);
+  return !!cleanStatement(signals.activityPreference || "", 120);
+}
+
+function clearPreferenceStateForAxis(signals: IntentSignals, axis: PreferenceAxis): void {
+  if (axis === "preference:scenic") {
+    signals.scenicPreference = undefined;
+    signals.scenicPreferenceEvidence = undefined;
+    signals.scenicPreferenceHard = undefined;
+    signals.scenicPreferenceImportance = undefined;
+    return;
+  }
+  if (axis === "preference:lodging") {
+    signals.lodgingPreference = undefined;
+    signals.lodgingPreferenceEvidence = undefined;
+    signals.lodgingPreferenceHard = undefined;
+    signals.lodgingPreferenceImportance = undefined;
+    return;
+  }
+  signals.activityPreference = undefined;
+  signals.activityPreferenceEvidence = undefined;
+  signals.activityPreferenceHard = undefined;
+  signals.activityPreferenceImportance = undefined;
 }
 
 function mergeSignalsWithLatest(history: IntentSignals, latest: IntentSignals): IntentSignals {
@@ -2382,6 +2743,8 @@ function mergeSignalsWithLatest(history: IntentSignals, latest: IntentSignals): 
   // delta 是“事件”，不是“状态”：避免历史增量在后续轮次被重复叠加。
   out.budgetDeltaCny = undefined;
   out.budgetSpentDeltaCny = undefined;
+  out.revokedConstraintAxes = undefined;
+  out.revokedPreferenceAxes = undefined;
   out.hasTemporalAnchor = !!history.hasTemporalAnchor;
   out.hasDurationUpdateCue = !!history.hasDurationUpdateCue;
   out.hasExplicitTotalCue = !!history.hasExplicitTotalCue;
@@ -2716,41 +3079,65 @@ function mergeSignalsWithLatest(history: IntentSignals, latest: IntentSignals): 
     out.healthEvidence = undefined;
     out.healthImportance = undefined;
   }
-  out.genericConstraints = mergeGenericConstraints(out.genericConstraints, latest.genericConstraints);
-  if (latest.scenicPreference) {
+  const mergedConstraints = mergeGenericConstraintsWithRevocation({
+    history: out.genericConstraints,
+    latest: latest.genericConstraints,
+    latestRevokedAxes: latest.revokedConstraintAxes,
+  });
+  out.genericConstraints = mergedConstraints.constraints;
+  if (mergedConstraints.revokedAxes?.length) {
+    out.revokedConstraintAxes = mergeAxisList(out.revokedConstraintAxes, mergedConstraints.revokedAxes);
+  }
+
+  const requestedPreferenceRevokes = new Set<PreferenceAxis>();
+  for (const axisRaw of latest.revokedPreferenceAxes || []) {
+    const axis = normalizePreferenceAxis(axisRaw);
+    if (axis) requestedPreferenceRevokes.add(axis);
+  }
+  const appliedPreferenceRevokes = new Set<string>();
+  for (const axis of requestedPreferenceRevokes) {
+    if (!hasPreferenceStateForAxis(out, axis)) continue;
+    clearPreferenceStateForAxis(out, axis);
+    appliedPreferenceRevokes.add(axis);
+  }
+
+  if (latest.scenicPreference && !requestedPreferenceRevokes.has("preference:scenic")) {
     out.scenicPreference = latest.scenicPreference;
     out.scenicPreferenceEvidence = latest.scenicPreferenceEvidence || out.scenicPreferenceEvidence;
     out.scenicPreferenceHard = latest.scenicPreferenceHard;
   }
-  if (latest.scenicPreferenceImportance != null) {
+  if (latest.scenicPreferenceImportance != null && !requestedPreferenceRevokes.has("preference:scenic")) {
     out.scenicPreferenceImportance = clampImportance(
       latest.scenicPreferenceImportance,
       out.scenicPreferenceImportance || 0.68
     );
   }
-  if (latest.lodgingPreference) {
+  if (latest.lodgingPreference && !requestedPreferenceRevokes.has("preference:lodging")) {
     out.lodgingPreference = latest.lodgingPreference;
     out.lodgingPreferenceEvidence =
       latest.lodgingPreferenceEvidence || out.lodgingPreferenceEvidence;
     out.lodgingPreferenceHard = latest.lodgingPreferenceHard;
   }
-  if (latest.lodgingPreferenceImportance != null) {
+  if (latest.lodgingPreferenceImportance != null && !requestedPreferenceRevokes.has("preference:lodging")) {
     out.lodgingPreferenceImportance = clampImportance(
       latest.lodgingPreferenceImportance,
       out.lodgingPreferenceImportance || 0.66
     );
   }
-  if (latest.activityPreference) {
+  if (latest.activityPreference && !requestedPreferenceRevokes.has("preference:activity")) {
     out.activityPreference = latest.activityPreference;
     out.activityPreferenceEvidence =
       latest.activityPreferenceEvidence || out.activityPreferenceEvidence;
     out.activityPreferenceHard = latest.activityPreferenceHard;
   }
-  if (latest.activityPreferenceImportance != null) {
+  if (latest.activityPreferenceImportance != null && !requestedPreferenceRevokes.has("preference:activity")) {
     out.activityPreferenceImportance = clampImportance(
       latest.activityPreferenceImportance,
       out.activityPreferenceImportance || 0.7
     );
+  }
+  if (appliedPreferenceRevokes.size) {
+    out.revokedPreferenceAxes = mergeAxisList(out.revokedPreferenceAxes, Array.from(appliedPreferenceRevokes));
   }
   if (latest.goalImportance != null) {
     out.goalImportance = clampImportance(latest.goalImportance, out.goalImportance || 0.82);

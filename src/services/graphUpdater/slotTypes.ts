@@ -14,6 +14,7 @@ export type SlotNodeSpec = {
   sourceMsgIds?: string[];
   key?: string;
   value?: unknown;
+  preserveExistingStatement?: boolean;
 
   // PRD motif/intent fields
   motifType?: MotifType;
