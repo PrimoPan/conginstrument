@@ -155,6 +155,7 @@ async function persistConversationModel(params: {
         motifLinks: params.model.motifLinks,
         motifReasoningView: params.model.motifReasoningView,
         contexts: params.model.contexts,
+        validationStatus: params.model.validationStatus,
         travelPlanState,
         updatedAt: params.updatedAt,
       },
@@ -170,6 +171,46 @@ function toConflictGatePayload(motifs: any[], locale?: AppLocale) {
     blocked: true,
     unresolvedMotifs: unresolved,
     message: buildConflictGateMessage(unresolved, locale),
+  };
+}
+
+function normalizeReasoningSteps(model: ReturnType<typeof buildCognitiveModel>) {
+  const steps = Array.isArray(model?.motifReasoningView?.steps) ? model.motifReasoningView.steps : [];
+  return steps.map((step: any, idx: number) => ({
+    step_id: String(step?.step_id || step?.id || `S${idx + 1}`),
+    summary: String(step?.summary || step?.explanation || "").trim().slice(0, 240),
+    motif_ids: Array.isArray(step?.motif_ids)
+      ? step.motif_ids
+      : [String(step?.motifId || "")].filter(Boolean),
+    concept_ids: Array.isArray(step?.concept_ids)
+      ? step.concept_ids
+      : Array.isArray(step?.usedConceptIds)
+      ? step.usedConceptIds
+      : [],
+    depends_on: Array.isArray(step?.depends_on)
+      ? step.depends_on
+      : Array.isArray(step?.dependsOnMotifIds)
+      ? step.dependsOnMotifIds
+      : [],
+  }));
+}
+
+function modelPayload(model: ReturnType<typeof buildCognitiveModel>) {
+  const reasoning_steps = normalizeReasoningSteps(model);
+  return {
+    graph: model.graph,
+    concept_graph: model.conceptGraph,
+    motifs: model.motifs,
+    motifLinks: model.motifLinks,
+    motif_graph: {
+      motifs: model.motifGraph.motifs,
+      motif_links: model.motifGraph.motifLinks,
+    },
+    motifReasoningView: model.motifReasoningView,
+    reasoning_steps,
+    concepts: model.concepts,
+    contexts: model.contexts,
+    validation_status: model.validationStatus,
   };
 }
 
@@ -232,6 +273,7 @@ convRouter.post("/", async (req: AuthedRequest, res) => {
     motifLinks: [],
     motifReasoningView: { nodes: [], edges: [] },
     contexts: [],
+    validationStatus: "unasked",
     travelPlanState: {
       version: 1,
       updatedAt: now.toISOString(),
@@ -257,6 +299,7 @@ convRouter.post("/", async (req: AuthedRequest, res) => {
         motifLinks: [],
         motifReasoningView: { nodes: [], edges: [] },
         contexts: [],
+        validationStatus: "unasked",
         travelPlanState: {
           version: 1,
           updatedAt: now.toISOString(),
@@ -290,12 +333,7 @@ convRouter.post("/", async (req: AuthedRequest, res) => {
     title: conv.title,
     locale: normalizeLocale((conv as any).locale),
     systemPrompt: conv.systemPrompt,
-    graph: model.graph,
-    concepts: model.concepts,
-    motifs: model.motifs,
-    motifLinks: model.motifLinks,
-    motifReasoningView: model.motifReasoningView,
-    contexts: model.contexts,
+    ...modelPayload(model),
     travelPlanState: (conv as any).travelPlanState || null,
   });
 });
@@ -326,12 +364,7 @@ convRouter.get("/:id", async (req: AuthedRequest, res) => {
     title: conv.title,
     locale,
     systemPrompt: conv.systemPrompt,
-    graph: model.graph,
-    concepts: model.concepts,
-    motifs: model.motifs,
-    motifLinks: model.motifLinks,
-    motifReasoningView: model.motifReasoningView,
-    contexts: model.contexts,
+    ...modelPayload(model),
     travelPlanState: (conv as any).travelPlanState || null,
   });
 });
@@ -371,8 +404,16 @@ convRouter.put("/:id/graph", async (req: AuthedRequest, res) => {
     graph: normalized,
     prevConcepts: conv.concepts || [],
     baseConcepts: Array.isArray(req.body?.concepts) ? req.body.concepts : conv.concepts || [],
-    baseMotifs: Array.isArray(req.body?.motifs) ? req.body.motifs : (conv as any).motifs || [],
-    baseMotifLinks: Array.isArray(req.body?.motifLinks) ? req.body.motifLinks : (conv as any).motifLinks || [],
+    baseMotifs: Array.isArray(req.body?.motifs)
+      ? req.body.motifs
+      : Array.isArray(req.body?.motif_graph?.motifs)
+      ? req.body.motif_graph.motifs
+      : (conv as any).motifs || [],
+    baseMotifLinks: Array.isArray(req.body?.motifLinks)
+      ? req.body.motifLinks
+      : Array.isArray(req.body?.motif_graph?.motif_links)
+      ? req.body.motif_graph.motif_links
+      : (conv as any).motifLinks || [],
     baseContexts: Array.isArray(req.body?.contexts) ? req.body.contexts : (conv as any).contexts || [],
     locale,
   });
@@ -399,6 +440,7 @@ convRouter.put("/:id/graph", async (req: AuthedRequest, res) => {
         motifLinks: model.motifLinks,
         motifReasoningView: model.motifReasoningView,
         contexts: model.contexts,
+        validationStatus: model.validationStatus,
         travelPlanState,
         updatedAt: now,
       },
@@ -442,12 +484,7 @@ convRouter.put("/:id/graph", async (req: AuthedRequest, res) => {
   res.json({
     conversationId: id,
     locale,
-    graph: model.graph,
-    concepts: model.concepts,
-    motifs: model.motifs,
-    motifLinks: model.motifLinks,
-    motifReasoningView: model.motifReasoningView,
-    contexts: model.contexts,
+    ...modelPayload(model),
     travelPlanState,
     updatedAt: now,
     assistantText,
@@ -504,6 +541,7 @@ convRouter.put("/:id/concepts", async (req: AuthedRequest, res) => {
         motifLinks: model.motifLinks,
         motifReasoningView: model.motifReasoningView,
         contexts: model.contexts,
+        validationStatus: model.validationStatus,
         travelPlanState,
         updatedAt: now,
       },
@@ -513,12 +551,7 @@ convRouter.put("/:id/concepts", async (req: AuthedRequest, res) => {
   res.json({
     conversationId: id,
     locale,
-    graph: model.graph,
-    concepts: model.concepts,
-    motifs: model.motifs,
-    motifLinks: model.motifLinks,
-    motifReasoningView: model.motifReasoningView,
-    contexts: model.contexts,
+    ...modelPayload(model),
     travelPlanState,
     updatedAt: now,
   });
@@ -699,12 +732,7 @@ convRouter.post("/:id/turn", async (req: AuthedRequest, res) => {
     return res.json({
       assistantText: conflictGate.message,
       graphPatch: blockedPatch,
-      graph: preModel.graph,
-      concepts: preModel.concepts,
-      motifs: preModel.motifs,
-      motifLinks: preModel.motifLinks,
-      motifReasoningView: preModel.motifReasoningView,
-      contexts: preModel.contexts,
+      ...modelPayload(preModel),
       travelPlanState,
       conflictGate,
     });
@@ -755,12 +783,7 @@ convRouter.post("/:id/turn", async (req: AuthedRequest, res) => {
   res.json({
     assistantText: out.assistant_text,
     graphPatch: merged.appliedPatch,
-    graph: model.graph,
-    concepts: model.concepts,
-    motifs: model.motifs,
-    motifLinks: model.motifLinks,
-    motifReasoningView: model.motifReasoningView,
-    contexts: model.contexts,
+    ...modelPayload(model),
     travelPlanState,
   });
 });
@@ -848,12 +871,7 @@ convRouter.post("/:id/turn/stream", async (req: AuthedRequest, res) => {
     sseSend(res, "done", {
       assistantText: conflictGate.message,
       graphPatch: blockedPatch,
-      graph: preModel.graph,
-      concepts: preModel.concepts,
-      motifs: preModel.motifs,
-      motifLinks: preModel.motifLinks,
-      motifReasoningView: preModel.motifReasoningView,
-      contexts: preModel.contexts,
+      ...modelPayload(preModel),
       travelPlanState,
       conflictGate,
     });
@@ -945,12 +963,7 @@ convRouter.post("/:id/turn/stream", async (req: AuthedRequest, res) => {
     sseSend(res, "done", {
       assistantText: out.assistant_text,
       graphPatch: merged.appliedPatch,
-      graph: model.graph,
-      concepts: model.concepts,
-      motifs: model.motifs,
-      motifLinks: model.motifLinks,
-      motifReasoningView: model.motifReasoningView,
-      contexts: model.contexts,
+      ...modelPayload(model),
       travelPlanState,
     });
 
@@ -1004,12 +1017,7 @@ convRouter.post("/:id/turn/stream", async (req: AuthedRequest, res) => {
         sseSend(res, "done", {
           assistantText: out2.assistant_text,
           graphPatch: merged2.appliedPatch,
-          graph: model2.graph,
-          concepts: model2.concepts,
-          motifs: model2.motifs,
-          motifLinks: model2.motifLinks,
-          motifReasoningView: model2.motifReasoningView,
-          contexts: model2.contexts,
+          ...modelPayload(model2),
           travelPlanState,
         });
 

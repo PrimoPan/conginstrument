@@ -1,6 +1,7 @@
 import type { ConceptMotif } from "./conceptMotifs.js";
+import { normalizeMotifLinkType } from "../../core/graph/schemaAdapters.js";
 
-export type MotifLinkType = "enable" | "constraint" | "determine" | "conflicts_with";
+export type MotifLinkType = "precedes" | "supports" | "conflicts_with" | "refines";
 
 export type MotifLink = {
   id: string;
@@ -65,19 +66,7 @@ function normalizeLinks(input: any): MotifLink[] {
     if (seen.has(k)) continue;
     seen.add(k);
 
-    const typeRaw = cleanText((raw as any)?.type, 24).toLowerCase();
-    const type: MotifLinkType =
-      typeRaw === "constraint" ||
-      typeRaw === "determine" ||
-      typeRaw === "conflicts_with" ||
-      typeRaw === "enable"
-        ? (typeRaw as MotifLinkType)
-        : // Backward-compatible mapping for old persisted values.
-        typeRaw === "conflicts"
-        ? "conflicts_with"
-        : typeRaw === "depends_on" || typeRaw === "refines"
-        ? "determine"
-        : "enable";
+    const type: MotifLinkType = normalizeMotifLinkType((raw as any)?.type, "supports");
     const sourceRaw = cleanText((raw as any)?.source, 24).toLowerCase();
     const source: "system" | "user" = sourceRaw === "user" ? "user" : "system";
     out.push({
@@ -111,20 +100,19 @@ function autoType(a: ConceptMotif, b: ConceptMotif): MotifLinkType {
   const depA = dependencyClassOf(a);
   const depB = dependencyClassOf(b);
 
-  if (aUsesB && !bUsesA) {
-    if (depA === "determine" || depB === "determine") return "determine";
-    if (depA === "constraint" || depB === "constraint") return "constraint";
-    return "enable";
-  }
-  if (bUsesA && !aUsesB) {
-    if (depA === "determine" || depB === "determine") return "determine";
-    if (depA === "constraint" || depB === "constraint") return "constraint";
-    return "enable";
+  if (aUsesB && !bUsesA) return "precedes";
+  if (bUsesA && !aUsesB) return "precedes";
+
+  const conceptsA = new Set(a.conceptIds || []);
+  const conceptsB = new Set(b.conceptIds || []);
+  const aInB = Array.from(conceptsA).every((x) => conceptsB.has(x));
+  const bInA = Array.from(conceptsB).every((x) => conceptsA.has(x));
+  if (a.anchorConceptId && a.anchorConceptId === b.anchorConceptId && (aInB || bInA)) {
+    return "refines";
   }
 
-  if (depA === "constraint" || depB === "constraint") return "constraint";
-  if (depA === "determine" || depB === "determine") return "determine";
-  return "enable";
+  if (depA === "constraint" && depB === "constraint") return "conflicts_with";
+  return "supports";
 }
 
 function buildAutoLinks(motifs: ConceptMotif[]): MotifLink[] {
@@ -148,7 +136,11 @@ function buildAutoLinks(motifs: ConceptMotif[]): MotifLink[] {
       const aDependsOnB = !!b.anchorConceptId && (a.conceptIds || []).includes(b.anchorConceptId);
       const bDependsOnA = !!a.anchorConceptId && (b.conceptIds || []).includes(a.anchorConceptId);
       const from =
-        aDependsOnB && !bDependsOnA
+        type === "refines"
+          ? (a.conceptIds || []).length >= (b.conceptIds || []).length
+            ? a
+            : b
+          : aDependsOnB && !bDependsOnA
           ? b
           : bDependsOnA && !aDependsOnB
           ? a
@@ -192,11 +184,28 @@ export function reconcileMotifLinks(params: {
   baseLinks?: any;
 }): MotifLink[] {
   const now = new Date().toISOString();
+  const aliasToCanonical = new Map<string, string>();
+  for (const m of params.motifs || []) {
+    const canonicalId = cleanText(m.id, 120);
+    if (!canonicalId) continue;
+    aliasToCanonical.set(canonicalId, canonicalId);
+    const motifId = cleanText((m as any)?.motif_id, 120);
+    if (motifId) aliasToCanonical.set(motifId, canonicalId);
+    for (const alias of Array.isArray((m as any)?.aliases) ? (m as any).aliases : []) {
+      const aid = cleanText(alias, 120);
+      if (aid) aliasToCanonical.set(aid, canonicalId);
+    }
+  }
+  const remapMotifId = (id: string) => aliasToCanonical.get(cleanText(id, 120)) || cleanText(id, 120);
   const motifIds = new Set((params.motifs || []).map((m) => m.id));
   const auto = buildAutoLinks(params.motifs || []);
-  const base = normalizeLinks(params.baseLinks).filter(
-    (x) => motifIds.has(x.fromMotifId) && motifIds.has(x.toMotifId)
-  );
+  const base = normalizeLinks(params.baseLinks)
+    .map((x) => ({
+      ...x,
+      fromMotifId: remapMotifId(x.fromMotifId),
+      toMotifId: remapMotifId(x.toMotifId),
+    }))
+    .filter((x) => motifIds.has(x.fromMotifId) && motifIds.has(x.toMotifId) && x.fromMotifId !== x.toMotifId);
 
   const byKey = new Map<string, MotifLink>();
   for (const x of auto) byKey.set(linkKey(x.fromMotifId, x.toMotifId), x);

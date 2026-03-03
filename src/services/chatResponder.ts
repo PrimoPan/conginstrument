@@ -132,16 +132,26 @@ function graphSummaryForChat(graph: CDG): string {
       .slice(-k)
       .map((n: any) => `- ${String(n.statement || "").slice(0, 80)}`);
 
-  const goals = pick("goal", 6);
+  const goals = nodes
+    .filter(
+      (n: any) => n?.type === "belief" && (String(n?.key || "").startsWith("slot:goal") || String(n?.layer || "") === "intent")
+    )
+    .slice(-6)
+    .map((n: any) => `- ${String(n.statement || "").slice(0, 80)}`);
   const hardC = nodes
     .filter((n: any) => n?.type === "constraint" && n?.strength === "hard")
     .slice(-6)
     .map((n: any) => `- ${String(n.statement || "").slice(0, 80)}`);
 
   const prefs = pick("preference", 6);
-  const facts = pick("fact", 6);
+  const facts = pick("factual_assertion", 6);
   const qs = nodes
-    .filter((n: any) => n?.type === "question" && (n.status === "proposed" || !n.status))
+    .filter(
+      (n: any) =>
+        String(n?.validation_status || n?.value?.validation_status || n?.value?.conceptState?.validation_status || "")
+          .toLowerCase()
+          .trim() === "pending"
+    )
     .slice(-2)
     .map((n: any) => `- ${String(n.statement || "").slice(0, 80)}`);
 

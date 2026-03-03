@@ -1,4 +1,12 @@
 import type { CDG, ConceptNode } from "../core/graph.js";
+import {
+  conceptTypeMigration,
+  normalizeConceptType,
+  normalizeExtractionStage,
+  normalizeValidationStatus,
+  type ConceptValidationStatus,
+  type ConceptExtractionStage,
+} from "../core/graph/schemaAdapters.js";
 
 export type ConceptKind =
   | "belief"
@@ -6,16 +14,9 @@ export type ConceptKind =
   | "preference"
   | "factual_assertion";
 
-export type ConceptExtractionStage =
-  | "identification"
-  | "disambiguation"
-  | "validation";
+export type { ConceptExtractionStage, ConceptValidationStatus };
 
-export const CONCEPT_EXTRACTION_STAGES: ConceptExtractionStage[] = [
-  "identification",
-  "disambiguation",
-  "validation",
-];
+export const CONCEPT_EXTRACTION_STAGES: ConceptExtractionStage[] = ["identification", "disambiguation"];
 
 export type ConceptFamily =
   | "goal"
@@ -36,6 +37,10 @@ export type ConceptFamily =
 export type ConceptItem = {
   id: string;
   kind: ConceptKind;
+  validationStatus: ConceptValidationStatus;
+  extractionStage: ConceptExtractionStage;
+  polarity: "positive" | "negative";
+  scope: string;
   family: ConceptFamily;
   semanticKey: string;
   title: string;
@@ -46,6 +51,7 @@ export type ConceptItem = {
   evidenceTerms: string[];
   sourceMsgIds: string[];
   motifIds?: string[];
+  migrationHistory?: string[];
   locked: boolean;
   paused: boolean;
   updatedAt: string;
@@ -286,7 +292,7 @@ export function semanticKeyForNode(n: ConceptNode): string {
   const parsed = canonicalSlotKey(parseSemanticKeyFromStatement(n));
   if (parsed) return parsed;
 
-  const type = cleanText((n as any).type, 20) || "factual_assertion";
+  const type = normalizeConceptType(cleanText((n as any).type, 20), "factual_assertion");
   const signature = semanticFreeformSignature(cleanText(n.statement, 140) || cleanText(n.id, 40) || "node");
   return `slot:freeform:${type}:${signature || "node"}`;
 }
@@ -300,11 +306,12 @@ export function stableConceptIdFromSemanticKey(semanticKey: string): string {
 }
 
 function conceptKindForNode(n: ConceptNode, family: ConceptFamily): ConceptKind {
+  const type = normalizeConceptType((n as any)?.type, "factual_assertion");
   const statement = cleanText(n.statement, 180);
-  if (n.type === "preference" || (n as any).layer === "preference") return "preference";
-  if (n.type === "belief" || (n as any).layer === "intent") return "belief";
+  if (type === "preference" || (n as any).layer === "preference") return "preference";
+  if (type === "belief" || (n as any).layer === "intent") return "belief";
   if (
-    n.type === "constraint" ||
+    type === "constraint" ||
     family === "limiting_factor" ||
     family === "generic_constraint" ||
     family === "meeting_critical" ||
@@ -346,7 +353,7 @@ function readNodePaused(n: ConceptNode): boolean {
 function conceptTitleFromNode(n: ConceptNode): string {
   const s = cleanText(n.statement, 80);
   if (s) return s;
-  return `${n.type}:${cleanText(n.id, 24)}`;
+  return `${normalizeConceptType((n as any)?.type, "factual_assertion")}:${cleanText(n.id, 24)}`;
 }
 
 function conceptDescriptionFromNode(n: ConceptNode, kind: ConceptKind): string {
@@ -359,18 +366,67 @@ function conceptDescriptionFromNode(n: ConceptNode, kind: ConceptKind): string {
   return cleanText(label, 120);
 }
 
-function normalizeConceptKind(raw: string, fallback: ConceptKind): ConceptKind {
+function normalizeConceptKind(raw: string, fallback: ConceptKind): {
+  kind: ConceptKind;
+  validationStatus?: ConceptValidationStatus;
+  migrationNote?: string;
+} {
   const k = cleanText(raw, 40).toLowerCase();
-  if (k === "belief") return "belief";
-  if (k === "constraint") return "constraint";
-  if (k === "preference") return "preference";
-  if (k === "factual_assertion" || k === "factual assertion") return "factual_assertion";
+  if (k === "intent") {
+    return { kind: "belief", migrationNote: "legacy_intent_migrated_to_belief" };
+  }
+  if (k === "requirement" || k === "risk") {
+    return { kind: "constraint", migrationNote: `legacy_${k}_migrated_to_constraint` };
+  }
 
-  // Backward compatibility for old concept kinds.
-  if (k === "intent") return "belief";
-  if (k === "requirement" || k === "risk") return "constraint";
-  if (k === "fact" || k === "question") return "factual_assertion";
-  return fallback;
+  const migrated = conceptTypeMigration(k || fallback);
+  return {
+    kind: migrated.type,
+    validationStatus: migrated.validationStatus,
+    migrationNote: migrated.note,
+  };
+}
+
+function conceptPolarityFromNode(n: ConceptNode): "positive" | "negative" {
+  const statement = cleanText(n.statement, 220);
+  const hasChineseNegative = /(不|不能|不要|禁止|避免|别|勿|无须|不必|不建议)/.test(statement);
+  const hasEnglishNegative = /\b(must not|cannot|can't|do not|don't|avoid|never|no need to|shouldn't|should not)\b/i.test(
+    statement
+  );
+  return hasChineseNegative || hasEnglishNegative ? "negative" : "positive";
+}
+
+function conceptScopeFromNode(n: ConceptNode): string {
+  const rawScope =
+    cleanText((n as any)?.value?.scope, 64) ||
+    cleanText((n as any)?.scope, 64) ||
+    cleanText((n as any)?.value?.context, 64);
+  if (rawScope) return rawScope.toLowerCase();
+  const slot = semanticKeyForNode(n);
+  if (slot.startsWith("slot:duration_city:")) return "city";
+  if (slot.startsWith("slot:destination:")) return "destination";
+  if (slot.startsWith("slot:constraint:")) return "constraint";
+  return "global";
+}
+
+function conceptValidationStatusFromNode(n: ConceptNode): ConceptValidationStatus {
+  const fromMeta = normalizeValidationStatus(
+    (n as any)?.validation_status || (n as any)?.value?.validation_status || (n as any)?.value?.conceptState?.validation_status,
+    "unasked"
+  );
+  if (fromMeta !== "unasked") return fromMeta;
+  const statement = cleanText(n.statement, 200);
+  if (/[?？]$/.test(statement) || /^待确认[:：]/.test(statement)) return "pending";
+  return "unasked";
+}
+
+function dedupBucketKey(params: {
+  semanticKey: string;
+  kind: ConceptKind;
+  polarity: "positive" | "negative";
+  scope: string;
+}): string {
+  return `${params.semanticKey}|${params.kind}|${params.polarity}|${params.scope || "global"}`;
 }
 
 function betterNode(a: ConceptNode, b: ConceptNode): ConceptNode {
@@ -397,14 +453,35 @@ function sortNodeIds(nodeIds: string[], primaryNodeId?: string): string[] {
   return [primaryNodeId, ...rest];
 }
 
-function buildSemanticNodeIndex(graph: CDG): Map<string, ConceptNode[]> {
-  const out = new Map<string, ConceptNode[]>();
+type SemanticNodeBucket = {
+  semanticKey: string;
+  kind: ConceptKind;
+  polarity: "positive" | "negative";
+  scope: string;
+  nodes: ConceptNode[];
+};
+
+function buildSemanticNodeIndex(graph: CDG): Map<string, SemanticNodeBucket> {
+  const out = new Map<string, SemanticNodeBucket>();
   for (const n of graph.nodes || []) {
     if (!shouldKeepNode(n)) continue;
     const semanticKey = semanticKeyForNode(n);
     if (!semanticKey) continue;
-    if (!out.has(semanticKey)) out.set(semanticKey, []);
-    out.get(semanticKey)!.push(n);
+    const family = semanticFamilyFromKey(semanticKey);
+    const kind = conceptKindForNode(n, family);
+    const polarity = conceptPolarityFromNode(n);
+    const scope = conceptScopeFromNode(n);
+    const key = dedupBucketKey({ semanticKey, kind, polarity, scope });
+    if (!out.has(key)) {
+      out.set(key, {
+        semanticKey,
+        kind,
+        polarity,
+        scope,
+        nodes: [],
+      });
+    }
+    out.get(key)!.nodes.push(n);
   }
   return out;
 }
@@ -419,12 +496,17 @@ export function deriveConceptsFromGraph(graph: CDG): ConceptItem[] {
   const semanticIndex = buildSemanticNodeIndex(graph);
   const concepts: ConceptItem[] = [];
 
-  for (const [semanticKey, nodes] of semanticIndex.entries()) {
+  for (const bucket of semanticIndex.values()) {
+    const semanticKey = bucket.semanticKey;
+    const nodes = bucket.nodes;
     const primaryNode = primaryNodeOf(nodes);
     if (!primaryNode) continue;
 
     const family = semanticFamilyFromKey(semanticKey);
-    const kind = conceptKindForNode(primaryNode, family);
+    const kind = bucket.kind;
+    const polarity = bucket.polarity;
+    const scope = bucket.scope;
+    const validationStatus = conceptValidationStatusFromNode(primaryNode);
     const title = conceptTitleFromNode(primaryNode);
     const description = conceptDescriptionFromNode(primaryNode, kind);
 
@@ -454,8 +536,12 @@ export function deriveConceptsFromGraph(graph: CDG): ConceptItem[] {
     const locked = nodes.some((n) => !!n.locked);
 
     concepts.push({
-      id: stableConceptIdFromSemanticKey(semanticKey),
+      id: stableConceptIdFromSemanticKey(`${semanticKey}|${kind}|${polarity}|${scope}`),
       kind,
+      validationStatus,
+      extractionStage: "disambiguation",
+      polarity,
+      scope,
       family,
       semanticKey,
       title: cleanText(title, 60) || "Concept",
@@ -466,6 +552,7 @@ export function deriveConceptsFromGraph(graph: CDG): ConceptItem[] {
       evidenceTerms: allEvidenceTerms,
       sourceMsgIds: allSourceMsgIds,
       motifIds: [],
+      migrationHistory: [],
       locked,
       paused,
       updatedAt: now,
@@ -486,9 +573,14 @@ export function normalizeConceptsForGraph(input: any, graph: CDG): ConceptItem[]
   const nodesById = new Map((graph.nodes || []).map((n) => [n.id, n]));
   const semanticIndex = buildSemanticNodeIndex(graph);
   const semanticToPrimary = new Map<string, string>();
-  for (const [semanticKey, nodes] of semanticIndex.entries()) {
-    const primaryNode = primaryNodeOf(nodes);
-    if (primaryNode) semanticToPrimary.set(semanticKey, primaryNode.id);
+  const semanticToNodeIds = new Map<string, string[]>();
+  for (const bucket of semanticIndex.values()) {
+    const primaryNode = primaryNodeOf(bucket.nodes);
+    if (primaryNode && !semanticToPrimary.has(bucket.semanticKey)) {
+      semanticToPrimary.set(bucket.semanticKey, primaryNode.id);
+    }
+    const merged = uniq([...(semanticToNodeIds.get(bucket.semanticKey) || []), ...bucket.nodes.map((n) => n.id)], 320);
+    semanticToNodeIds.set(bucket.semanticKey, merged);
   }
 
   const arr = Array.isArray(input) ? input : [];
@@ -505,42 +597,75 @@ export function normalizeConceptsForGraph(input: any, graph: CDG): ConceptItem[]
     const semanticKey = semanticFromNode || semanticFromRaw;
     if (!semanticKey) continue;
 
-    const conceptId = stableConceptIdFromSemanticKey(semanticKey);
-    if (usedConceptIds.has(conceptId)) continue;
-    usedConceptIds.add(conceptId);
-
-    const semanticNodes = semanticIndex.get(semanticKey) || [];
     const inferredPrimaryNodeId = semanticToPrimary.get(semanticKey) || "";
     const rawPrimaryNodeId = cleanText((raw as any)?.primaryNodeId, 64);
     const basePrimaryNodeId = [rawPrimaryNodeId, firstValidNodeId, inferredPrimaryNodeId].find(
       (id) => !!id && nodesById.has(id)
     );
+    const primaryNode =
+      (basePrimaryNodeId && nodesById.get(basePrimaryNodeId)) ||
+      (firstValidNodeId && nodesById.get(firstValidNodeId)) ||
+      null;
 
-    const semanticNodeIds = semanticNodes.map((n) => n.id);
+    const family = semanticFamilyFromKey(semanticKey);
+    const inferredKind = primaryNode ? conceptKindForNode(primaryNode, family) : "factual_assertion";
+    const normalizedKind = normalizeConceptKind(cleanText((raw as any)?.kind, 32), inferredKind);
+    const kind: ConceptKind = normalizedKind.kind;
+    const polarity: "positive" | "negative" =
+      cleanText((raw as any)?.polarity, 24) === "negative"
+        ? "negative"
+        : primaryNode
+        ? conceptPolarityFromNode(primaryNode)
+        : "positive";
+    const scope = cleanText((raw as any)?.scope, 64) || (primaryNode ? conceptScopeFromNode(primaryNode) : "global");
+    const conceptId = stableConceptIdFromSemanticKey(`${semanticKey}|${kind}|${polarity}|${scope}`);
+    if (usedConceptIds.has(conceptId)) continue;
+    usedConceptIds.add(conceptId);
+
+    const semanticNodeIds = semanticToNodeIds.get(semanticKey) || [];
     const mergedNodeIds = sortNodeIds(
       [...rawNodeIds.filter((id) => nodesById.has(id)), ...semanticNodeIds],
       basePrimaryNodeId || undefined
     );
-
-    const primaryNode =
+    const finalPrimaryNode =
       (basePrimaryNodeId && nodesById.get(basePrimaryNodeId)) ||
       (mergedNodeIds[0] && nodesById.get(mergedNodeIds[0])) ||
+      primaryNode ||
       null;
-    const family = semanticFamilyFromKey(semanticKey);
-    const inferredKind = primaryNode ? conceptKindForNode(primaryNode, family) : "factual_assertion";
-    const rawKind = cleanText((raw as any)?.kind, 32);
-    const kind: ConceptKind = normalizeConceptKind(rawKind, inferredKind);
+    const validationStatus = normalizeValidationStatus(
+      (raw as any)?.validationStatus ||
+        (raw as any)?.validation_status ||
+        normalizedKind.validationStatus ||
+        (finalPrimaryNode ? conceptValidationStatusFromNode(finalPrimaryNode) : "unasked"),
+      "unasked"
+    );
+    const extractionStage = normalizeExtractionStage(
+      (raw as any)?.extractionStage || (raw as any)?.extraction_stage || "disambiguation",
+      "disambiguation"
+    );
+    const migrationHistory = uniq(
+      [
+        ...(Array.isArray((raw as any)?.migrationHistory) ? (raw as any).migrationHistory : []),
+        ...(Array.isArray((raw as any)?.migration_history) ? (raw as any).migration_history : []),
+        normalizedKind.migrationNote || "",
+      ].map((x: any) => cleanText(x, 120)),
+      24
+    );
 
     out.push({
       id: conceptId,
       kind,
+      validationStatus,
+      extractionStage,
+      polarity,
+      scope,
       family,
       semanticKey,
-      title: cleanText((raw as any)?.title, 60) || (primaryNode ? conceptTitleFromNode(primaryNode) : "Concept"),
+      title: cleanText((raw as any)?.title, 60) || (finalPrimaryNode ? conceptTitleFromNode(finalPrimaryNode) : "Concept"),
       description:
         cleanText((raw as any)?.description, 180) ||
-        (primaryNode ? conceptDescriptionFromNode(primaryNode, kind) : ""),
-      score: clamp01((raw as any)?.score, primaryNode ? statementScore(primaryNode) : 0.7),
+        (finalPrimaryNode ? conceptDescriptionFromNode(finalPrimaryNode, kind) : ""),
+      score: clamp01((raw as any)?.score, finalPrimaryNode ? statementScore(finalPrimaryNode) : 0.7),
       nodeIds: mergedNodeIds,
       primaryNodeId: mergedNodeIds[0] || undefined,
       evidenceTerms: uniq(
@@ -559,6 +684,7 @@ export function normalizeConceptsForGraph(input: any, graph: CDG): ConceptItem[]
         (Array.isArray((raw as any)?.motifIds) ? (raw as any).motifIds : []).map((x: any) => cleanText(x, 64)),
         48
       ),
+      migrationHistory,
       locked: !!(raw as any)?.locked,
       paused: !!(raw as any)?.paused,
       updatedAt: cleanText((raw as any)?.updatedAt, 40) || new Date().toISOString(),
@@ -583,6 +709,10 @@ export function reconcileConceptsWithGraph(params: { graph: CDG; baseConcepts?: 
       title: ex.title || d.title,
       description: ex.description || d.description,
       score: d.score,
+      validationStatus: normalizeValidationStatus(ex.validationStatus || d.validationStatus, d.validationStatus),
+      extractionStage: normalizeExtractionStage(ex.extractionStage || d.extractionStage, d.extractionStage),
+      polarity: ex.polarity || d.polarity,
+      scope: ex.scope || d.scope,
       paused: !!ex.paused,
       locked: !!ex.locked,
       nodeIds: d.nodeIds.length ? d.nodeIds : ex.nodeIds,
@@ -590,6 +720,7 @@ export function reconcileConceptsWithGraph(params: { graph: CDG; baseConcepts?: 
       evidenceTerms: uniq([...d.evidenceTerms, ...ex.evidenceTerms], 24),
       sourceMsgIds: uniq([...d.sourceMsgIds, ...ex.sourceMsgIds], 80),
       motifIds: uniq([...(d.motifIds || []), ...(ex.motifIds || [])], 48),
+      migrationHistory: uniq([...(d.migrationHistory || []), ...(ex.migrationHistory || [])], 24),
       updatedAt: now,
     };
   });
@@ -597,7 +728,7 @@ export function reconcileConceptsWithGraph(params: { graph: CDG; baseConcepts?: 
   return merged.slice(0, 180);
 }
 
-function setNodeConceptMeta(node: ConceptNode, paused: boolean): ConceptNode {
+function setNodeConceptMeta(node: ConceptNode, paused: boolean, validationStatus: ConceptValidationStatus): ConceptNode {
   const baseValue =
     node.value && typeof node.value === "object" && !Array.isArray(node.value)
       ? ({ ...(node.value as Record<string, any>) } as Record<string, any>)
@@ -613,8 +744,10 @@ function setNodeConceptMeta(node: ConceptNode, paused: boolean): ConceptNode {
       conceptState: {
         ...prevMeta,
         paused,
+        validation_status: validationStatus,
       },
     },
+    validation_status: validationStatus as any,
   };
 }
 
@@ -627,12 +760,23 @@ export function applyConceptStateToGraph(params: {
   const prevLocked = new Set(prev.filter((c) => c.locked).flatMap((c) => c.nodeIds || []));
   const nextLocked = new Set(params.nextConcepts.filter((c) => c.locked).flatMap((c) => c.nodeIds || []));
   const nextPaused = new Set(params.nextConcepts.filter((c) => c.paused).flatMap((c) => c.nodeIds || []));
+  const validationByNodeId = new Map<string, ConceptValidationStatus>();
+  for (const c of params.nextConcepts || []) {
+    for (const nodeId of c.nodeIds || []) {
+      const current = validationByNodeId.get(nodeId);
+      const next = normalizeValidationStatus(c.validationStatus, "unasked");
+      if (current === "pending") continue;
+      if (current === "resolved" && next === "unasked") continue;
+      validationByNodeId.set(nodeId, next);
+    }
+  }
 
   const nodes = (params.graph.nodes || []).map((n) => {
     let locked = !!n.locked;
     if (nextLocked.has(n.id)) locked = true;
     else if (prevLocked.has(n.id) && !nextLocked.has(n.id)) locked = false;
-    const withMeta = setNodeConceptMeta(n, nextPaused.has(n.id));
+    const validationStatus = validationByNodeId.get(n.id) || conceptValidationStatusFromNode(n);
+    const withMeta = setNodeConceptMeta(n, nextPaused.has(n.id), validationStatus);
     return {
       ...withMeta,
       locked,

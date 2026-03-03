@@ -2,6 +2,7 @@ import type { CDG, ConceptNode, GraphPatch, PatchOp } from "../../core/graph.js"
 import { makeTempId } from "./common.js";
 import type { SlotGraphState, SlotNodeSpec } from "./slotTypes.js";
 import { semanticKeyForNode } from "../concepts.js";
+import { normalizeConceptType } from "../../core/graph/schemaAdapters.js";
 
 function getNodeSlotKey(node: ConceptNode): string | null {
   const key = semanticKeyForNode(node);
@@ -18,7 +19,7 @@ function nodePatchFromSpec(existing: ConceptNode | null, spec: SlotNodeSpec): Pa
     if (left !== right) (patch as any)[key] = val;
   };
 
-  setIfChanged("type", spec.type);
+  setIfChanged("type", normalizeConceptType(spec.type, "factual_assertion"));
   setIfChanged("layer", spec.layer);
   setIfChanged("statement", spec.statement);
   setIfChanged("confidence", spec.confidence);
@@ -89,7 +90,7 @@ export function compileSlotStateToPatch(params: {
       op: "add_node",
       node: {
         id: nodeId,
-        type: spec.type,
+        type: normalizeConceptType(spec.type, "factual_assertion"),
         layer: spec.layer,
         statement: spec.statement,
         status: "confirmed",

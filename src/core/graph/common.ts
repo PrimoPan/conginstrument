@@ -11,6 +11,7 @@ import type {
   Status,
   Strength,
 } from "./types.js";
+import { normalizeConceptType } from "./schemaAdapters.js";
 
 export const ALLOW_DELETE = process.env.CI_ALLOW_DELETE === "1";
 
@@ -18,14 +19,7 @@ export const ALLOWED_STATUS = new Set<Status>(["proposed", "confirmed", "rejecte
 export const ALLOWED_STRENGTH = new Set<Strength>(["hard", "soft"]);
 export const ALLOWED_SEVERITY = new Set<Severity>(["low", "medium", "high", "critical"]);
 export const ALLOWED_MOTIF_TYPES = new Set<MotifType>(["belief", "hypothesis", "expectation", "cognitive_step"]);
-export const ALLOWED_NODE_TYPES = new Set<ConceptType>([
-  "goal",
-  "constraint",
-  "preference",
-  "belief",
-  "fact",
-  "question",
-]);
+export const ALLOWED_NODE_TYPES = new Set<ConceptType>(["belief", "constraint", "preference", "factual_assertion"]);
 export const ALLOWED_EDGE_TYPES = new Set<EdgeType>(["enable", "constraint", "determine", "conflicts_with"]);
 export const HEALTH_RE =
   /心脏|心肺|冠心|心血管|高血压|糖尿病|哮喘|慢性病|手术|过敏|孕|老人|老年|儿童|行动不便|不能爬山|不能久走|危险|安全|急救|摔倒|health|medical|heart|cardiac|safety|risk/i;
@@ -116,6 +110,10 @@ function cleanText(s: any) {
   return String(s ?? "").replace(/\s+/g, " ").trim();
 }
 
+function nodeTypeOf(node: Pick<ConceptNode, "type"> | { type?: unknown }): ConceptType {
+  return normalizeConceptType((node as any)?.type, "factual_assertion");
+}
+
 function normalizeTags(tags: any): string[] | undefined {
   if (!Array.isArray(tags)) return undefined;
   const out = tags.map((t) => cleanText(t)).filter(Boolean).slice(0, 8);
@@ -200,22 +198,25 @@ function normalizeRevisionHistory(input: any): RevisionRecord[] | undefined {
 }
 
 function slotKeyOfNode(node: ConceptNode): string | null {
+  const type = nodeTypeOf(node);
   const explicitKey = cleanText((node as any).key);
   if (explicitKey.startsWith("slot:")) return explicitKey;
 
   const s = cleanText(node.statement);
   if (!s) return null;
 
-  if (node.type === "goal") return "slot:goal";
-  if (node.type === "constraint" && /^预算(?:上限)?[:：]\s*[0-9]{2,}\s*元?$/.test(s)) return "slot:budget";
-  if (node.type === "constraint" && /^(?:总)?行程时长[:：]\s*[0-9]{1,3}\s*天$/.test(s)) return "slot:duration_total";
-  if (node.type === "constraint" && /^会议时长[:：]\s*[0-9]{1,3}\s*天$/.test(s)) return "slot:duration_meeting";
-  if (node.type === "constraint" && /^(?:会议关键日|关键会议日|论文汇报日)[:：]\s*.+$/.test(s)) {
+  if (type === "belief" && ((node as any).layer === "intent" || /^intent[:：]/i.test(s) || /^意图[:：]/.test(s))) {
+    return "slot:goal";
+  }
+  if (type === "constraint" && /^预算(?:上限)?[:：]\s*[0-9]{2,}\s*元?$/.test(s)) return "slot:budget";
+  if (type === "constraint" && /^(?:总)?行程时长[:：]\s*[0-9]{1,3}\s*天$/.test(s)) return "slot:duration_total";
+  if (type === "constraint" && /^会议时长[:：]\s*[0-9]{1,3}\s*天$/.test(s)) return "slot:duration_meeting";
+  if (type === "constraint" && /^(?:会议关键日|关键会议日|论文汇报日)[:：]\s*.+$/.test(s)) {
     const m = s.match(/^(?:会议关键日|关键会议日|论文汇报日)[:：]\s*(.+)$/);
     const detail = normalizePlaceToken((m?.[1] || "").slice(0, 24));
     return `slot:meeting_critical:${detail || "default"}`;
   }
-  if ((node.type === "fact" || node.type === "constraint") && /^(?:城市时长|停留时长)[:：]\s*.+\s+[0-9]{1,3}\s*天$/.test(s)) {
+  if ((type === "factual_assertion" || type === "constraint") && /^(?:城市时长|停留时长)[:：]\s*.+\s+[0-9]{1,3}\s*天$/.test(s)) {
     const m = s.match(/^(?:城市时长|停留时长)[:：]\s*(.+?)\s+([0-9]{1,3})\s*天$/);
     const rawCity = canonicalizeStructuredPlace(m?.[1] || "");
     if (!rawCity) return null;
@@ -227,8 +228,8 @@ function slotKeyOfNode(node: ConceptNode): string | null {
     if (city) return `slot:duration_city:${city}`;
     return "slot:duration_city:unknown";
   }
-  if (node.type === "fact" && /^同行人数[:：]\s*[0-9]{1,3}\s*人$/.test(s)) return "slot:people";
-  if (node.type === "fact" && /^目的地[:：]\s*.+$/.test(s)) {
+  if (type === "factual_assertion" && /^同行人数[:：]\s*[0-9]{1,3}\s*人$/.test(s)) return "slot:people";
+  if (type === "factual_assertion" && /^目的地[:：]\s*.+$/.test(s)) {
     const m = s.match(/^目的地[:：]\s*(.+)$/);
     const rawCity = canonicalizeStructuredPlace(m?.[1] || "");
     if (!rawCity) return null;
@@ -240,39 +241,39 @@ function slotKeyOfNode(node: ConceptNode): string | null {
     if (city) return `slot:destination:${city}`;
     return "slot:destination:unknown";
   }
-  if ((node.type === "preference" || node.type === "constraint") && /^景点偏好[:：]\s*.+$/.test(s)) return "slot:scenic_preference";
-  if ((node.type === "preference" || node.type === "constraint") && /^活动偏好[:：]\s*.+$/.test(s)) return "slot:activity_preference";
+  if ((type === "preference" || type === "constraint") && /^景点偏好[:：]\s*.+$/.test(s)) return "slot:scenic_preference";
+  if ((type === "preference" || type === "constraint") && /^活动偏好[:：]\s*.+$/.test(s)) return "slot:activity_preference";
   if (
-    (node.type === "preference" || node.type === "constraint") &&
+    (type === "preference" || type === "constraint") &&
     (/^(住宿偏好|酒店偏好|住宿标准|酒店标准)[:：]/.test(s) ||
       /(全程|尽量|优先).{0,8}(住|入住).{0,8}(酒店|民宿|星级)/.test(s) ||
       /(五星|四星|三星).{0,6}(酒店)/.test(s))
   ) {
     return "slot:lodging";
   }
-  if (node.type === "constraint" && /^限制因素[:：]\s*.+$/.test(s)) {
+  if (type === "constraint" && /^限制因素[:：]\s*.+$/.test(s)) {
     const m = s.match(/^限制因素[:：]\s*(.+)$/);
     const detail = normalizePlaceToken((m?.[1] || "limiting").slice(0, 28));
     return `slot:constraint:limiting:${detail || "default"}`;
   }
-  if ((node.type === "constraint" || node.type === "fact") && /^子地点[:：]\s*.+$/.test(s)) {
+  if ((type === "constraint" || type === "factual_assertion") && /^子地点[:：]\s*.+$/.test(s)) {
     const m = s.match(/^子地点[:：]\s*(.+?)(?:（(.+?)）)?$/);
     const name = normalizePlaceToken((m?.[1] || "loc").slice(0, 24)) || "loc";
     const parent = normalizePlaceToken((m?.[2] || "root").slice(0, 24)) || "root";
     return `slot:sub_location:${parent}:${name}`;
   }
-  if (node.type === "constraint" && /^冲突提示[:：]\s*.+$/.test(s)) {
+  if (type === "constraint" && /^冲突提示[:：]\s*.+$/.test(s)) {
     const m = s.match(/^冲突提示[:：]\s*(.+)$/);
     const detail = normalizePlaceToken((m?.[1] || "conflict").slice(0, 32));
     return `slot:conflict:${detail || "default"}`;
   }
-  if (node.type === "constraint" && /^语言约束[:：]\s*.+$/.test(s)) return "slot:language";
-  if (node.type === "constraint" && /^(关键约束|法律约束|安全约束|出行约束|行程约束)[:：]\s*.+$/.test(s)) {
+  if (type === "constraint" && /^语言约束[:：]\s*.+$/.test(s)) return "slot:language";
+  if (type === "constraint" && /^(关键约束|法律约束|安全约束|出行约束|行程约束)[:：]\s*.+$/.test(s)) {
     const m = s.match(/^(?:关键约束|法律约束|安全约束|出行约束|行程约束)[:：]\s*(.+)$/);
     const detail = normalizePlaceToken((m?.[1] || "constraint").slice(0, 28));
     return `slot:constraint:${detail || "default"}`;
   }
-  if (node.type === "constraint" && HEALTH_RE.test(s)) return "slot:health";
+  if (type === "constraint" && HEALTH_RE.test(s)) return "slot:health";
   return null;
 }
 
@@ -517,24 +518,24 @@ function slotPriorityScore(slot: string | null | undefined): number {
 }
 
 function rootEdgeTypeForNode(node: ConceptNode, slot: string | null): EdgeType {
+  const type = nodeTypeOf(node);
   const f = slotFamily(slot);
   if (f === "budget" || f === "duration_total" || f === "health" || f === "meeting_critical") return "constraint";
   if (f === "lodging") {
-    if (node.type === "constraint" || node.strength === "hard") return "constraint";
+    if (type === "constraint" || node.strength === "hard") return "constraint";
     return "enable";
   }
   if (f === "scenic_preference") {
-    if (node.type === "constraint" || node.strength === "hard") return "constraint";
+    if (type === "constraint" || node.strength === "hard") return "constraint";
     return "enable";
   }
   if (f === "activity_preference") {
-    if (node.type === "constraint" || node.strength === "hard") return "constraint";
+    if (type === "constraint" || node.strength === "hard") return "constraint";
     return "enable";
   }
   if (f === "people" || f === "destination") return "enable";
   if (f === "duration_city" || f === "duration_meeting" || f === "sub_location") return "determine";
-  if (node.type === "constraint") return "constraint";
-  if (node.type === "question") return "determine";
+  if (type === "constraint") return "constraint";
   return "enable";
 }
 
@@ -543,7 +544,9 @@ function chooseRootGoal(
   touched: Set<string>,
   touchedOrder?: Map<string, number>
 ): ConceptNode | null {
-  const goals = Array.from(nodesById.values()).filter((n) => n.type === "goal");
+  const goals = Array.from(nodesById.values()).filter(
+    (n) => nodeTypeOf(n) === "belief" && (cleanText((n as any).key).startsWith("slot:goal") || n.layer === "intent")
+  );
   if (!goals.length) return null;
   return goals
     .slice()

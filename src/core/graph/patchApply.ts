@@ -22,10 +22,11 @@ import {
   pruneNoisyDurationOutliers,
 } from "./common.js";
 import { rebalanceIntentTopology } from "./topology.js";
+import { normalizeConceptType } from "./schemaAdapters.js";
 
 function normalizeNodeForInsert(n: ConceptNode): ConceptNode | null {
   const id = cleanText(n.id);
-  const type = cleanText(n.type);
+  const type = normalizeConceptType(cleanText(n.type), "factual_assertion");
   const statement = cleanText(n.statement);
   if (!id) return null;
   if (!ALLOWED_NODE_TYPES.has(type as ConceptType)) return null;

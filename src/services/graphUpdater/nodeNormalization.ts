@@ -189,14 +189,14 @@ export function normalizeIncomingNode(
     }
     return withNodeLayer({
       ...out,
-      type: "fact",
+      type: "factual_assertion",
       statement: `城市时长：${durationNorm.city} ${durationNorm.days}天`,
       confidence: Math.max(Number(out.confidence) || 0.6, 0.78),
       importance: Math.max(Number(out.importance) || 0, 0.7),
     });
   }
 
-  if (out.type !== "goal" && !isStructuredStatement(out.statement) && out.statement.length >= 32) {
+  if (out.type !== "belief" && !isStructuredStatement(out.statement) && out.statement.length >= 32) {
     return null;
   }
 

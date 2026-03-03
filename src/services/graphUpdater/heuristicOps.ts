@@ -135,15 +135,19 @@ export function buildHeuristicIntentOps(params: {
   if (!rootId) {
     const fallbackIntent = canonicalIntent || (isEnglishLocale(params.locale) ? "Intent: create a travel plan" : "意图：制定旅行计划");
     const existingGoal = (graph.nodes || []).find(
-      (n: any) => n?.type === "goal" && normalizeForMatch(n.statement) === normalizeForMatch(fallbackIntent)
+      (n: any) =>
+        n?.type === "belief" &&
+        (String(n?.key || "").startsWith("slot:goal") || String(n?.layer || "") === "intent") &&
+        normalizeForMatch(n.statement) === normalizeForMatch(fallbackIntent)
     );
     if (existingGoal?.id) {
       rootId = existingGoal.id;
     } else {
       rootId = pushNode({
-        type: "goal",
+        type: "belief",
         statement: fallbackIntent,
         layer: "intent",
+        key: "slot:goal",
         status: "proposed",
         confidence: 0.9,
         importance: importanceWithHint(signals.goalImportance, 0.85),
@@ -189,7 +193,7 @@ export function buildHeuristicIntentOps(params: {
 
   if (signals.peopleCount) {
     const id = pushNode({
-      type: "fact",
+      type: "factual_assertion",
       statement: t(params.locale, `同行人数：${signals.peopleCount}人`, `Party size: ${signals.peopleCount}`),
       status: "proposed",
       confidence: 0.9,
@@ -208,7 +212,7 @@ export function buildHeuristicIntentOps(params: {
     const city = destinationList[i];
     const evidence = signals.destinationEvidences?.[i] || signals.destinationEvidence || city;
     const id = pushNode({
-      type: "fact",
+      type: "factual_assertion",
       statement: t(params.locale, `目的地：${city}`, `Destination: ${city}`),
       status: "proposed",
       confidence: 0.9,
@@ -242,12 +246,15 @@ export function buildHeuristicIntentOps(params: {
   }
   if (signals.durationBoundaryAmbiguous && signals.durationBoundaryQuestion) {
     const id = pushNode({
-      type: "question",
+      type: "belief",
       statement: signals.durationBoundaryQuestion,
       status: "proposed",
       confidence: 0.82,
       importance: 0.68,
       evidenceIds: [signals.durationEvidence || "日期跨度"],
+      value: {
+        validation_status: "pending",
+      },
     });
     if (id) layer2Set.add(id);
     if (id && totalDurationNodeId) pushEdge(id, totalDurationNodeId, "determine");
@@ -255,12 +262,15 @@ export function buildHeuristicIntentOps(params: {
   }
   if (!signals.durationDays && signals.durationUnknown) {
     const id = pushNode({
-      type: "question",
+      type: "belief",
       statement: t(params.locale, "行程时长：待确认", "Trip duration: pending confirmation"),
       status: "proposed",
       confidence: 0.78,
       importance: 0.62,
       evidenceIds: [signals.durationUnknownEvidence || t(params.locale, "几天", "how many days")],
+      value: {
+        validation_status: "pending",
+      },
     });
     if (id) layer2Set.add(id);
     if (id && rootId) pushEdge(id, rootId, "determine");
@@ -271,7 +281,7 @@ export function buildHeuristicIntentOps(params: {
     const city = normalizeDestination(seg.city);
     if (!city) continue;
     const id = pushNode({
-      type: "fact",
+      type: "factual_assertion",
       statement: t(params.locale, `城市时长：${city} ${seg.days}天`, `City duration: ${city} ${seg.days} days`),
       status: "proposed",
       confidence: seg.kind === "meeting" ? 0.9 : 0.84,
@@ -298,7 +308,7 @@ export function buildHeuristicIntentOps(params: {
     const evidence = cleanStatement(sub?.evidence || name, 64);
     const hard = !!sub?.hard;
     const id = pushNode({
-      type: hard ? "constraint" : "fact",
+      type: hard ? "constraint" : "factual_assertion",
       statement: t(
         params.locale,
         `子地点：${name}${parentCity ? `（${parentCity}）` : ""}`,

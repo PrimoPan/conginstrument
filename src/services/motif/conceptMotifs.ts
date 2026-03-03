@@ -12,11 +12,24 @@ export type MotifCausalOperator =
   | "intervention"
   | "contradiction";
 
+export type SemanticMotifType = "enable" | "constraint" | "determine";
+
+export type MotifRoles = {
+  sources: string[];
+  target: string;
+};
+
 export type ConceptMotif = {
   id: string;
+  motif_id: string;
+  motif_type: SemanticMotifType;
   templateKey: string;
   motifType: ConceptMotifType;
   relation: EdgeType;
+  roles: MotifRoles;
+  scope: string;
+  aliases: string[];
+  concept_bindings: string[];
   conceptIds: string[];
   anchorConceptId: string;
   title: string;
@@ -212,6 +225,12 @@ function inferCausalOperator(m: ConceptMotif): MotifCausalOperator {
   return "contradiction";
 }
 
+function semanticMotifType(dep: EdgeType): SemanticMotifType {
+  if (dep === "constraint") return "constraint";
+  if (dep === "determine") return "determine";
+  return "enable";
+}
+
 function conceptTitleOf(id: string, conceptById: Map<string, ConceptItem>): string {
   return cleanText(conceptById.get(id)?.title, 28) || cleanText(id, 28) || "C";
 }
@@ -246,8 +265,42 @@ function withCausalSemantics(
 ): ConceptMotif {
   const dep = motifDependencyClass(m);
   const op = inferCausalOperator(m);
+  const conceptIds = uniq(m.conceptIds || [], 24);
+  const anchorConceptId = cleanText(m.anchorConceptId, 100) || conceptIds[conceptIds.length - 1] || "";
+  const sourceIds = conceptIds.filter((id) => id !== anchorConceptId);
+  const scope = uniq(
+    conceptIds
+      .map((id) => cleanText((conceptById.get(id) as any)?.scope, 48))
+      .filter(Boolean),
+    4
+  ).join("|") || "global";
+  const aliases = uniq([...(m.aliases || []), cleanText(m.id, 120), cleanText((m as any)?.motif_id, 120)], 24);
+  const providedOp = cleanText(m.causalOperator, 40);
+  const opCompatible =
+    !providedOp ||
+    (dep === "enable" && (providedOp === "direct_causation" || providedOp === "mediated_causation")) ||
+    (dep === "constraint" && providedOp === "confounding") ||
+    (dep === "determine" && providedOp === "intervention") ||
+    (dep === "conflicts_with" && providedOp === "contradiction");
+  const guardedStatus = opCompatible ? m.status : "uncertain";
+  const guardedReason = opCompatible
+    ? m.statusReason
+    : cleanText(`${m.statusReason || ""};semantic_mapping_guard`, 180).replace(/^;/, "");
   return {
     ...m,
+    motif_id: cleanText((m as any)?.motif_id, 120) || m.id,
+    motif_type: semanticMotifType(dep),
+    roles: {
+      sources: sourceIds,
+      target: anchorConceptId,
+    },
+    scope,
+    aliases,
+    concept_bindings: conceptIds,
+    conceptIds,
+    anchorConceptId,
+    status: guardedStatus,
+    statusReason: guardedReason,
     dependencyClass: dep,
     causalOperator: op,
     causalFormula: causalFormula(m, conceptById),
@@ -630,16 +683,39 @@ function normalizeMotifs(input: any): ConceptMotif[] {
     const causalRaw = cleanText((raw as any)?.causalOperator, 40).toLowerCase();
     const resolved = !!(raw as any)?.resolved;
     const resolvedByRaw = cleanText((raw as any)?.resolvedBy, 24).toLowerCase();
+    const conceptIds = uniq(
+      (Array.isArray((raw as any)?.conceptIds) ? (raw as any).conceptIds : []).map((x: any) => cleanText(x, 100)),
+      8
+    );
+    const anchorConceptId = cleanText((raw as any)?.anchorConceptId, 100) || conceptIds[conceptIds.length - 1] || "";
     out.push({
       id,
+      motif_id: cleanText((raw as any)?.motif_id, 140) || id,
+      motif_type: semanticMotifType(dependencyClass),
       templateKey: cleanText((raw as any)?.templateKey, 180),
       motifType: motifType === "triad" ? "triad" : "pair",
       relation,
-      conceptIds: uniq(
-        (Array.isArray((raw as any)?.conceptIds) ? (raw as any).conceptIds : []).map((x: any) => cleanText(x, 100)),
-        8
+      roles: {
+        sources: conceptIds.filter((cid) => cid !== anchorConceptId),
+        target: anchorConceptId,
+      },
+      scope: cleanText((raw as any)?.scope, 64) || "global",
+      aliases: uniq(
+        [
+          ...(Array.isArray((raw as any)?.aliases) ? (raw as any).aliases : []),
+          cleanText((raw as any)?.id, 140),
+          cleanText((raw as any)?.motif_id, 140),
+        ].map((x: any) => cleanText(x, 120)),
+        24
       ),
-      anchorConceptId: cleanText((raw as any)?.anchorConceptId, 100),
+      concept_bindings: uniq(
+        (Array.isArray((raw as any)?.concept_bindings) ? (raw as any).concept_bindings : conceptIds).map((x: any) =>
+          cleanText(x, 100)
+        ),
+        24
+      ),
+      conceptIds,
+      anchorConceptId,
       title: cleanText((raw as any)?.title, 160),
       description: cleanText((raw as any)?.description, 240),
       confidence: clamp01((raw as any)?.confidence, 0.7),

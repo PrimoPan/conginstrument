@@ -14,7 +14,7 @@ function clamp01(x: any, fallback = 0.68): number {
 }
 
 function inferMotifType(node: Partial<ConceptNode>): MotifType {
-  if (node.type === "goal" || node.layer === "intent") return "expectation";
+  if (node.type === "belief" || node.layer === "intent" || String((node as any)?.key || "").startsWith("slot:goal")) return "expectation";
   if (node.layer === "risk") return "hypothesis";
   if (node.type === "constraint" && node.strength === "hard") return "hypothesis";
   if (node.type === "preference" || node.layer === "preference" || node.type === "belief") return "belief";
@@ -92,4 +92,3 @@ export function enrichPatchWithMotifFoundation(
   if (!notes.includes("motif_foundation_grounding_v1")) notes.push("motif_foundation_grounding_v1");
   return { ...patch, ops, notes };
 }
-

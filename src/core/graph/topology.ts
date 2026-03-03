@@ -585,7 +585,7 @@ function rebalanceIntentTopology(
   for (const n of Array.from(nodesById.values())) {
     const s = cleanText(n.statement);
     const isBadDestination =
-      n.type === "fact" &&
+      n.type === "factual_assertion" &&
       /^目的地[:：]\s*(.+)$/.test(s) &&
       (() => {
         const raw = cleanText((s.match(/^目的地[:：]\s*(.+)$/)?.[1] || ""));
@@ -595,7 +595,7 @@ function rebalanceIntentTopology(
         return false;
       })();
     const isBadCityDuration =
-      (n.type === "fact" || n.type === "constraint") &&
+      (n.type === "factual_assertion" || n.type === "constraint") &&
       /^(?:城市时长|停留时长)[:：]\s*(.+?)\s+[0-9]{1,3}\s*天$/.test(s) &&
       (() => {
         const raw = cleanText((s.match(/^(?:城市时长|停留时长)[:：]\s*(.+?)\s+[0-9]{1,3}\s*天$/)?.[1] || ""));
@@ -618,12 +618,13 @@ function rebalanceIntentTopology(
   if (!rootGoal) {
     const synthetic: ConceptNode = {
       id: `n_${randomUUID()}`,
-      type: "goal",
+      type: "belief",
       layer: "intent",
       statement: buildSyntheticGoalStatement(nodesById),
       status: "proposed",
       confidence: 0.82,
       importance: 0.8,
+      key: "slot:goal",
     };
     nodesById.set(synthetic.id, synthetic);
     touched.add(synthetic.id);
@@ -633,7 +634,8 @@ function rebalanceIntentTopology(
   const rootId = rootGoal.id;
 
   for (const n of Array.from(nodesById.values())) {
-    if (n.type !== "goal" || n.id === rootId) continue;
+    const isIntentRoot = n.type === "belief" && (cleanText((n as any).key).startsWith("slot:goal") || n.layer === "intent");
+    if (!isIntentRoot || n.id === rootId) continue;
     nodesById.delete(n.id);
     changed = true;
     for (const [eid, e] of edgesById.entries()) {

@@ -1,4 +1,5 @@
 import type { CDG } from "../core/graph.js";
+import { conceptTypeMigration, normalizeValidationStatus, type ConceptValidationStatus } from "../core/graph/schemaAdapters.js";
 import {
   applyConceptStateToGraph,
   reconcileConceptsWithGraph,
@@ -25,12 +26,69 @@ import type { AppLocale } from "../i18n/locale.js";
 
 export type CognitiveModel = {
   graph: CDG;
+  conceptGraph: CDG;
+  motifGraph: {
+    motifs: ConceptMotif[];
+    motifLinks: MotifLink[];
+  };
   concepts: ConceptItem[];
+  validationStatus: ConceptValidationStatus;
   motifs: ConceptMotif[];
   motifLinks: MotifLink[];
   motifReasoningView: MotifReasoningView;
   contexts: ContextItem[];
 };
+
+function normalizeGraphConceptSchema(graph: CDG): CDG {
+  const now = new Date().toISOString();
+  const nodes = (graph.nodes || []).map((n) => {
+    const migration = conceptTypeMigration((n as any)?.type);
+    const value =
+      n.value && typeof n.value === "object" && !Array.isArray(n.value)
+        ? ({ ...(n.value as Record<string, any>) } as Record<string, any>)
+        : {};
+    const conceptState =
+      value.conceptState && typeof value.conceptState === "object" && !Array.isArray(value.conceptState)
+        ? ({ ...(value.conceptState as Record<string, any>) } as Record<string, any>)
+        : {};
+    const validationStatus = normalizeValidationStatus(
+      migration.validationStatus || (n as any)?.validation_status || value.validation_status || conceptState.validation_status,
+      "unasked"
+    );
+    const revisionHistory = Array.isArray((n as any)?.revisionHistory) ? [...((n as any).revisionHistory as any[])] : [];
+    if (migration.note && migration.migratedFrom) {
+      revisionHistory.unshift({
+        at: now,
+        action: "updated",
+        by: "system",
+        reason: `${migration.note}:${migration.migratedFrom}`,
+      });
+    }
+    return {
+      ...n,
+      type: migration.type,
+      validation_status: validationStatus,
+      value: {
+        ...value,
+        conceptState: {
+          ...conceptState,
+          validation_status: validationStatus,
+        },
+      },
+      revisionHistory: revisionHistory.slice(0, 20),
+    };
+  });
+  return {
+    ...graph,
+    nodes,
+  };
+}
+
+function deriveInteractionValidationStatus(concepts: ConceptItem[]): ConceptValidationStatus {
+  if ((concepts || []).some((c) => c.validationStatus === "pending")) return "pending";
+  if ((concepts || []).some((c) => c.validationStatus === "resolved")) return "resolved";
+  return "unasked";
+}
 
 function isConflictNode(graphNode: any): boolean {
   const key = String(graphNode?.key || "").toLowerCase();
@@ -67,12 +125,18 @@ export function buildCognitiveModel(params: {
   baseContexts?: any;
   locale?: AppLocale;
 }): CognitiveModel {
+  const normalizedGraph = normalizeGraphConceptSchema(params.graph);
+
+  // PRD pipeline:
+  // 1) load+normalize -> 2) concept identify/disambiguate -> 3) dedup
+  // 4) motif build/dedup -> 5) motif conflict gate -> 6) motif topology
+  // 7) reasoning steps -> 8) concept projection from motif bindings.
   const nextConceptsDraftPass1 = reconcileConceptsWithGraph({
-    graph: params.graph,
+    graph: normalizedGraph,
     baseConcepts: params.baseConcepts,
   });
   const graphWithConceptStatePass1 = applyConceptStateToGraph({
-    graph: params.graph,
+    graph: normalizedGraph,
     prevConcepts: params.prevConcepts,
     nextConcepts: nextConceptsDraftPass1,
   });
@@ -125,10 +189,17 @@ export function buildCognitiveModel(params: {
     motifs,
     baseContexts: params.baseContexts,
   });
+  const validationStatus = deriveInteractionValidationStatus(concepts);
 
   return {
     graph: graphWithConceptState,
+    conceptGraph: graphWithConceptState,
+    motifGraph: {
+      motifs,
+      motifLinks,
+    },
     concepts,
+    validationStatus,
     motifs,
     motifLinks,
     motifReasoningView,

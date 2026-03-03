@@ -1,13 +1,14 @@
 // src/services/patchGuard.ts
 import type { GraphPatch } from "../core/graph.js";
 import { normalizeNodeLayer } from "../core/nodeLayer.js";
+import { normalizeConceptType } from "../core/graph/schemaAdapters.js";
 
 const DEBUG = process.env.CI_DEBUG_LLM === "1";
 function dlog(...args: any[]) {
   if (DEBUG) console.log("[LLM][patchGuard]", ...args);
 }
 
-const ALLOWED_NODE_TYPES = new Set(["goal", "constraint", "preference", "belief", "fact", "question"]);
+const ALLOWED_NODE_TYPES = new Set(["belief", "constraint", "preference", "factual_assertion"]);
 const ALLOWED_EDGE_TYPES = new Set(["enable", "constraint", "determine", "conflicts_with"]);
 const ALLOWED_SEVERITY = new Set(["low", "medium", "high", "critical"]);
 const ALLOWED_MOTIF_TYPES = new Set(["belief", "hypothesis", "expectation", "cognitive_step"]);
@@ -103,6 +104,10 @@ function makeTempId(prefix: "n" | "e") {
   return `t_${prefix}_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
 }
 
+function normalizeNodeType(input: any): string {
+  return normalizeConceptType(input, "factual_assertion");
+}
+
 /** 把各种 op 名称统一成 snake_case，并做别名映射 */
 function normalizeKind(v: any): string {
   if (v == null) return "";
@@ -190,7 +195,7 @@ export function sanitizeGraphPatchStrict(raw: any): GraphPatch {
     if (kind !== "add_node") continue;
 
     const node = pickPayload(op, "node");
-    const type = String(node?.type || "").trim();
+    const type = normalizeNodeType(node?.type);
     const statement = String(node?.statement ?? node?.text ?? "").trim();
 
     if (!ALLOWED_NODE_TYPES.has(type) || !statement) continue;
@@ -248,7 +253,7 @@ export function sanitizeGraphPatchStrict(raw: any): GraphPatch {
 
     if (kind === "add_node") {
       const node = pickPayload(op, "node");
-      const type = String(node?.type || "").trim();
+      const type = normalizeNodeType(node?.type);
       const statement = String(node?.statement ?? node?.text ?? "").trim();
 
       if (!ALLOWED_NODE_TYPES.has(type) || !statement) {

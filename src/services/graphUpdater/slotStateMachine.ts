@@ -319,7 +319,7 @@ function buildGoalNode(params: {
   }
   return {
     slotKey: "slot:goal",
-    type: "goal",
+    type: "belief",
     layer: "intent",
     statement: statementGoal(params.locale, intent || tr(params.locale, "制定任务计划", "Plan this task")),
     confidence: 0.86,
@@ -749,7 +749,7 @@ export function buildSlotStateMachine(params: {
     const imp = clamp01(params.signals.destinationImportanceByCity?.[city], 0.8);
     nodes.push({
       slotKey,
-      type: "fact",
+      type: "factual_assertion",
       layer: "requirement",
       statement: statementWithPrefix(params.locale, "目的地: ", "Destination: ", city),
       confidence: 0.9,
@@ -852,7 +852,7 @@ export function buildSlotStateMachine(params: {
     const slotKey = `slot:duration_city:${cityKey}`;
     nodes.push({
       slotKey,
-      type: "fact",
+      type: "factual_assertion",
       layer: "requirement",
       statement: statementWithPrefix(
         params.locale,
@@ -899,7 +899,7 @@ export function buildSlotStateMachine(params: {
     );
     nodes.push({
       slotKey,
-      type: hard ? "constraint" : "fact",
+      type: hard ? "constraint" : "factual_assertion",
       layer: "requirement",
       strength: hard ? "hard" : undefined,
       severity: undefined,
@@ -940,7 +940,7 @@ export function buildSlotStateMachine(params: {
       const importance = clamp01(params.signals.peopleImportance, 0.72);
       nodes.push({
         slotKey: "slot:people",
-        type: "fact",
+        type: "factual_assertion",
         layer: "requirement",
         statement: statementWithPrefix(
           params.locale,
@@ -1009,7 +1009,7 @@ export function buildSlotStateMachine(params: {
       const spentImportance = clamp01(params.signals.budgetImportance, 0.78);
       nodes.push({
         slotKey: "slot:budget_spent",
-        type: "fact",
+        type: "factual_assertion",
         layer: "requirement",
         statement: statementWithPrefix(
           params.locale,

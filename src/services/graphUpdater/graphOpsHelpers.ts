@@ -42,7 +42,11 @@ export function statementDedupKey(statement: string, type?: string) {
 }
 
 export function pickRootGoalId(graph: CDG): string | null {
-  const goals = (graph.nodes || []).filter((n: any) => n?.type === "goal");
+  const goals = (graph.nodes || []).filter(
+    (n: any) =>
+      n?.type === "belief" &&
+      (String(n?.key || "").startsWith("slot:goal") || String(n?.layer || "") === "intent")
+  );
   if (!goals.length) return null;
   const locked = goals.find((g: any) => g.locked);
   if (locked) return locked.id;

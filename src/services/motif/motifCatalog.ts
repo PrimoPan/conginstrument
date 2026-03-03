@@ -20,7 +20,7 @@ function normalizeKey(input: string): string {
 
 function inferMotifTypeByNode(node: { motifType?: MotifType; type?: string; layer?: string; strength?: string }): MotifType {
   if (node.motifType) return node.motifType;
-  if (node.type === "goal" || node.layer === "intent") return "expectation";
+  if (node.type === "belief" || node.layer === "intent") return "expectation";
   if (node.layer === "risk") return "hypothesis";
   if (node.type === "constraint" && node.strength === "hard") return "hypothesis";
   if (node.type === "preference" || node.layer === "preference" || node.type === "belief") return "belief";
@@ -104,4 +104,3 @@ export function summarizeTopMotifs(graph: CDG, topN = 4): string[] {
     .slice(0, Math.max(1, topN))
     .map((m) => `${m.motifType}:${m.claim}(n=${m.count},i=${m.avgImportance.toFixed(2)})`);
 }
-

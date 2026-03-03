@@ -47,7 +47,9 @@ function hasDirectDurationCue(text: string): boolean {
 }
 
 function pickRootGoalId(graph: CDG): string | null {
-  const goals = (graph.nodes || []).filter((n) => n.type === "goal");
+  const goals = (graph.nodes || []).filter(
+    (n) => n.type === "belief" && (String((n as any).key || "").startsWith("slot:goal") || n.layer === "intent")
+  );
   if (!goals.length) return null;
   const locked = goals.find((n) => n.locked);
   if (locked) return locked.id;
@@ -77,7 +79,7 @@ function fallbackPatch(
           op: "add_node",
           node: {
             id: makeTempId("n"),
-            type: "goal",
+            type: "belief",
             layer: "intent",
             statement: short || t(locale, "意图：制定任务计划", "Intent: plan this task"),
             status: "proposed",
@@ -108,7 +110,7 @@ function fallbackPatch(
         op: "add_node",
         node: {
           id: nid,
-          type: "fact",
+          type: "factual_assertion",
           layer: "requirement",
           statement: short || t(locale, "用户补充信息", "User added details"),
           status: "proposed",

@@ -2,7 +2,7 @@ import type { NodeLayer } from "../nodeLayer.js";
 
 export type { NodeLayer } from "../nodeLayer.js";
 
-export type ConceptType = "goal" | "constraint" | "preference" | "belief" | "fact" | "question";
+export type ConceptType = "belief" | "constraint" | "preference" | "factual_assertion";
 export type Strength = "hard" | "soft";
 export type Status = "proposed" | "confirmed" | "rejected" | "disputed";
 

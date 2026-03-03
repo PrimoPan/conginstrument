@@ -455,7 +455,7 @@ const cases: Case[] = [
           nodes: [
             {
               id: "n_old_1",
-              type: "fact",
+              type: "factual_assertion",
               layer: "requirement",
               statement: "目的地: 一个人去米兰",
               status: "confirmed",
@@ -465,7 +465,7 @@ const cases: Case[] = [
             } as any,
             {
               id: "n_old_2",
-              type: "fact",
+              type: "factual_assertion",
               layer: "requirement",
               statement: "目的地: 米兰",
               status: "confirmed",
@@ -521,7 +521,7 @@ const cases: Case[] = [
           nodes: [
             {
               id: "n_goal",
-              type: "goal",
+              type: "belief",
               layer: "intent",
               statement: "意图：去米兰旅游3天",
               status: "confirmed",
@@ -541,7 +541,7 @@ const cases: Case[] = [
             } as any,
             {
               id: "n_dest",
-              type: "fact",
+              type: "factual_assertion",
               layer: "requirement",
               statement: "目的地: 米兰",
               status: "confirmed",
@@ -590,7 +590,7 @@ const cases: Case[] = [
           nodes: [
             {
               id: "n_goal",
-              type: "goal",
+              type: "belief",
               layer: "intent",
               statement: "意图：去米兰旅游3天",
               status: "confirmed",
@@ -736,7 +736,7 @@ const cases: Case[] = [
         nodes: [
           {
             id: "n_goal",
-            type: "goal",
+            type: "belief",
             layer: "intent",
             statement: "意图: 去米兰旅游3天",
             status: "confirmed",
@@ -776,7 +776,7 @@ const cases: Case[] = [
           },
           {
             id: "n_dest",
-            type: "fact",
+            type: "factual_assertion",
             layer: "requirement",
             statement: "目的地: 米兰",
             status: "confirmed",
@@ -844,7 +844,7 @@ const cases: Case[] = [
         nodes: [
           {
             id: "n_goal",
-            type: "goal",
+            type: "belief",
             layer: "intent",
             statement: "意图: 去米兰旅游",
             status: "confirmed",
@@ -890,7 +890,7 @@ const cases: Case[] = [
         nodes: [
           {
             id: "n_goal",
-            type: "goal",
+            type: "belief",
             layer: "intent",
             statement: "意图: 旅游",
             status: "confirmed",
@@ -942,7 +942,7 @@ const cases: Case[] = [
         nodes: [
           {
             id: "n_goal",
-            type: "goal",
+            type: "belief",
             layer: "intent",
             statement: "意图: 去米兰旅游3天",
             status: "confirmed",

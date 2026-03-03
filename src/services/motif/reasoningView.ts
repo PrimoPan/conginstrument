@@ -2,6 +2,7 @@ import type { ConceptItem } from "../concepts.js";
 import type { ConceptMotif } from "./conceptMotifs.js";
 import type { MotifLink, MotifLinkType } from "./motifLinks.js";
 import { isEnglishLocale, type AppLocale } from "../../i18n/locale.js";
+import { normalizeMotifLinkType } from "../../core/graph/schemaAdapters.js";
 
 export type MotifReasoningNode = {
   id: string;
@@ -31,6 +32,11 @@ export type MotifReasoningEdge = {
 export type MotifReasoningStepRole = "premise" | "bridge" | "decision" | "isolated";
 
 export type MotifReasoningStep = {
+  step_id: string;
+  summary: string;
+  motif_ids: string[];
+  concept_ids: string[];
+  depends_on: string[];
   id: string;
   order: number;
   motifId: string;
@@ -82,14 +88,7 @@ function t(locale: AppLocale | undefined, zh: string, en: string): string {
 }
 
 function normalizeLinkType(input: string): MotifLinkType {
-  const raw = cleanText(input, 32).toLowerCase();
-  if (raw === "enable" || raw === "constraint" || raw === "determine" || raw === "conflicts_with") {
-    return raw as MotifLinkType;
-  }
-  // Backward compatibility with old persisted values.
-  if (raw === "conflicts") return "conflicts_with";
-  if (raw === "depends_on" || raw === "refines") return "determine";
-  return "enable";
+  return normalizeMotifLinkType(input, "supports");
 }
 
 function sourceRefToken(sourceMsgId: string): string {
@@ -230,6 +229,11 @@ function buildReasoningSteps(params: {
         220
       );
       return {
+        step_id: `S${idx + 1}`,
+        summary: cleanText(`${n.title} · ${dependencyLabel(n.dependencyClass || n.relation, params.locale)}`, 180),
+        motif_ids: [n.motifId],
+        concept_ids: (n.conceptIds || []).slice(0, 8),
+        depends_on: deps,
         id: `step_${cleanText(n.motifId, 64) || idx + 1}`,
         order: idx + 1,
         motifId: n.motifId,

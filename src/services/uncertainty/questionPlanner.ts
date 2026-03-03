@@ -44,6 +44,10 @@ function clamp01(x: any, fallback = 0.68): number {
 function slotFamilyFromNode(node: ConceptNode): string {
   const key = cleanText(node.key || "", 80);
   const statement = cleanText(node.statement || "", 160);
+  const validationStatus = cleanText(
+    (node as any).validation_status || (node as any)?.value?.validation_status || (node as any)?.value?.conceptState?.validation_status,
+    24
+  );
 
   if (key.startsWith("slot:destination:") || /^(目的地|destination)[:：]/i.test(statement)) return "destination";
   if (
@@ -64,8 +68,8 @@ function slotFamilyFromNode(node: ConceptNode): string {
   if (key.startsWith("slot:conflict:") || /^(冲突提示|conflict warning)[:：]/i.test(statement)) return "conflict";
   if (key === "slot:lodging") return "lodging";
   if (key === "slot:scenic_preference") return "scenic_preference";
-  if (node.type === "goal" || key === "slot:goal") return "goal";
-  if (node.type === "question") return "question";
+  if ((node.type === "belief" && key === "slot:goal") || key === "slot:goal") return "goal";
+  if (validationStatus === "pending") return "question";
   return "other";
 }
 
@@ -312,10 +316,10 @@ export function planUncertaintyQuestion(params: {
   const candidates: UncertaintyTarget[] = [];
   for (const node of graph.nodes || []) {
     if (!node || !node.id) continue;
-    if (node.type === "goal" || node.type === "question") continue;
-    if (node.status === "rejected") continue;
-
     const slotFamily = slotFamilyFromNode(node);
+    if ((node.type === "belief" && String((node as any).key || "").startsWith("slot:goal")) || slotFamily === "question")
+      continue;
+    if (node.status === "rejected") continue;
     const confPenalty = (1 - clamp01(node.confidence, 0.68)) * 0.42;
     const impPenalty = (1 - clamp01(node.importance, 0.66)) * 0.14;
     const evidencePenalty = node.evidenceIds && node.evidenceIds.length > 0 ? 0 : 0.08;

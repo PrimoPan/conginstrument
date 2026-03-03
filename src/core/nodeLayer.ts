@@ -60,10 +60,10 @@ export function inferNodeLayer(node: NodeLayerHint): NodeLayer {
   const tags = Array.isArray(node.tags) ? node.tags : [];
   const locked = !!node.locked;
 
-  // Goal is always the intent layer.
-  if (type === "goal") return "intent";
+  // Belief with intent semantics is the intent layer.
+  if (type === "belief") return "intent";
 
-  // Respect explicit layer except the invalid case: non-goal cannot be intent.
+  // Respect explicit layer except the invalid case: non-belief cannot be intent.
   const explicit = normalizeNodeLayer(node.layer);
   if (explicit && explicit !== "intent") return explicit;
 
@@ -86,8 +86,7 @@ export function inferNodeLayer(node: NodeLayerHint): NodeLayer {
     strength === "hard" ||
     STRUCTURED_REQUIREMENT_RE.test(statement) ||
     REQUIREMENT_STATEMENT_RE.test(statement) ||
-    type === "fact" ||
-    type === "question" ||
+    type === "factual_assertion" ||
     type === "belief"
   ) {
     return "requirement";

@@ -601,7 +601,12 @@ export function buildTravelPlanState(params: {
   const turns = params.turns || [];
 
   const goalNode = (graph.nodes || [])
-    .filter((n) => n.type === "goal" && n.status !== "rejected")
+    .filter(
+      (n) =>
+        n.type === "belief" &&
+        n.status !== "rejected" &&
+        (String((n as any).key || "").startsWith("slot:goal") || n.layer === "intent")
+    )
     .sort((a, b) => (Number(b.importance) || 0) - (Number(a.importance) || 0))[0];
   const goalStatement = clean(goalNode?.statement || "", 120) || t(locale, "制定旅行计划", "Plan the trip");
 

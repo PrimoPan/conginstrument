@@ -2,6 +2,12 @@ import { cleanStatement } from "./text.js";
 import { isLikelyDestinationCandidate, normalizeDestination } from "./intentSignals.js";
 import { isEnglishLocale, type AppLocale } from "../../i18n/locale.js";
 
+/**
+ * Deprecated from runtime graph pipeline.
+ * Conflict gating/display now derives from motif conflict semantics only.
+ * This analyzer is retained for regression tests and compatibility tooling.
+ */
+
 export type LimitingFactorInput = {
   text: string;
   kind: string;
