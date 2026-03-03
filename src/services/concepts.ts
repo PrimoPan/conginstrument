@@ -453,6 +453,119 @@ function sortNodeIds(nodeIds: string[], primaryNodeId?: string): string[] {
   return [primaryNodeId, ...rest];
 }
 
+function normalizeSimilarityText(input: string): string {
+  return cleanText(input, 260)
+    .toLowerCase()
+    .replace(/[^\p{L}\p{N}]+/gu, "");
+}
+
+function similarityTokens(input: string): Set<string> {
+  const text = cleanText(input, 320).toLowerCase();
+  const chunks = text.match(/[\u4e00-\u9fa5]{1,4}|[a-z0-9]{2,24}/g) || [];
+  return new Set(chunks.filter(Boolean));
+}
+
+function jaccardSimilarity(a: Set<string>, b: Set<string>): number {
+  if (!a.size || !b.size) return 0;
+  let inter = 0;
+  for (const x of a) if (b.has(x)) inter += 1;
+  const union = a.size + b.size - inter;
+  if (!union) return 0;
+  return inter / union;
+}
+
+function conceptPriorityScore(c: ConceptItem): number {
+  const nonFreeformBoost = c.semanticKey.startsWith("slot:freeform:") ? 0 : 0.04;
+  const lockBoost = c.locked ? 0.08 : 0;
+  const nodeBoost = Math.min((c.nodeIds || []).length, 8) * 0.004;
+  return c.score + nonFreeformBoost + lockBoost + nodeBoost;
+}
+
+function shouldCollapseHighlySimilarConcept(a: ConceptItem, b: ConceptItem): boolean {
+  if (a.id === b.id) return false;
+  if (a.kind !== b.kind || a.polarity !== b.polarity) return false;
+  if (a.scope !== b.scope || a.family !== b.family) return false;
+  const freeformA = a.semanticKey.startsWith("slot:freeform:");
+  const freeformB = b.semanticKey.startsWith("slot:freeform:");
+  if (!freeformA && !freeformB) return false;
+
+  const titleA = normalizeSimilarityText(a.title);
+  const titleB = normalizeSimilarityText(b.title);
+  if (!!titleA && titleA === titleB) return true;
+
+  const textA = `${a.title} ${a.description} ${(a.evidenceTerms || []).join(" ")}`;
+  const textB = `${b.title} ${b.description} ${(b.evidenceTerms || []).join(" ")}`;
+  const sim = jaccardSimilarity(similarityTokens(textA), similarityTokens(textB));
+  return sim >= 0.82;
+}
+
+function mergeConceptPair(a: ConceptItem, b: ConceptItem, now: string): ConceptItem {
+  const keepA = conceptPriorityScore(a) >= conceptPriorityScore(b);
+  const winner = keepA ? a : b;
+  const loser = keepA ? b : a;
+  const primaryNodeId = winner.primaryNodeId || loser.primaryNodeId;
+  return {
+    ...winner,
+    score: clamp01(Math.max(winner.score, loser.score), winner.score),
+    nodeIds: sortNodeIds([...(winner.nodeIds || []), ...(loser.nodeIds || [])], primaryNodeId),
+    primaryNodeId,
+    evidenceTerms: uniq([...(winner.evidenceTerms || []), ...(loser.evidenceTerms || [])], 24),
+    sourceMsgIds: uniq([...(winner.sourceMsgIds || []), ...(loser.sourceMsgIds || [])], 80),
+    motifIds: uniq([...(winner.motifIds || []), ...(loser.motifIds || [])], 48),
+    migrationHistory: uniq(
+      [
+        ...(winner.migrationHistory || []),
+        ...(loser.migrationHistory || []),
+        `high_similarity_merged:${loser.id}`,
+      ],
+      24
+    ),
+    paused: winner.paused || loser.paused,
+    locked: winner.locked || loser.locked,
+    updatedAt: now,
+  };
+}
+
+function collapseHighlySimilarConcepts(concepts: ConceptItem[]): ConceptItem[] {
+  if (!concepts.length) return concepts;
+  const now = new Date().toISOString();
+  const grouped = new Map<string, ConceptItem[]>();
+  for (const c of concepts) {
+    const k = `${c.kind}|${c.polarity}|${c.scope || "global"}|${c.family || "other"}`;
+    if (!grouped.has(k)) grouped.set(k, []);
+    grouped.get(k)!.push(c);
+  }
+
+  const out: ConceptItem[] = [];
+  for (const list of grouped.values()) {
+    const bins: ConceptItem[] = [];
+    const sorted = list
+      .slice()
+      .sort((a, b) => conceptPriorityScore(b) - conceptPriorityScore(a) || a.id.localeCompare(b.id));
+    for (const cur of sorted) {
+      let merged = false;
+      for (let i = 0; i < bins.length; i += 1) {
+        if (!shouldCollapseHighlySimilarConcept(bins[i], cur)) continue;
+        bins[i] = mergeConceptPair(bins[i], cur, now);
+        merged = true;
+        break;
+      }
+      if (!merged) bins.push(cur);
+    }
+    out.push(...bins);
+  }
+
+  return out
+    .slice()
+    .sort(
+      (a, b) =>
+        rankKind(a.kind) - rankKind(b.kind) ||
+        b.score - a.score ||
+        a.title.localeCompare(b.title) ||
+        a.id.localeCompare(b.id)
+    );
+}
+
 type SemanticNodeBucket = {
   semanticKey: string;
   kind: ConceptKind;
@@ -725,7 +838,7 @@ export function reconcileConceptsWithGraph(params: { graph: CDG; baseConcepts?: 
     };
   });
 
-  return merged.slice(0, 180);
+  return collapseHighlySimilarConcepts(merged).slice(0, 180);
 }
 
 function setNodeConceptMeta(node: ConceptNode, paused: boolean, validationStatus: ConceptValidationStatus): ConceptNode {

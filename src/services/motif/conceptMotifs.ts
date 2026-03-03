@@ -902,6 +902,25 @@ function arraysIntersect(a: string[], b: string[]): boolean {
   return false;
 }
 
+function normalizeSimilarityText(text: string): string {
+  return cleanText(text, 260)
+    .toLowerCase()
+    .replace(/[^\p{L}\p{N}]+/gu, "");
+}
+
+function motifTextSimilarity(a: ConceptMotif, b: ConceptMotif): number {
+  const textA = cleanText(`${a.title} ${a.description} ${a.causalFormula || ""}`, 260).toLowerCase();
+  const textB = cleanText(`${b.title} ${b.description} ${b.causalFormula || ""}`, 260).toLowerCase();
+  const setA = new Set((textA.match(/[\u4e00-\u9fa5]{1,4}|[a-z0-9]{2,24}/g) || []).filter(Boolean));
+  const setB = new Set((textB.match(/[\u4e00-\u9fa5]{1,4}|[a-z0-9]{2,24}/g) || []).filter(Boolean));
+  if (!setA.size || !setB.size) return 0;
+  let inter = 0;
+  for (const x of setA) if (setB.has(x)) inter += 1;
+  const union = setA.size + setB.size - inter;
+  if (!union) return 0;
+  return inter / union;
+}
+
 function hasNegationSignal(text: string): boolean {
   return /(不|不能|不要|避免|别|禁止|must not|cannot|avoid|no )/i.test(cleanText(text, 180));
 }
@@ -1012,6 +1031,51 @@ function applyTriadSubsumption(motifs: ConceptMotif[], conceptById: Map<string, 
       resolved: false,
       resolvedAt: undefined,
       resolvedBy: undefined,
+    };
+  });
+}
+
+function applyHighSimilarityCancellation(motifs: ConceptMotif[]): ConceptMotif[] {
+  const candidates = motifs.filter(
+    (m) =>
+      !m.resolved &&
+      m.status === "active" &&
+      !!m.anchorConceptId
+  );
+  if (candidates.length < 2) return motifs;
+
+  const patch = new Map<string, string>();
+  for (let i = 0; i < candidates.length; i += 1) {
+    const a = candidates[i];
+    for (let j = i + 1; j < candidates.length; j += 1) {
+      const b = candidates[j];
+      if (!a.anchorConceptId || a.anchorConceptId !== b.anchorConceptId) continue;
+      if (motifDependencyClass(a) !== motifDependencyClass(b)) continue;
+      const titleA = normalizeSimilarityText(a.title);
+      const titleB = normalizeSimilarityText(b.title);
+      const titleSame = !!titleA && titleA === titleB;
+      const textSim = motifTextSimilarity(a, b);
+      if (!titleSame && textSim < 0.9) continue;
+
+      const winner = motifPriorityScore(a) >= motifPriorityScore(b) ? a : b;
+      const loser = winner.id === a.id ? b : a;
+      if (loser.resolved) continue;
+      if (patch.has(loser.id)) continue;
+      patch.set(loser.id, `high_similarity_with:${winner.id}`);
+    }
+  }
+  if (!patch.size) return motifs;
+  return motifs.map((m) => {
+    const reason = patch.get(m.id);
+    if (!reason) return m;
+    return {
+      ...m,
+      status: "cancelled",
+      statusReason: reason,
+      novelty: m.novelty === "new" ? "new" : "updated",
+      resolved: true,
+      resolvedBy: "system",
+      resolvedAt: m.updatedAt || new Date().toISOString(),
     };
   });
 }
@@ -1146,7 +1210,8 @@ export function reconcileMotifsWithGraph(params: {
 
   const relationConflicted = applyRelationConflictDeprecation(mergedDerived, conceptById);
   const deprecationApplied = applyRedundancyDeprecation(relationConflicted, conceptById);
-  const triadSubsumed = applyTriadSubsumption(deprecationApplied, conceptById);
+  const highSimilarityCollapsed = applyHighSimilarityCancellation(deprecationApplied);
+  const triadSubsumed = applyTriadSubsumption(highSimilarityCollapsed, conceptById);
   const densityCapped = capActiveMotifsPerAnchor(triadSubsumed);
   const softPrunedCollapsed = convertSoftDeprecationsToCancelled(densityCapped).map((m) => {
     if (m.status !== "deprecated" && m.status !== "cancelled") return m;

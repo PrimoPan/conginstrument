@@ -26,7 +26,7 @@ const FONT_CANDIDATES = [
   "/Library/Fonts/Arial Unicode.ttf",
 ].filter(Boolean);
 
-const FONT_EXT_ALLOWED_RE = /\.(ttf|otf|ttc)$/i;
+const FONT_EXT_ALLOWED_RE = /\.(ttf|otf|ttc|woff|woff2)$/i;
 
 function t(locale: AppLocale | undefined, zh: string, en: string): string {
   return isEnglishLocale(locale) ? en : zh;

@@ -295,27 +295,29 @@ export function buildMotifReasoningView(params: {
 
   const nodeIdSet = new Set(nodes.map((n) => n.id));
   const motifIdToNodeId = new Map(nodes.map((n) => [n.motifId, n.id]));
-  const edges: MotifReasoningEdge[] = uniq(
-    (params.motifLinks || [])
-      .filter((x) => motifById.has(x.fromMotifId) && motifById.has(x.toMotifId))
-      .map((x) => {
-        const from = motifIdToNodeId.get(x.fromMotifId) || "";
-        const to = motifIdToNodeId.get(x.toMotifId) || "";
-        return `${cleanText(x.id, 120)}::${from}::${to}::${x.type}`;
-      }),
-    420
-  )
-    .map((packed) => {
-      const [idRaw, from, to, typeRaw] = packed.split("::");
-      return {
-        id: cleanText(idRaw, 120),
+  const edgeByKey = new Map<string, MotifReasoningEdge>();
+  for (const x of params.motifLinks || []) {
+    if (!motifById.has(x.fromMotifId) || !motifById.has(x.toMotifId)) continue;
+    const from = motifIdToNodeId.get(x.fromMotifId) || "";
+    const to = motifIdToNodeId.get(x.toMotifId) || "";
+    if (!nodeIdSet.has(from) || !nodeIdSet.has(to) || from === to) continue;
+    const type = normalizeLinkType(String(x.type || ""));
+    const confidence = clamp01((x as any)?.confidence, 0.72);
+    const key = `${from}=>${to}::${type}`;
+    const prev = edgeByKey.get(key);
+    if (!prev || confidence > prev.confidence) {
+      edgeByKey.set(key, {
+        id: cleanText((x as any)?.id, 120) || `me_${cleanText(x.fromMotifId, 40)}_${cleanText(x.toMotifId, 40)}_${type}`,
         from,
         to,
-        type: normalizeLinkType(typeRaw),
-        confidence: 0.72,
-      } as MotifReasoningEdge;
-    })
-    .filter((e) => nodeIdSet.has(e.from) && nodeIdSet.has(e.to) && e.from !== e.to);
+        type,
+        confidence,
+      });
+    }
+  }
+  const edges: MotifReasoningEdge[] = Array.from(edgeByKey.values()).sort(
+    (a, b) => b.confidence - a.confidence || a.id.localeCompare(b.id)
+  );
 
   const steps = buildReasoningSteps({
     nodes,

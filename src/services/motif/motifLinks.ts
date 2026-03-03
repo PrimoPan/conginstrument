@@ -111,7 +111,6 @@ function autoType(a: ConceptMotif, b: ConceptMotif): MotifLinkType {
     return "refines";
   }
 
-  if (depA === "constraint" && depB === "constraint") return "conflicts_with";
   return "supports";
 }
 

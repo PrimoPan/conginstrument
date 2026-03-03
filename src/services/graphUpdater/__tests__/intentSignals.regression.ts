@@ -728,6 +728,43 @@ const cases: Case[] = [
     },
   },
   {
+    name: "highly similar freeform concepts should be deduplicated",
+    run: () => {
+      const graph = {
+        id: "g_concept_high_similarity",
+        version: 1,
+        nodes: [
+          {
+            id: "n1",
+            type: "constraint",
+            layer: "requirement",
+            statement: "限制因素: 住安全区域",
+            status: "confirmed",
+            confidence: 0.88,
+            importance: 0.84,
+            key: "slot:freeform:constraint:safe_zone_a",
+          },
+          {
+            id: "n2",
+            type: "constraint",
+            layer: "requirement",
+            statement: "限制因素: 住安全区域",
+            status: "confirmed",
+            confidence: 0.86,
+            importance: 0.8,
+            key: "slot:freeform:constraint:safe_zone_b",
+          },
+        ],
+        edges: [],
+      } as any;
+
+      const concepts = reconcileConceptsWithGraph({ graph, baseConcepts: [] });
+      assert.equal(concepts.length, 1);
+      assert.equal((concepts[0].nodeIds || []).length >= 2, true);
+      assert.equal((concepts[0].migrationHistory || []).some((x) => String(x).startsWith("high_similarity_merged:")), true);
+    },
+  },
+  {
     name: "motif dedupe should suppress bookkeeping-budget motifs and cap active motifs per anchor",
     run: () => {
       const graph = {
@@ -833,6 +870,58 @@ const cases: Case[] = [
         );
       });
       assert.equal(hasSoftDeprecated, false);
+    },
+  },
+  {
+    name: "highly similar motifs on same anchor should be cancelled as duplicates",
+    run: () => {
+      const graph = {
+        id: "g_motif_high_similarity",
+        version: 1,
+        nodes: [
+          {
+            id: "n_goal",
+            type: "belief",
+            layer: "intent",
+            statement: "意图: 去米兰旅游",
+            status: "confirmed",
+            confidence: 0.9,
+            importance: 0.9,
+            key: "slot:goal",
+          },
+          {
+            id: "n_limit",
+            type: "constraint",
+            layer: "requirement",
+            statement: "限制因素: 住安全区域",
+            status: "confirmed",
+            confidence: 0.9,
+            importance: 0.82,
+            key: "slot:constraint:limiting:other:safe_zone",
+          },
+          {
+            id: "n_generic",
+            type: "constraint",
+            layer: "requirement",
+            statement: "限制因素: 住安全区域",
+            status: "confirmed",
+            confidence: 0.87,
+            importance: 0.79,
+            key: "slot:constraint:safe_zone",
+          },
+        ] as any,
+        edges: [
+          { id: "e1", from: "n_limit", to: "n_goal", type: "constraint", confidence: 0.9 },
+          { id: "e2", from: "n_generic", to: "n_goal", type: "constraint", confidence: 0.87 },
+        ] as any,
+      } as any;
+
+      const concepts = reconcileConceptsWithGraph({ graph, baseConcepts: [] });
+      const motifs = reconcileMotifsWithGraph({ graph, concepts, baseMotifs: [] });
+      assert.equal(
+        motifs.some((m) => m.status === "cancelled" && String(m.statusReason || "").startsWith("high_similarity_with:")),
+        true
+      );
     },
   },
   {
@@ -981,9 +1070,12 @@ const cases: Case[] = [
       const motifs = reconcileMotifsWithGraph({ graph, concepts, baseMotifs: [] });
       const motifLinks = reconcileMotifLinks({ motifs, baseLinks: [] });
       const view = buildMotifReasoningView({ concepts, motifs, motifLinks, locale: "zh-CN" as any });
+      const nodeIds = new Set(view.nodes.map((n) => n.id));
 
+      assert.equal(view.edges.length > 0, true);
+      assert.equal(view.edges.every((e) => nodeIds.has(String(e.from)) && nodeIds.has(String(e.to)) && e.from !== e.to), true);
       assert.equal(
-        view.edges.every((e) => ["enable", "constraint", "determine", "conflicts_with"].includes(String(e.type))),
+        view.edges.every((e) => ["precedes", "supports", "conflicts_with", "refines"].includes(String(e.type))),
         true
       );
       assert.equal(view.steps.length > 0, true);

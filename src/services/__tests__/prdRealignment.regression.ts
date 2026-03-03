@@ -280,4 +280,118 @@ run("reasoning-step safe schema fields present", () => {
   assert.ok(Array.isArray(first.depends_on));
 });
 
+run("long motif identifiers should not drop reasoning edges", () => {
+  const longA = `m_${"a".repeat(180)}`;
+  const longB = `m_${"b".repeat(180)}`;
+  const concepts = [
+    {
+      id: "c_long_1",
+      kind: "constraint",
+      validationStatus: "resolved",
+      extractionStage: "disambiguation",
+      polarity: "positive",
+      scope: "global",
+      family: "budget",
+      semanticKey: "slot:budget",
+      title: "预算上限",
+      description: "d",
+      score: 0.88,
+      nodeIds: ["n1"],
+      sourceMsgIds: ["m1"],
+      evidenceTerms: [],
+      locked: false,
+      paused: false,
+      updatedAt: new Date().toISOString(),
+    },
+    {
+      id: "c_long_2",
+      kind: "belief",
+      validationStatus: "resolved",
+      extractionStage: "disambiguation",
+      polarity: "positive",
+      scope: "global",
+      family: "goal",
+      semanticKey: "slot:goal",
+      title: "旅行意图",
+      description: "d",
+      score: 0.9,
+      nodeIds: ["n2"],
+      sourceMsgIds: ["m2"],
+      evidenceTerms: [],
+      locked: false,
+      paused: false,
+      updatedAt: new Date().toISOString(),
+    },
+  ] as any;
+  const motifs = [
+    {
+      id: longA,
+      motif_id: longA,
+      motif_type: "constraint",
+      motifType: "pair",
+      relation: "constraint",
+      roles: { sources: ["c_long_1"], target: "c_long_2" },
+      scope: "global",
+      aliases: [],
+      concept_bindings: ["c_long_1", "c_long_2"],
+      conceptIds: ["c_long_1", "c_long_2"],
+      anchorConceptId: "c_long_2",
+      title: "预算约束目标",
+      description: "d",
+      confidence: 0.86,
+      supportEdgeIds: [],
+      supportNodeIds: [],
+      status: "active",
+      novelty: "new",
+      updatedAt: new Date().toISOString(),
+    },
+    {
+      id: longB,
+      motif_id: longB,
+      motif_type: "enable",
+      motifType: "pair",
+      relation: "enable",
+      roles: { sources: ["c_long_1"], target: "c_long_2" },
+      scope: "global",
+      aliases: [],
+      concept_bindings: ["c_long_1", "c_long_2"],
+      conceptIds: ["c_long_1", "c_long_2"],
+      anchorConceptId: "c_long_2",
+      title: "预算支持目标",
+      description: "d",
+      confidence: 0.84,
+      supportEdgeIds: [],
+      supportNodeIds: [],
+      status: "active",
+      novelty: "new",
+      updatedAt: new Date().toISOString(),
+    },
+  ] as any;
+  const links = reconcileMotifLinks({
+    motifs,
+    baseLinks: [
+      {
+        id: `ml_${"x".repeat(220)}`,
+        fromMotifId: longA,
+        toMotifId: longB,
+        type: "supports",
+        confidence: 0.91,
+        source: "user",
+      },
+    ],
+  });
+  const view = buildMotifReasoningView({
+    concepts,
+    motifs,
+    motifLinks: links,
+    locale: "zh-CN" as any,
+  });
+  assert.equal(view.edges.length > 0, true);
+  const motifIdToNodeId = new Map(view.nodes.map((n) => [n.motifId, n.id]));
+  assert.equal(
+    view.edges.some((e) => e.from === motifIdToNodeId.get(longA) && e.to === motifIdToNodeId.get(longB)),
+    true
+  );
+});
+
 console.log("All PRD re-alignment checks passed.");
