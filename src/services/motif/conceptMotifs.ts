@@ -858,6 +858,235 @@ function hasCjk(text: string): boolean {
   return /[\u3400-\u9fff]/.test(String(text || ""));
 }
 
+const SEMANTIC_NOISE_TOKENS = new Set([
+  "我",
+  "我们",
+  "你",
+  "你们",
+  "想",
+  "想去",
+  "要",
+  "我要",
+  "需要",
+  "希望",
+  "计划",
+  "安排",
+  "行程",
+  "旅行",
+  "旅游",
+  "旅程",
+  "出游",
+  "目的地",
+  "去",
+  "到",
+  "前往",
+  "trip",
+  "travel",
+  "itinerary",
+  "plan",
+  "planning",
+  "schedule",
+  "journey",
+  "destination",
+  "visit",
+  "go",
+  "to",
+  "the",
+  "a",
+  "an",
+  "and",
+  "or",
+  "for",
+  "with",
+  "of",
+  "in",
+  "on",
+]);
+
+function normalizeSemanticSurface(text: string): string {
+  return cleanText(text, 260)
+    .toLowerCase()
+    .replace(/[_:]/g, " ")
+    .replace(
+      /(我想|想去|我要|需要|希望|准备|计划|打算|去|到|前往|trip|travel|itinerary|plan|planning|schedule|journey|visit|go to)/gi,
+      " "
+    )
+    .replace(/(行程|旅行|旅游|旅程|出游|安排|方案|路线|攻略)/g, " ")
+    .replace(/[^\p{L}\p{N}\s]+/gu, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function semanticTokens(text: string): string[] {
+  const chunks = normalizeSemanticSurface(text).match(/[\u4e00-\u9fa5]{1,4}|[a-z0-9]{2,24}/g) || [];
+  const out: string[] = [];
+  const seen = new Set<string>();
+  for (const raw of chunks) {
+    const token = cleanText(raw, 24).toLowerCase();
+    if (!token || SEMANTIC_NOISE_TOKENS.has(token) || seen.has(token)) continue;
+    seen.add(token);
+    out.push(token);
+    if (out.length >= 16) break;
+  }
+  return out;
+}
+
+function tokenJaccard(a: string[], b: string[]): number {
+  if (!a.length || !b.length) return 0;
+  const setA = new Set(a);
+  const setB = new Set(b);
+  let inter = 0;
+  for (const x of setA) if (setB.has(x)) inter += 1;
+  const union = setA.size + setB.size - inter;
+  if (!union) return 0;
+  return inter / union;
+}
+
+function semanticCoreFromSlotKey(rawKey: string): string {
+  const key = cleanText(rawKey, 200).toLowerCase();
+  if (!key || !key.startsWith("slot:")) return "";
+
+  if (key.startsWith("slot:destination:")) {
+    const city = semanticTokens(key.slice("slot:destination:".length).replace(/_/g, " ")).join("_");
+    return `destination:${city || "unknown"}`;
+  }
+  if (key.startsWith("slot:duration_city:")) {
+    const city = semanticTokens(key.slice("slot:duration_city:".length).replace(/_/g, " ")).join("_");
+    return `duration_city:${city || "unknown"}`;
+  }
+  if (key.startsWith("slot:sub_location:")) {
+    const rest = key.slice("slot:sub_location:".length).split(":");
+    const root = semanticTokens((rest[0] || "").replace(/_/g, " ")).join("_");
+    const sub = semanticTokens(rest.slice(1).join(" ").replace(/_/g, " ")).join("_");
+    return `sub_location:${root || "root"}:${sub || "loc"}`;
+  }
+  if (key.startsWith("slot:constraint:limiting:")) {
+    const kind = cleanText(key.slice("slot:constraint:limiting:".length).split(":")[0], 28).toLowerCase();
+    return `constraint:limiting:${kind || "other"}`;
+  }
+  if (key.startsWith("slot:freeform:")) {
+    const parts = key.split(":");
+    const tail = parts.slice(3).join(" ").replace(/_/g, " ");
+    const sig = semanticTokens(tail).join("_");
+    return `freeform:${sig || "node"}`;
+  }
+  return key;
+}
+
+function semanticCoreFromConcept(c: ConceptItem | undefined): string {
+  if (!c) return "";
+  const keyCore = semanticCoreFromSlotKey(conceptSemanticKey(c));
+  if (keyCore) return keyCore;
+  const titleCore = semanticTokens(cleanText(c.title, 120)).join("_");
+  const family = canonicalConceptFamily(c) || "other";
+  return titleCore ? `${family}:${titleCore}` : family;
+}
+
+function semanticFamilyGroup(c: ConceptItem | undefined): string {
+  const family = canonicalConceptFamily(c) || "other";
+  const core = semanticCoreFromConcept(c);
+  if (core.startsWith("destination:")) return "destination";
+  if (core.startsWith("duration_city:")) return "duration_city";
+  if (core.startsWith("sub_location:")) return "sub_location";
+  if (core.startsWith("constraint:limiting:")) return "limiting_factor";
+  if (family !== "other") return family;
+  const title = cleanText(c?.title, 140);
+  if (/去|到|前往|destination|visit|go to/i.test(title) && /(行程|旅行|旅游|trip|travel|itinerary)/i.test(title)) {
+    return "destination";
+  }
+  return family;
+}
+
+type MotifPathSemanticMeta = {
+  id: string;
+  dep: EdgeType;
+  sourceFamilies: string[];
+  sourceFamilySignature: string;
+  anchorFamily: string;
+  sourceCores: string[];
+  anchorCore: string;
+  intentTokens: string[];
+};
+
+function motifPathSemanticMeta(m: ConceptMotif, conceptById: Map<string, ConceptItem>): MotifPathSemanticMeta {
+  const sourceIds = motifSourceIds(m);
+  const sourceFamilies = uniq(
+    sourceIds
+      .map((id) => semanticFamilyGroup(conceptById.get(id)))
+      .filter(Boolean)
+      .sort(),
+    8
+  );
+  const anchor = conceptById.get(m.anchorConceptId);
+  return {
+    id: m.id,
+    dep: motifDependencyClass(m),
+    sourceFamilies,
+    sourceFamilySignature: sourceFamilies.join("+") || "none",
+    anchorFamily: semanticFamilyGroup(anchor) || canonicalConceptFamily(anchor) || "other",
+    sourceCores: uniq(
+      sourceIds
+        .map((id) => semanticCoreFromConcept(conceptById.get(id)))
+        .filter(Boolean)
+        .sort(),
+      8
+    ),
+    anchorCore: semanticCoreFromConcept(anchor),
+    intentTokens: semanticTokens(`${m.title} ${m.description} ${m.causalFormula || ""}`),
+  };
+}
+
+function crossAnchorDuplicateScore(a: MotifPathSemanticMeta, b: MotifPathSemanticMeta): number {
+  const sourceFamilyScore =
+    a.sourceFamilySignature === b.sourceFamilySignature ? 1 : tokenJaccard(a.sourceFamilies, b.sourceFamilies);
+  const anchorFamilyScore = a.anchorFamily === b.anchorFamily ? 1 : 0;
+  const sourceCoreScore = tokenJaccard(
+    a.sourceCores.flatMap((x) => semanticTokens(x)),
+    b.sourceCores.flatMap((x) => semanticTokens(x))
+  );
+  const anchorCoreScore = tokenJaccard(semanticTokens(a.anchorCore), semanticTokens(b.anchorCore));
+  const intentScore = tokenJaccard(a.intentTokens, b.intentTokens);
+  return sourceFamilyScore * 0.28 + anchorFamilyScore * 0.16 + sourceCoreScore * 0.24 + anchorCoreScore * 0.22 + intentScore * 0.1;
+}
+
+function motifStrengthScore(m: ConceptMotif): number {
+  return motifPriorityScore(m) + (m.supportEdgeIds?.length || 0) * 0.002 + (m.supportNodeIds?.length || 0) * 0.001;
+}
+
+function conceptInfoTokens(c: ConceptItem | undefined): string[] {
+  if (!c) return [];
+  return uniq(
+    [
+      ...semanticTokens(cleanText(c.title, 120)),
+      ...semanticTokens(conceptSemanticKey(c)),
+      ...semanticTokens((c.evidenceTerms || []).join(" ")),
+    ],
+    16
+  );
+}
+
+function isLowInformationRelayConcept(
+  relay: ConceptItem | undefined,
+  source: ConceptItem | undefined,
+  target: ConceptItem | undefined
+): boolean {
+  if (!relay) return false;
+  const relayTokens = conceptInfoTokens(relay);
+  if (!relayTokens.length) return true;
+  const sourceSet = new Set(conceptInfoTokens(source));
+  const targetSet = new Set(conceptInfoTokens(target));
+  let novel = 0;
+  for (const token of relayTokens) if (!sourceSet.has(token) && !targetSet.has(token)) novel += 1;
+  const infoGain = novel / Math.max(1, relayTokens.length);
+  const relayCore = semanticCoreFromConcept(relay);
+  const sourceCore = semanticCoreFromConcept(source);
+  const targetCore = semanticCoreFromConcept(target);
+  const sameAsNeighbor = !!relayCore && (relayCore === sourceCore || relayCore === targetCore);
+  const relayFamily = semanticFamilyGroup(relay);
+  const genericRelay = relayFamily === "other" || relayFamily === "generic_constraint";
+  return infoGain <= 0.34 && (conceptScore(relay) <= 0.8 || sameAsNeighbor || genericRelay);
+}
+
 function applyRedundancyDeprecation(motifs: ConceptMotif[], conceptById: Map<string, ConceptItem>): ConceptMotif[] {
   const groups = new Map<string, ConceptMotif[]>();
   for (const m of motifs) {
@@ -1080,6 +1309,253 @@ function applyHighSimilarityCancellation(motifs: ConceptMotif[]): ConceptMotif[]
   });
 }
 
+function applyCrossAnchorPathDedup(motifs: ConceptMotif[], conceptById: Map<string, ConceptItem>): ConceptMotif[] {
+  const candidates = motifs.filter((m) => !m.resolved && m.status === "active" && !!m.anchorConceptId);
+  if (candidates.length < 2) return motifs;
+
+  const metaById = new Map<string, MotifPathSemanticMeta>();
+  const buckets = new Map<string, ConceptMotif[]>();
+  for (const m of candidates) {
+    const meta = motifPathSemanticMeta(m, conceptById);
+    metaById.set(m.id, meta);
+    const key = `${meta.dep}|${meta.sourceFamilySignature}|${meta.anchorFamily}`;
+    if (!buckets.has(key)) buckets.set(key, []);
+    buckets.get(key)!.push(m);
+  }
+
+  const patch = new Map<string, string>();
+  for (const list of buckets.values()) {
+    if (list.length < 2) continue;
+    const sorted = list
+      .slice()
+      .sort((a, b) => motifStrengthScore(b) - motifStrengthScore(a) || a.id.localeCompare(b.id));
+    const survivors: ConceptMotif[] = [];
+
+    for (const motif of sorted) {
+      if (patch.has(motif.id)) continue;
+      const meta = metaById.get(motif.id);
+      if (!meta) {
+        survivors.push(motif);
+        continue;
+      }
+
+      let duplicatedBy = "";
+      for (const keep of survivors) {
+        if (motif.anchorConceptId === keep.anchorConceptId) continue;
+        const keepMeta = metaById.get(keep.id);
+        if (!keepMeta) continue;
+
+        const pathScore = crossAnchorDuplicateScore(meta, keepMeta);
+        const textScore = motifTextSimilarity(motif, keep);
+        const anchorCoreScore = tokenJaccard(semanticTokens(meta.anchorCore), semanticTokens(keepMeta.anchorCore));
+        const intentScore = tokenJaccard(meta.intentTokens, keepMeta.intentTokens);
+
+        const semanticDuplicate =
+          pathScore >= 0.84 ||
+          (pathScore >= 0.76 && textScore >= 0.72) ||
+          (anchorCoreScore >= 0.88 && intentScore >= 0.55 && textScore >= 0.64);
+        if (!semanticDuplicate) continue;
+        duplicatedBy = keep.id;
+        break;
+      }
+
+      if (duplicatedBy) {
+        patch.set(motif.id, `cross_anchor_duplicate_of:${duplicatedBy}`);
+        continue;
+      }
+      survivors.push(motif);
+    }
+  }
+
+  if (!patch.size) return motifs;
+  return motifs.map((m) => {
+    const reason = patch.get(m.id);
+    if (!reason) return m;
+    return {
+      ...m,
+      status: "cancelled",
+      statusReason: reason,
+      novelty: m.novelty === "new" ? "new" : "updated",
+      resolved: true,
+      resolvedBy: "system",
+      resolvedAt: m.updatedAt || new Date().toISOString(),
+    };
+  });
+}
+
+function applyRelayChainCompression(
+  motifs: ConceptMotif[],
+  conceptById: Map<string, ConceptItem>,
+  locale?: AppLocale
+): ConceptMotif[] {
+  const candidates = motifs.filter((m) => {
+    if (m.status !== "active" || m.resolved || m.motifType !== "pair") return false;
+    if (!m.anchorConceptId || m.relation === "conflicts_with") return false;
+    const sources = motifSourceIds(m);
+    return sources.length === 1 && !!sources[0];
+  });
+  if (candidates.length < 2) return motifs;
+
+  const incoming = new Map<string, ConceptMotif[]>();
+  const outgoing = new Map<string, ConceptMotif[]>();
+  for (const m of candidates) {
+    const source = motifSourceIds(m)[0];
+    const target = m.anchorConceptId;
+    if (!source || !target) continue;
+    if (!incoming.has(target)) incoming.set(target, []);
+    if (!outgoing.has(source)) outgoing.set(source, []);
+    incoming.get(target)!.push(m);
+    outgoing.get(source)!.push(m);
+  }
+
+  type ChainCandidate = {
+    left: ConceptMotif;
+    right: ConceptMotif;
+    sourceId: string;
+    relayId: string;
+    targetId: string;
+    dep: EdgeType;
+    score: number;
+  };
+
+  const chains: ChainCandidate[] = [];
+  for (const [relayId, leftList] of incoming.entries()) {
+    const rightList = outgoing.get(relayId) || [];
+    if (leftList.length !== 1 || rightList.length !== 1) continue;
+    const left = leftList[0];
+    const right = rightList[0];
+    if (left.id === right.id) continue;
+    if (left.relation !== right.relation) continue;
+    const dep = motifDependencyClass(left);
+    if (dep !== motifDependencyClass(right) || dep === "conflicts_with") continue;
+
+    const sourceId = motifSourceIds(left)[0];
+    const targetId = right.anchorConceptId;
+    if (!sourceId || !targetId || sourceId === relayId || targetId === relayId || sourceId === targetId) continue;
+    if (
+      !isLowInformationRelayConcept(
+        conceptById.get(relayId),
+        conceptById.get(sourceId),
+        conceptById.get(targetId)
+      )
+    ) {
+      continue;
+    }
+
+    chains.push({
+      left,
+      right,
+      sourceId,
+      relayId,
+      targetId,
+      dep,
+      score: motifStrengthScore(left) + motifStrengthScore(right),
+    });
+  }
+  if (!chains.length) return motifs;
+
+  const sortedChains = chains
+    .slice()
+    .sort((a, b) => b.score - a.score || a.left.id.localeCompare(b.left.id) || a.right.id.localeCompare(b.right.id));
+  const consumed = new Set<string>();
+  const patch = new Map<string, string>();
+  const composites: ConceptMotif[] = [];
+  const now = new Date().toISOString();
+
+  for (const chain of sortedChains) {
+    if (consumed.has(chain.left.id) || consumed.has(chain.right.id)) continue;
+
+    const existingDirect = motifs.find((m) => {
+      if (m.id === chain.left.id || m.id === chain.right.id) return false;
+      if (m.status !== "active" || m.resolved) return false;
+      if (motifDependencyClass(m) !== chain.dep) return false;
+      if (m.anchorConceptId !== chain.targetId) return false;
+      const sources = motifSourceIds(m);
+      return sources.includes(chain.sourceId);
+    });
+
+    const sourceConcept = conceptById.get(chain.sourceId);
+    const relayConcept = conceptById.get(chain.relayId);
+    const targetConcept = conceptById.get(chain.targetId);
+
+    const compositeId = existingDirect?.id || stableId(`chain:${chain.dep}:${chain.sourceId}->${chain.relayId}->${chain.targetId}`);
+    if (!existingDirect) {
+      const relation = chain.left.relation;
+      const sourceTitle = cleanText(sourceConcept?.title, 44) || conceptTitleOf(chain.sourceId, conceptById);
+      const relayTitle = cleanText(relayConcept?.title, 44) || conceptTitleOf(chain.relayId, conceptById);
+      const targetTitle = cleanText(targetConcept?.title, 44) || conceptTitleOf(chain.targetId, conceptById);
+      const conceptIds = uniq([chain.sourceId, chain.relayId, chain.targetId], 8);
+      const confidence = clamp01(
+        ((chain.left.confidence + chain.right.confidence) / 2) * 0.72 +
+          Math.max(chain.left.confidence, chain.right.confidence) * 0.28 +
+          0.01,
+        0.72
+      );
+      composites.push({
+        id: compositeId,
+        motif_id: compositeId,
+        motif_type: semanticMotifType(chain.dep),
+        templateKey: `chain:${chain.dep}:${sourceSignatureToken(sourceConcept)}+${sourceSignatureToken(
+          relayConcept
+        )}->${sourceSignatureToken(targetConcept)}`,
+        motifType: "triad",
+        relation,
+        roles: {
+          sources: [chain.sourceId, chain.relayId],
+          target: chain.targetId,
+        },
+        scope: "global",
+        aliases: uniq([compositeId, chain.left.id, chain.right.id], 24),
+        concept_bindings: conceptIds,
+        conceptIds,
+        anchorConceptId: chain.targetId,
+        title: cleanText(`${sourceTitle} ${relationLabel(relation, locale)} ${targetTitle}`, 160),
+        description: cleanText(
+          t(
+            locale,
+            `链路压缩：${sourceTitle} -> ${relayTitle} -> ${targetTitle}（中继概念信息增益低）`,
+            `Chain compression: ${sourceTitle} -> ${relayTitle} -> ${targetTitle} (relay concept has low information gain)`
+          ),
+          220
+        ),
+        confidence,
+        supportEdgeIds: uniq([...chain.left.supportEdgeIds, ...chain.right.supportEdgeIds], 64),
+        supportNodeIds: uniq([...chain.left.supportNodeIds, ...chain.right.supportNodeIds], 64),
+        status: "active",
+        statusReason: `chain_composite:${chain.left.id}+${chain.right.id}`,
+        resolved: false,
+        dependencyClass: chain.dep,
+        novelty: "new",
+        updatedAt: now,
+      });
+    }
+
+    patch.set(chain.left.id, `chain_compressed_by:${compositeId}`);
+    patch.set(chain.right.id, `chain_compressed_by:${compositeId}`);
+    consumed.add(chain.left.id);
+    consumed.add(chain.right.id);
+  }
+
+  if (!patch.size && !composites.length) return motifs;
+  const patched = motifs.map((m) => {
+    const reason = patch.get(m.id);
+    if (!reason) return m;
+    return {
+      ...m,
+      status: "cancelled",
+      statusReason: reason,
+      novelty: m.novelty === "new" ? "new" : "updated",
+      resolved: true,
+      resolvedBy: "system",
+      resolvedAt: now,
+    };
+  });
+  if (!composites.length) return patched;
+  const existingIds = new Set(patched.map((m) => m.id));
+  const additions = composites.filter((m) => !existingIds.has(m.id));
+  return additions.length ? [...patched, ...additions] : patched;
+}
+
 function capActiveMotifsPerAnchor(motifs: ConceptMotif[]): ConceptMotif[] {
   const groups = new Map<string, ConceptMotif[]>();
   for (const m of motifs) {
@@ -1211,8 +1687,10 @@ export function reconcileMotifsWithGraph(params: {
   const relationConflicted = applyRelationConflictDeprecation(mergedDerived, conceptById);
   const deprecationApplied = applyRedundancyDeprecation(relationConflicted, conceptById);
   const highSimilarityCollapsed = applyHighSimilarityCancellation(deprecationApplied);
-  const triadSubsumed = applyTriadSubsumption(highSimilarityCollapsed, conceptById);
-  const densityCapped = capActiveMotifsPerAnchor(triadSubsumed);
+  const crossAnchorDeduped = applyCrossAnchorPathDedup(highSimilarityCollapsed, conceptById);
+  const triadSubsumed = applyTriadSubsumption(crossAnchorDeduped, conceptById);
+  const chainCompressed = applyRelayChainCompression(triadSubsumed, conceptById, params.locale);
+  const densityCapped = capActiveMotifsPerAnchor(chainCompressed);
   const softPrunedCollapsed = convertSoftDeprecationsToCancelled(densityCapped).map((m) => {
     if (m.status !== "deprecated" && m.status !== "cancelled") return m;
     if (m.novelty === "new") return m;
