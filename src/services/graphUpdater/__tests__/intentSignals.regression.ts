@@ -10,6 +10,7 @@ import { buildBudgetLedgerFromUserTurns } from "../../travelPlan/budgetLedger.js
 import { buildTravelPlanState } from "../../travelPlan/state.js";
 import { buildSlotStateMachine } from "../slotStateMachine.js";
 import { compileSlotStateToPatch } from "../slotGraphCompiler.js";
+import { generateGraphPatch } from "../../graphUpdater.js";
 import { planUncertaintyQuestion } from "../../uncertainty/questionPlanner.js";
 import { reconcileConceptsWithGraph } from "../../concepts.js";
 import {
@@ -23,7 +24,7 @@ import { planMotifQuestion } from "../../motif/questionPlanner.js";
 
 type Case = {
   name: string;
-  run: () => void;
+  run: () => void | Promise<void>;
 };
 
 const cases: Case[] = [
@@ -770,6 +771,96 @@ const cases: Case[] = [
       assert.equal(state.assistantPlan?.dayPlans.length, 3);
       assert.equal(String(state.assistantPlan?.rawText || "").includes("4月10日"), true);
       assert.equal(String(state.exportNarrative || "").includes("圣西罗体育场"), true);
+    },
+  },
+  {
+    name: "manual graph remaining budget should persist on non-budget user turns",
+    run: async () => {
+      const graph = {
+        id: "g_manual_budget_keep",
+        version: 7,
+        nodes: [
+          {
+            id: "n_goal",
+            type: "belief",
+            layer: "intent",
+            statement: "意图：去米兰旅游3天",
+            status: "confirmed",
+            confidence: 0.9,
+            importance: 0.84,
+            key: "slot:goal",
+          },
+          {
+            id: "n_budget",
+            type: "constraint",
+            layer: "requirement",
+            statement: "预算上限: 10000元",
+            status: "confirmed",
+            confidence: 0.9,
+            importance: 0.8,
+            key: "slot:budget",
+          },
+          {
+            id: "n_budget_remaining",
+            type: "constraint",
+            layer: "requirement",
+            statement: "剩余预算: 3250元",
+            status: "confirmed",
+            confidence: 0.9,
+            importance: 0.82,
+            key: "slot:budget_remaining",
+          },
+        ] as any,
+        edges: [
+          {
+            id: "e_budget_goal",
+            from: "n_budget",
+            to: "n_goal",
+            type: "constraint",
+            confidence: 0.9,
+          },
+        ] as any,
+      } as any;
+
+      const patch = await generateGraphPatch({
+        graph,
+        userText: "请把明天行程安排得轻松一点，下午看展",
+        recentTurns: [
+          { role: "user", content: "预算10000元" },
+          { role: "assistant", content: "收到" },
+        ],
+        stateContextUserTurns: ["预算10000元"],
+        assistantText: "",
+        locale: "zh-CN" as any,
+      });
+
+      const state = buildSlotStateMachine({
+        userText: "请把明天行程安排得轻松一点，下午看展",
+        recentTurns: [
+          { role: "user", content: "预算10000元" },
+          { role: "assistant", content: "收到" },
+        ],
+        signals: extractIntentSignalsWithRecency("预算10000元", "请把明天行程安排得轻松一点，下午看展"),
+        locale: "zh-CN" as any,
+      });
+      const compiled = compileSlotStateToPatch({ graph, state });
+      assert.ok(Array.isArray(patch.ops));
+      assert.ok(Array.isArray(compiled.ops));
+
+      const budgetRemainingNodeOp = patch.ops.find((op: any) => {
+        if (op.op !== "add_node" && op.op !== "update_node") return false;
+        const node = (op as any).node || (op as any).patch || {};
+        const key = String(node.key || "");
+        return key === "slot:budget_remaining";
+      }) as any;
+
+      if (budgetRemainingNodeOp) {
+        const node = budgetRemainingNodeOp.node || budgetRemainingNodeOp.patch || {};
+        assert.equal(/3250/.test(String(node.statement || "")), true);
+      } else {
+        const originalRemaining = (graph.nodes || []).find((n: any) => n.key === "slot:budget_remaining");
+        assert.equal(/3250/.test(String(originalRemaining?.statement || "")), true);
+      }
     },
   },
   {
@@ -1726,21 +1817,28 @@ const cases: Case[] = [
   },
 ];
 
-let failed = 0;
-for (const c of cases) {
-  try {
-    c.run();
-    console.log(`PASS: ${c.name}`);
-  } catch (err) {
-    failed += 1;
-    console.error(`FAIL: ${c.name}`);
-    console.error(err);
+async function main() {
+  let failed = 0;
+  for (const c of cases) {
+    try {
+      await c.run();
+      console.log(`PASS: ${c.name}`);
+    } catch (err) {
+      failed += 1;
+      console.error(`FAIL: ${c.name}`);
+      console.error(err);
+    }
   }
+
+  if (failed > 0) {
+    console.error(`\n${failed} regression case(s) failed.`);
+    process.exit(1);
+  }
+
+  console.log(`\nAll ${cases.length} regression cases passed.`);
 }
 
-if (failed > 0) {
-  console.error(`\n${failed} regression case(s) failed.`);
+main().catch((err) => {
+  console.error(err);
   process.exit(1);
-}
-
-console.log(`\nAll ${cases.length} regression cases passed.`);
+});

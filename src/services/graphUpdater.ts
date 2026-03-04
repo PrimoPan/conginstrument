@@ -31,6 +31,72 @@ function t(locale: AppLocale | undefined, zh: string, en: string): string {
   return isEnglishLocale(locale) ? en : zh;
 }
 
+function selectBestNodeByKey(graph: CDG, slotKey: string): any | null {
+  const nodes = (graph.nodes || []).filter((n: any) => String((n as any)?.key || "") === slotKey);
+  if (!nodes.length) return null;
+  const rankStatus = (x: any) =>
+    x?.status === "confirmed" ? 3 : x?.status === "proposed" ? 2 : x?.status === "disputed" ? 1 : 0;
+  return nodes
+    .slice()
+    .sort((a, b) => {
+      const rs = rankStatus(b) - rankStatus(a);
+      if (rs !== 0) return rs;
+      const conf = (Number((b as any)?.confidence) || 0) - (Number((a as any)?.confidence) || 0);
+      if (conf !== 0) return conf;
+      return String((a as any)?.id || "").localeCompare(String((b as any)?.id || ""));
+    })[0] as any;
+}
+
+function parseCnyAmountFromStatement(statement: string): number | undefined {
+  const s = cleanStatement(String(statement || ""), 140).replace(/[,，\s]/g, "");
+  if (!s) return undefined;
+  const m = s.match(/([0-9]{1,12}(?:\.[0-9]{1,2})?)/);
+  if (!m?.[1]) return undefined;
+  const n = Number(m[1]);
+  if (!Number.isFinite(n) || n < 0) return undefined;
+  return Math.round(n);
+}
+
+type GraphBudgetSnapshot = {
+  totalCny?: number;
+  spentCny?: number;
+  remainingCny?: number;
+  pendingCny?: number;
+  totalEvidence?: string;
+  spentEvidence?: string;
+  pendingEvidence?: string;
+};
+
+function readGraphBudgetSnapshot(graph: CDG): GraphBudgetSnapshot {
+  const budgetNode = selectBestNodeByKey(graph, "slot:budget");
+  const spentNode = selectBestNodeByKey(graph, "slot:budget_spent");
+  const remainingNode = selectBestNodeByKey(graph, "slot:budget_remaining");
+  const pendingNode = selectBestNodeByKey(graph, "slot:budget_pending");
+
+  const totalCny = parseCnyAmountFromStatement(String(budgetNode?.statement || ""));
+  const spentCny = parseCnyAmountFromStatement(String(spentNode?.statement || ""));
+  const remainingCny = parseCnyAmountFromStatement(String(remainingNode?.statement || ""));
+  const pendingCny = parseCnyAmountFromStatement(String(pendingNode?.statement || ""));
+
+  const snapshot: GraphBudgetSnapshot = {
+    totalCny,
+    spentCny,
+    remainingCny,
+    pendingCny,
+    totalEvidence: cleanStatement(String(budgetNode?.statement || ""), 80) || undefined,
+    spentEvidence: cleanStatement(String(spentNode?.statement || ""), 80) || undefined,
+    pendingEvidence: cleanStatement(String(pendingNode?.statement || ""), 80) || undefined,
+  };
+
+  if (snapshot.spentCny == null && snapshot.totalCny != null && snapshot.remainingCny != null) {
+    snapshot.spentCny = Math.max(0, Math.round(snapshot.totalCny - snapshot.remainingCny));
+  }
+  if (snapshot.remainingCny == null && snapshot.totalCny != null && snapshot.spentCny != null) {
+    snapshot.remainingCny = Math.max(0, Math.round(snapshot.totalCny - snapshot.spentCny));
+  }
+  return snapshot;
+}
+
 function normalizeUtterance(input: any): string {
   return String(input || "")
     .replace(/\s+/g, " ")
@@ -265,6 +331,39 @@ async function buildSignals(params: {
   } else {
     signals.budgetPendingCny = undefined;
     signals.budgetPendingEvidence = undefined;
+  }
+
+  const latestBudgetTouched =
+    latestSignals.budgetCny != null ||
+    latestSignals.budgetDeltaCny != null ||
+    latestSignals.budgetSpentCny != null ||
+    latestSignals.budgetSpentDeltaCny != null ||
+    latestSignals.budgetRemainingCny != null ||
+    latestSignals.budgetPendingCny != null;
+
+  // If the latest user turn does not mention budget, keep budget slots from the
+  // currently saved graph as source of truth. This preserves manual graph edits
+  // (e.g., manually corrected remaining budget) across non-budget turns.
+  if (!latestBudgetTouched) {
+    const graphBudget = readGraphBudgetSnapshot(params.graph);
+    if (graphBudget.totalCny != null) {
+      signals.budgetCny = graphBudget.totalCny;
+      signals.budgetEvidence = graphBudget.totalEvidence || signals.budgetEvidence;
+    }
+    if (graphBudget.spentCny != null) {
+      signals.budgetSpentCny = graphBudget.spentCny;
+      signals.budgetSpentEvidence = graphBudget.spentEvidence || signals.budgetSpentEvidence;
+    }
+    if (graphBudget.remainingCny != null) {
+      signals.budgetRemainingCny = graphBudget.remainingCny;
+    } else if (signals.budgetCny != null && signals.budgetSpentCny != null) {
+      signals.budgetRemainingCny = Math.max(0, Math.round(Number(signals.budgetCny) - Number(signals.budgetSpentCny)));
+    }
+    if (graphBudget.pendingCny != null) {
+      signals.budgetPendingCny = graphBudget.pendingCny;
+      signals.budgetPendingEvidence = graphBudget.pendingEvidence || signals.budgetPendingEvidence;
+    }
+    signals.budgetImportance = Math.max(Number(signals.budgetImportance) || 0, 0.88);
   }
 
   const canonicalIntent = buildTravelIntentStatement(signals, signalText, params.locale);
