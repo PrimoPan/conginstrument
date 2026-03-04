@@ -2356,10 +2356,31 @@ function isCoverageRelation(type: EdgeType): boolean {
   return type === "enable" || type === "constraint" || type === "determine";
 }
 
+function isDurationFamily(family: string): boolean {
+  return family === "duration_total" || family === "duration_city";
+}
+
+function isCoverageEligiblePair(params: {
+  relation: EdgeType;
+  fromConcept: ConceptItem | undefined;
+  toConcept: ConceptItem | undefined;
+}): boolean {
+  const sourceFamily = canonicalConceptFamily(params.fromConcept);
+  const targetFamily = canonicalConceptFamily(params.toConcept);
+  if (!sourceFamily || !targetFamily) return false;
+
+  // These are itinerary metadata bindings, not reusable cognitive reasoning motifs.
+  if ((sourceFamily === "destination" || sourceFamily === "sub_location") && isDurationFamily(targetFamily)) {
+    return false;
+  }
+  return true;
+}
+
 function collectRequiredCausalCoverageEdges(params: {
   graph: CDG;
   concepts: ConceptItem[];
 }): RequiredCausalCoverageEdge[] {
+  const conceptById = new Map((params.concepts || []).map((c) => [c.id, c]));
   const nodeToConcepts = buildNodeToConcepts(params.concepts);
   const out: RequiredCausalCoverageEdge[] = [];
   for (const edge of params.graph.edges || []) {
@@ -2367,14 +2388,33 @@ function collectRequiredCausalCoverageEdges(params: {
     const fromConceptIds = uniq(nodeToConcepts.get(edge.from) || [], 24);
     const toConceptIds = uniq(nodeToConcepts.get(edge.to) || [], 24);
     if (!fromConceptIds.length || !toConceptIds.length) continue;
+
+    const eligiblePairs: Array<{ fromId: string; toId: string }> = [];
+    for (const fromId of fromConceptIds) {
+      for (const toId of toConceptIds) {
+        if (
+          isCoverageEligiblePair({
+            relation: edge.type,
+            fromConcept: conceptById.get(fromId),
+            toConcept: conceptById.get(toId),
+          })
+        ) {
+          eligiblePairs.push({ fromId, toId });
+        }
+      }
+    }
+    if (!eligiblePairs.length) continue;
+
+    const eligibleFromIds = uniq(eligiblePairs.map((x) => x.fromId), 24);
+    const eligibleToIds = uniq(eligiblePairs.map((x) => x.toId), 24);
     out.push({
       edgeId: cleanText(edge.id, 120) || stableId(`edge:${edge.from}->${edge.to}:${edge.type}`),
       fromNodeId: cleanText(edge.from, 120),
       toNodeId: cleanText(edge.to, 120),
       relation: edge.type,
       edgeConfidence: clamp01(edge.confidence, 0.78),
-      fromConceptIds,
-      toConceptIds,
+      fromConceptIds: eligibleFromIds,
+      toConceptIds: eligibleToIds,
     });
   }
   return out;
@@ -2408,6 +2448,7 @@ function buildConceptPairRelationIndex(params: {
   graph: CDG;
   concepts: ConceptItem[];
 }): Set<string> {
+  const conceptById = new Map((params.concepts || []).map((c) => [c.id, c]));
   const nodeToConcepts = buildNodeToConcepts(params.concepts);
   const pairs = new Set<string>();
   for (const edge of params.graph.edges || []) {
@@ -2419,6 +2460,15 @@ function buildConceptPairRelationIndex(params: {
         const fid = cleanText(fromId, 120);
         const tid = cleanText(toId, 120);
         if (!fid || !tid || fid === tid) continue;
+        if (
+          !isCoverageEligiblePair({
+            relation: edge.type,
+            fromConcept: conceptById.get(fid),
+            toConcept: conceptById.get(tid),
+          })
+        ) {
+          continue;
+        }
         pairs.add(`${edge.type}:${fid}->${tid}`);
       }
     }

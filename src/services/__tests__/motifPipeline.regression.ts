@@ -296,6 +296,47 @@ run("causal edge coverage repair should cover all required edges and keep isolat
   assert.equal(covered.motifs.every((m) => m.subgraph_verified === true), true);
 });
 
+run("coverage repair should skip destination-to-duration metadata edges", () => {
+  const graph: CDG = {
+    id: "g_coverage_skip_meta",
+    version: 1,
+    nodes: [
+      { id: "n_dest", type: "factual_assertion", statement: "目的地: 米兰", status: "confirmed", confidence: 0.9, importance: 0.82 },
+      { id: "n_dur", type: "constraint", statement: "总行程时长: 3天", status: "confirmed", confidence: 0.9, importance: 0.86 },
+    ],
+    edges: [{ id: "e_meta", from: "n_dest", to: "n_dur", type: "constraint", confidence: 0.9 }],
+  };
+
+  const concepts: ConceptItem[] = [
+    makeConcept("c_dest", "目的地: 米兰", {
+      kind: "factual_assertion",
+      family: "destination",
+      semanticKey: "slot:destination:米兰",
+      nodeIds: ["n_dest"],
+    }),
+    makeConcept("c_dur", "总行程时长: 3天", {
+      kind: "constraint",
+      family: "duration_total",
+      semanticKey: "slot:duration_total",
+      nodeIds: ["n_dur"],
+    }),
+  ];
+
+  const covered = enforceCausalEdgeCoverage({
+    graph,
+    concepts,
+    motifs: [],
+    locale: "zh-CN",
+    maxRounds: 2,
+  });
+
+  assert.equal(covered.report.requiredCausalEdges, 0);
+  assert.equal(covered.report.coveredCausalEdges, 0);
+  assert.equal(covered.report.uncoveredCausalEdges, 0);
+  assert.equal(covered.report.repairedMotifCount, 0);
+  assert.equal(covered.motifs.length, 0);
+});
+
 run("milan limiting constraints should stay visible in motif titles", () => {
   const graph: CDG = {
     id: "g_milan",
