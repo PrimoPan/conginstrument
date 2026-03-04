@@ -314,6 +314,7 @@ function modelPayload(model: ReturnType<typeof buildCognitiveModel>) {
       motif_links: model.motifGraph.motifLinks,
     },
     motifReasoningView: model.motifReasoningView,
+    motifInvariantReport: model.motifInvariantReport,
     reasoning_steps,
     concepts: model.concepts,
     contexts: model.contexts,

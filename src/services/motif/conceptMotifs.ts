@@ -37,6 +37,16 @@ export type MotifEvidenceItem = {
   conceptId?: string;
 };
 
+export type MotifCoverageOrigin = "native" | "edge_repair";
+
+export type MotifCoverageInvariantReport = {
+  requiredCausalEdges: number;
+  coveredCausalEdges: number;
+  uncoveredCausalEdges: number;
+  repairedMotifCount: number;
+  componentCount: number;
+};
+
 export type ConceptMotif = {
   id: string;
   motif_id: string;
@@ -86,6 +96,8 @@ export type ConceptMotif = {
   bound_concepts?: MotifConceptBinding;
   evidence?: MotifEvidenceItem[];
   rationale?: string;
+  coverage_origin?: MotifCoverageOrigin;
+  subgraph_verified?: boolean;
 };
 
 const MAX_ACTIVE_MOTIFS_PER_ANCHOR = 3;
@@ -432,7 +444,21 @@ function sourceSignatureToken(c: ConceptItem | undefined): string {
   if (key.startsWith("slot:destination:")) return "slot:destination";
   if (key.startsWith("slot:duration_city:")) return "slot:duration_city";
   if (key.startsWith("slot:meeting_critical:")) return "slot:meeting_critical";
-  if (key.startsWith("slot:constraint:limiting:")) return "slot:constraint:limiting";
+  if (key.startsWith("slot:constraint:limiting:")) {
+    const rest = key.slice("slot:constraint:limiting:".length);
+    const seg = rest
+      .split(":")
+      .map((x) => cleanText(x, 40).toLowerCase())
+      .filter(Boolean);
+    const kind = seg[0] || "other";
+    const detail = seg
+      .slice(1)
+      .join(":")
+      .replace(/[^a-z0-9_:\-]/g, "_")
+      .replace(/_+/g, "_")
+      .replace(/^_+|_+$/g, "");
+    return detail ? `slot:constraint:limiting:${kind}:${detail}` : `slot:constraint:limiting:${kind}`;
+  }
   if (key.startsWith("slot:sub_location:")) return "slot:sub_location";
   if (key === "slot:goal") return "slot:goal";
   if (key === "slot:duration_total" || key === "slot:duration") return "slot:duration_total";
@@ -727,9 +753,22 @@ function withCausalSemantics(
 }
 
 function motifPatternSignature(m: ConceptMotif, conceptById: Map<string, ConceptItem>): string {
-  const source = sourceFamiliesForPattern(m, conceptById).join("+") || "none";
-  const anchorFamily = canonicalConceptFamily(conceptById.get(m.anchorConceptId));
-  return `${m.motifType}|${motifDependencyClass(m)}|${source}->${anchorFamily || "other"}`;
+  const tokenForPattern = (c: ConceptItem | undefined) => {
+    const key = conceptSemanticKey(c);
+    if (key.startsWith("slot:constraint:limiting:") || key === "slot:health" || key === "slot:language") {
+      return sourceSignatureToken(c);
+    }
+    return canonicalConceptFamily(c) || sourceSignatureToken(c) || "other";
+  };
+  const sourceSig = uniq(
+    motifSourceIds(m)
+      .map((id) => tokenForPattern(conceptById.get(id)))
+      .filter(Boolean)
+      .sort(),
+    8
+  ).join("+");
+  const anchorSig = tokenForPattern(conceptById.get(m.anchorConceptId));
+  return `${m.motifType}|${motifDependencyClass(m)}|${sourceSig || "none"}->${anchorSig || "other"}`;
 }
 
 function relationTypeBoost(relation: EdgeType): number {
@@ -739,6 +778,28 @@ function relationTypeBoost(relation: EdgeType): number {
   return 0;
 }
 
+function titlePriorityForConcept(c: ConceptItem | undefined): number {
+  if (!c) return 0;
+  const family = canonicalConceptFamily(c);
+  const key = conceptSemanticKey(c);
+  const title = cleanText(c.title, 140).toLowerCase();
+
+  if (family === "limiting_factor" || key.startsWith("slot:constraint:limiting:")) {
+    if (/心脏|冠心|心血管|cardiac|heart|medical|health/.test(title)) return 140;
+    if (/恐高|高空|高度|heights|acrophobia/.test(title)) return 138;
+    if (/安全|风险|safety|risk/.test(title)) return 136;
+    return 132;
+  }
+  if (family === "people" || key === "slot:people") return 128;
+  if (key === "slot:language" || key.startsWith("slot:constraint:limiting:language")) return 126;
+  if (family === "meeting_critical") return 120;
+  if (family === "budget") return 112;
+  if (family === "duration_total" || family === "duration_city") return 110;
+  if (family === "lodging") return 108;
+  if (family === "destination") return 102;
+  return 90;
+}
+
 function sourceTitlesFromConcepts(conceptIds: string[], anchorId: string, conceptById: Map<string, ConceptItem>): string[] {
   const ids = conceptIds.filter((id) => id !== anchorId);
   return ids
@@ -746,7 +807,11 @@ function sourceTitlesFromConcepts(conceptIds: string[], anchorId: string, concep
     .sort((a, b) => {
       const ca = conceptById.get(a);
       const cb = conceptById.get(b);
-      return conceptScore(cb || ({} as any)) - conceptScore(ca || ({} as any)) || a.localeCompare(b);
+      return (
+        titlePriorityForConcept(cb) - titlePriorityForConcept(ca) ||
+        conceptScore(cb || ({} as any)) - conceptScore(ca || ({} as any)) ||
+        a.localeCompare(b)
+      );
     })
     .map((id) => cleanText(conceptById.get(id)?.title, 44))
     .filter(Boolean);
@@ -827,9 +892,11 @@ function aggregateToPatternMotifs(
         locale
       );
     const srcB = sourceTitles[1] || "";
+    const srcC = sourceTitles[2] || "";
+    const sourceTitleSummary = [srcA, srcB, srcC].filter(Boolean).join(" + ");
     const title =
       sourceTitles.length >= 2 || g.motifType === "triad"
-        ? `${srcA}${srcB ? ` + ${srcB}` : ""} ${relationLabel(g.relation, locale)} ${anchorTitle}`
+        ? `${sourceTitleSummary} ${relationLabel(g.relation, locale)} ${anchorTitle}`
         : `${srcA} ${relationLabel(g.relation, locale)} ${anchorTitle}`;
 
     const sourceFamilyText = sourceFamiliesForPattern(
@@ -1126,6 +1193,8 @@ function normalizeMotifs(input: any): ConceptMotif[] {
     const noveltyRaw = cleanText((raw as any)?.novelty, 24).toLowerCase();
     const causalRaw = cleanText((raw as any)?.causalOperator, 40).toLowerCase();
     const reuseClassRaw = cleanText((raw as any)?.reuseClass, 32).toLowerCase();
+    const coverageOriginRaw = cleanText((raw as any)?.coverage_origin, 24).toLowerCase();
+    const subgraphVerifiedRaw = (raw as any)?.subgraph_verified;
     const resolved = !!(raw as any)?.resolved;
     const resolvedByRaw = cleanText((raw as any)?.resolvedBy, 24).toLowerCase();
     const conceptIds = uniq(
@@ -1274,6 +1343,8 @@ function normalizeMotifs(input: any): ConceptMotif[] {
             .slice(0, 8)
         : undefined,
       rationale: cleanText((raw as any)?.rationale, 220) || undefined,
+      coverage_origin: coverageOriginRaw === "edge_repair" ? "edge_repair" : "native",
+      subgraph_verified: typeof subgraphVerifiedRaw === "boolean" ? subgraphVerifiedRaw : undefined,
     });
   }
   return out;
@@ -2239,6 +2310,307 @@ function appendStatusHistory(next: ConceptMotif, prev?: ConceptMotif): ConceptMo
   return {
     ...next,
     history: [event, ...prevHistory].slice(0, 20),
+  };
+}
+
+type RequiredCausalCoverageEdge = {
+  edgeId: string;
+  fromNodeId: string;
+  toNodeId: string;
+  relation: EdgeType;
+  edgeConfidence: number;
+  fromConceptIds: string[];
+  toConceptIds: string[];
+};
+
+const COVERAGE_CAUSAL_RELATIONS: EdgeType[] = ["enable", "constraint", "determine"];
+
+function isCoverageRelation(type: EdgeType): boolean {
+  return type === "enable" || type === "constraint" || type === "determine";
+}
+
+function collectRequiredCausalCoverageEdges(params: {
+  graph: CDG;
+  concepts: ConceptItem[];
+}): RequiredCausalCoverageEdge[] {
+  const nodeToConcepts = buildNodeToConcepts(params.concepts);
+  const out: RequiredCausalCoverageEdge[] = [];
+  for (const edge of params.graph.edges || []) {
+    if (!isCoverageRelation(edge.type)) continue;
+    const fromConceptIds = uniq(nodeToConcepts.get(edge.from) || [], 24);
+    const toConceptIds = uniq(nodeToConcepts.get(edge.to) || [], 24);
+    if (!fromConceptIds.length || !toConceptIds.length) continue;
+    out.push({
+      edgeId: cleanText(edge.id, 120) || stableId(`edge:${edge.from}->${edge.to}:${edge.type}`),
+      fromNodeId: cleanText(edge.from, 120),
+      toNodeId: cleanText(edge.to, 120),
+      relation: edge.type,
+      edgeConfidence: clamp01(edge.confidence, 0.78),
+      fromConceptIds,
+      toConceptIds,
+    });
+  }
+  return out;
+}
+
+function motifSourceIdsForCoverage(motif: ConceptMotif): string[] {
+  return uniq(
+    ((motif.roles?.sources || []).length
+      ? motif.roles.sources
+      : (motif.conceptIds || []).filter((id) => id !== motif.anchorConceptId)
+    ).map((id) => cleanText(id, 120)),
+    12
+  );
+}
+
+function edgeCoveredByMotifs(edge: RequiredCausalCoverageEdge, motifs: ConceptMotif[]): boolean {
+  for (const motif of motifs || []) {
+    if (motif.status === "cancelled") continue;
+    const relation = normalizeDependencyClass(motif.dependencyClass || motif.relation, motif.relation);
+    if (relation !== edge.relation) continue;
+    const target = cleanText(motif.anchorConceptId, 120);
+    if (!target || !edge.toConceptIds.includes(target)) continue;
+    const sources = motifSourceIdsForCoverage(motif);
+    if (!sources.length) continue;
+    if (sources.some((sid) => edge.fromConceptIds.includes(sid))) return true;
+  }
+  return false;
+}
+
+function buildConceptPairRelationIndex(params: {
+  graph: CDG;
+  concepts: ConceptItem[];
+}): Set<string> {
+  const nodeToConcepts = buildNodeToConcepts(params.concepts);
+  const pairs = new Set<string>();
+  for (const edge of params.graph.edges || []) {
+    if (!isCoverageRelation(edge.type)) continue;
+    const fromConceptIds = nodeToConcepts.get(edge.from) || [];
+    const toConceptIds = nodeToConcepts.get(edge.to) || [];
+    for (const fromId of fromConceptIds) {
+      for (const toId of toConceptIds) {
+        const fid = cleanText(fromId, 120);
+        const tid = cleanText(toId, 120);
+        if (!fid || !tid || fid === tid) continue;
+        pairs.add(`${edge.type}:${fid}->${tid}`);
+      }
+    }
+  }
+  return pairs;
+}
+
+function verifyMotifSubgraph(params: {
+  motif: ConceptMotif;
+  pairIndex: Set<string>;
+}): boolean {
+  const relation = normalizeDependencyClass(params.motif.dependencyClass || params.motif.relation, params.motif.relation);
+  if (!isCoverageRelation(relation)) return true;
+  const target = cleanText(params.motif.anchorConceptId, 120);
+  const sources = motifSourceIdsForCoverage(params.motif);
+  if (!target || !sources.length) return false;
+  for (const source of sources) {
+    if (!params.pairIndex.has(`${relation}:${source}->${target}`)) return false;
+  }
+  return true;
+}
+
+function bestConceptIdByScore(ids: string[], conceptById: Map<string, ConceptItem>): string {
+  return (
+    ids
+      .slice()
+      .sort((a, b) => {
+        const ca = conceptById.get(a);
+        const cb = conceptById.get(b);
+        return conceptScore(cb || ({} as any)) - conceptScore(ca || ({} as any)) || a.localeCompare(b);
+      })
+      .find(Boolean) || ""
+  );
+}
+
+function causalOperatorFromRelation(relation: EdgeType): MotifCausalOperator {
+  if (relation === "constraint") return "confounding";
+  if (relation === "determine") return "intervention";
+  return "direct_causation";
+}
+
+function buildEdgeRepairMotif(params: {
+  edge: RequiredCausalCoverageEdge;
+  conceptById: Map<string, ConceptItem>;
+  locale?: AppLocale;
+}): ConceptMotif | null {
+  const sourceId = bestConceptIdByScore(params.edge.fromConceptIds, params.conceptById);
+  const targetId = bestConceptIdByScore(params.edge.toConceptIds, params.conceptById);
+  if (!sourceId || !targetId || sourceId === targetId) return null;
+  const source = params.conceptById.get(sourceId);
+  const target = params.conceptById.get(targetId);
+  if (!source || !target) return null;
+
+  const motifId = stableId(`repair:${params.edge.edgeId}:${params.edge.relation}:${sourceId}->${targetId}`);
+  const templateKey = `coverage_repair:${params.edge.relation}:${source.family}->${target.family}`;
+  const now = new Date().toISOString();
+  return {
+    id: motifId,
+    motif_id: motifId,
+    motif_type: semanticMotifType(params.edge.relation),
+    templateKey,
+    motifType: "pair",
+    relation: params.edge.relation,
+    roles: {
+      sources: [sourceId],
+      target: targetId,
+    },
+    scope: "global",
+    aliases: uniq([motifId, `repair:${params.edge.edgeId}`], 24),
+    concept_bindings: [sourceId, targetId],
+    conceptIds: [sourceId, targetId],
+    anchorConceptId: targetId,
+    title: cleanText(`${source.title} ${relationLabel(params.edge.relation, params.locale)} ${target.title}`, 160),
+    description: cleanText(
+      t(
+        params.locale,
+        `Coverage repair: ${source.title} ${relationLabel(params.edge.relation, params.locale)} ${target.title}`,
+        `Coverage repair: ${source.title} ${relationLabel(params.edge.relation, params.locale)} ${target.title}`
+      ),
+      220
+    ),
+    confidence: clamp01(params.edge.edgeConfidence, 0.82),
+    supportEdgeIds: [params.edge.edgeId],
+    supportNodeIds: [params.edge.fromNodeId, params.edge.toNodeId],
+    status: "active",
+    statusReason: `coverage_repair:${params.edge.edgeId}`,
+    resolved: false,
+    causalOperator: causalOperatorFromRelation(params.edge.relation),
+    causalFormula: cleanText(`${sourceId} -> ${targetId}`, 120),
+    dependencyClass: params.edge.relation,
+    novelty: "updated",
+    updatedAt: now,
+    reuseClass: "reusable",
+    coverage_origin: "edge_repair",
+    subgraph_verified: true,
+  };
+}
+
+function motifComponentCount(motifs: ConceptMotif[]): number {
+  const activeIds = uniq(
+    (motifs || [])
+      .filter((m) => m.status !== "cancelled")
+      .map((m) => cleanText(m.id, 120))
+      .filter(Boolean),
+    1000
+  );
+  if (!activeIds.length) return 0;
+  const adj = new Map<string, Set<string>>();
+  for (const id of activeIds) adj.set(id, new Set<string>());
+  const motifsByConcept = new Map<string, string[]>();
+  for (const motif of motifs || []) {
+    if (motif.status === "cancelled") continue;
+    for (const cid of motif.conceptIds || []) {
+      const conceptId = cleanText(cid, 120);
+      if (!conceptId) continue;
+      if (!motifsByConcept.has(conceptId)) motifsByConcept.set(conceptId, []);
+      motifsByConcept.get(conceptId)!.push(motif.id);
+    }
+  }
+  for (const ids of motifsByConcept.values()) {
+    const uniqIds = uniq(ids, 80);
+    for (let i = 0; i < uniqIds.length; i += 1) {
+      for (let j = i + 1; j < uniqIds.length; j += 1) {
+        const a = uniqIds[i];
+        const b = uniqIds[j];
+        if (!adj.has(a) || !adj.has(b)) continue;
+        adj.get(a)!.add(b);
+        adj.get(b)!.add(a);
+      }
+    }
+  }
+  const seen = new Set<string>();
+  let components = 0;
+  for (const id of activeIds) {
+    if (seen.has(id)) continue;
+    components += 1;
+    const queue = [id];
+    seen.add(id);
+    while (queue.length) {
+      const cur = queue.shift()!;
+      for (const nxt of adj.get(cur) || []) {
+        if (seen.has(nxt)) continue;
+        seen.add(nxt);
+        queue.push(nxt);
+      }
+    }
+  }
+  return components;
+}
+
+export function enforceCausalEdgeCoverage(params: {
+  graph: CDG;
+  concepts: ConceptItem[];
+  motifs: ConceptMotif[];
+  locale?: AppLocale;
+  maxRounds?: number;
+}): { motifs: ConceptMotif[]; report: MotifCoverageInvariantReport } {
+  const conceptById = new Map((params.concepts || []).map((c) => [c.id, c]));
+  const required = collectRequiredCausalCoverageEdges({
+    graph: params.graph,
+    concepts: params.concepts,
+  });
+  const maxRounds = Math.max(0, Math.min(6, Number(params.maxRounds) || 2));
+  let motifs = (params.motifs || []).slice();
+  let repairedMotifCount = 0;
+
+  for (let round = 0; round < maxRounds; round += 1) {
+    const uncovered = required.filter((edge) => !edgeCoveredByMotifs(edge, motifs));
+    if (!uncovered.length) break;
+    const existingIds = new Set(motifs.map((m) => m.id));
+    const additions: ConceptMotif[] = [];
+    for (const edge of uncovered) {
+      const repair = buildEdgeRepairMotif({
+        edge,
+        conceptById,
+        locale: params.locale,
+      });
+      if (!repair || existingIds.has(repair.id)) continue;
+      existingIds.add(repair.id);
+      additions.push(repair);
+    }
+    if (!additions.length) break;
+    repairedMotifCount += additions.length;
+    motifs = [...motifs, ...additions];
+  }
+
+  const pairIndex = buildConceptPairRelationIndex({
+    graph: params.graph,
+    concepts: params.concepts,
+  });
+  motifs = motifs.map((motif) => {
+    const coverageOrigin: MotifCoverageOrigin = motif.coverage_origin === "edge_repair" ? "edge_repair" : "native";
+    return {
+      ...motif,
+      coverage_origin: coverageOrigin,
+      subgraph_verified:
+        coverageOrigin === "edge_repair"
+          ? true
+          : verifyMotifSubgraph({
+              motif,
+              pairIndex,
+            }),
+    };
+  });
+
+  const coveredCausalEdges = required.reduce(
+    (acc, edge) => (edgeCoveredByMotifs(edge, motifs) ? acc + 1 : acc),
+    0
+  );
+
+  return {
+    motifs,
+    report: {
+      requiredCausalEdges: required.length,
+      coveredCausalEdges,
+      uncoveredCausalEdges: Math.max(0, required.length - coveredCausalEdges),
+      repairedMotifCount,
+      componentCount: motifComponentCount(motifs),
+    },
   };
 }
 

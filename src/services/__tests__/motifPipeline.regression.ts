@@ -2,8 +2,13 @@ import assert from "node:assert/strict";
 
 import { reconcileMotifLinks, type MotifLink } from "../motif/motifLinks.js";
 import { buildMotifReasoningView } from "../motif/reasoningView.js";
+import type { CDG } from "../../core/graph.js";
 import type { ConceptItem } from "../concepts.js";
-import type { ConceptMotif } from "../motif/conceptMotifs.js";
+import {
+  enforceCausalEdgeCoverage,
+  reconcileMotifsWithGraph,
+  type ConceptMotif,
+} from "../motif/conceptMotifs.js";
 
 function run(name: string, fn: () => void) {
   try {
@@ -15,20 +20,24 @@ function run(name: string, fn: () => void) {
   }
 }
 
-function makeConcept(id: string, title: string): ConceptItem {
+function makeConcept(
+  id: string,
+  title: string,
+  patch?: Partial<Pick<ConceptItem, "kind" | "family" | "semanticKey" | "score" | "nodeIds">>
+): ConceptItem {
   return {
     id,
-    kind: "belief",
+    kind: patch?.kind || "belief",
     validationStatus: "resolved",
     extractionStage: "disambiguation",
     polarity: "positive",
     scope: "global",
-    family: "other",
-    semanticKey: `manual:${id}`,
+    family: patch?.family || "other",
+    semanticKey: patch?.semanticKey || `manual:${id}`,
     title,
     description: title,
-    score: 0.8,
-    nodeIds: [id],
+    score: patch?.score == null ? 0.8 : patch.score,
+    nodeIds: patch?.nodeIds || [id],
     primaryNodeId: id,
     evidenceTerms: [title],
     sourceMsgIds: ["manual_test"],
@@ -222,6 +231,141 @@ run("reasoning view should produce complete ordered steps under cycle", () => {
   assert.equal(orderedMotifs.includes("m1"), true);
   assert.equal(orderedMotifs.includes("m2"), true);
   assert.equal(orderedMotifs.includes("m3"), true);
+});
+
+run("causal edge coverage repair should cover all required edges and keep isolated concepts optional", () => {
+  const graph: CDG = {
+    id: "g_coverage",
+    version: 1,
+    nodes: [
+      { id: "n1", type: "constraint", statement: "预算上限10000元", status: "confirmed", confidence: 0.9, importance: 0.9 },
+      { id: "n2", type: "belief", statement: "总行程3天", status: "confirmed", confidence: 0.9, importance: 0.86 },
+      { id: "n3", type: "constraint", statement: "恐高不能登顶", status: "confirmed", confidence: 0.9, importance: 0.9 },
+      { id: "n4", type: "belief", statement: "地面活动为主", status: "confirmed", confidence: 0.88, importance: 0.82 },
+      { id: "n5", type: "factual_assertion", statement: "孤立事实", status: "confirmed", confidence: 0.7, importance: 0.4 },
+    ],
+    edges: [
+      { id: "e1", from: "n1", to: "n2", type: "constraint", confidence: 0.92 },
+      { id: "e2", from: "n3", to: "n4", type: "constraint", confidence: 0.9 },
+    ],
+  };
+
+  const concepts: ConceptItem[] = [
+    makeConcept("c1", "预算上限: 10000元", { kind: "constraint", family: "budget", semanticKey: "slot:budget", nodeIds: ["n1"] }),
+    makeConcept("c2", "总行程时长: 3天", {
+      kind: "constraint",
+      family: "duration_total",
+      semanticKey: "slot:duration_total",
+      nodeIds: ["n2"],
+    }),
+    makeConcept("c3", "限制因素: 不能去很高的建筑", {
+      kind: "constraint",
+      family: "limiting_factor",
+      semanticKey: "slot:constraint:limiting:health:acrophobia",
+      nodeIds: ["n3"],
+    }),
+    makeConcept("c4", "活动偏好: 地面活动", {
+      kind: "preference",
+      family: "activity_preference",
+      semanticKey: "slot:activity_preference",
+      nodeIds: ["n4"],
+    }),
+    makeConcept("c5", "备注: 孤立事实", {
+      kind: "factual_assertion",
+      family: "other",
+      semanticKey: "manual:isolated",
+      nodeIds: ["n5"],
+    }),
+  ];
+
+  const covered = enforceCausalEdgeCoverage({
+    graph,
+    concepts,
+    motifs: [],
+    locale: "zh-CN",
+    maxRounds: 2,
+  });
+
+  assert.equal(covered.report.requiredCausalEdges, 2);
+  assert.equal(covered.report.coveredCausalEdges, 2);
+  assert.equal(covered.report.uncoveredCausalEdges, 0);
+  assert.equal(covered.report.repairedMotifCount, 2);
+  assert.equal(covered.report.componentCount, 2);
+  assert.equal(covered.motifs.every((m) => m.coverage_origin === "edge_repair"), true);
+  assert.equal(covered.motifs.every((m) => m.subgraph_verified === true), true);
+});
+
+run("milan limiting constraints should stay visible in motif titles", () => {
+  const graph: CDG = {
+    id: "g_milan",
+    version: 1,
+    nodes: [
+      { id: "n_goal", type: "belief", statement: "意图: 去米兰旅游3天", status: "confirmed", confidence: 0.9, importance: 0.9 },
+      { id: "n_budget", type: "constraint", statement: "预算上限: 10000元", status: "confirmed", confidence: 0.9, importance: 0.88 },
+      { id: "n_duration", type: "constraint", statement: "总行程时长: 3天", status: "confirmed", confidence: 0.9, importance: 0.86 },
+      { id: "n_people", type: "factual_assertion", statement: "同行人数: 2人", status: "confirmed", confidence: 0.88, importance: 0.84 },
+      { id: "n_acro", type: "constraint", statement: "限制因素: 我有恐高症，不能去很高的建筑", status: "confirmed", confidence: 0.9, importance: 0.9 },
+      { id: "n_cardiac", type: "constraint", statement: "限制因素: 父亲有冠心病，避免高强度活动", status: "confirmed", confidence: 0.9, importance: 0.9 },
+    ],
+    edges: [
+      { id: "e_budget", from: "n_budget", to: "n_goal", type: "constraint", confidence: 0.93 },
+      { id: "e_duration", from: "n_duration", to: "n_goal", type: "constraint", confidence: 0.9 },
+      { id: "e_people", from: "n_people", to: "n_goal", type: "constraint", confidence: 0.88 },
+      { id: "e_acro", from: "n_acro", to: "n_goal", type: "constraint", confidence: 0.92 },
+      { id: "e_cardiac", from: "n_cardiac", to: "n_goal", type: "constraint", confidence: 0.92 },
+    ],
+  };
+
+  const concepts: ConceptItem[] = [
+    makeConcept("c_goal", "意图: 去米兰旅游3天", { kind: "belief", family: "goal", semanticKey: "slot:goal", nodeIds: ["n_goal"] }),
+    makeConcept("c_budget", "预算上限: 10000元", {
+      kind: "constraint",
+      family: "budget",
+      semanticKey: "slot:budget",
+      nodeIds: ["n_budget"],
+      score: 0.85,
+    }),
+    makeConcept("c_duration", "总行程时长: 3天", {
+      kind: "constraint",
+      family: "duration_total",
+      semanticKey: "slot:duration_total",
+      nodeIds: ["n_duration"],
+      score: 0.84,
+    }),
+    makeConcept("c_people", "同行人数: 2人", {
+      kind: "factual_assertion",
+      family: "people",
+      semanticKey: "slot:people",
+      nodeIds: ["n_people"],
+      score: 0.84,
+    }),
+    makeConcept("c_acro", "限制因素: 我有恐高症，不能去很高的建筑", {
+      kind: "constraint",
+      family: "limiting_factor",
+      semanticKey: "slot:constraint:limiting:health:acrophobia",
+      nodeIds: ["n_acro"],
+      score: 0.86,
+    }),
+    makeConcept("c_cardiac", "限制因素: 父亲有冠心病，避免高强度活动", {
+      kind: "constraint",
+      family: "limiting_factor",
+      semanticKey: "slot:constraint:limiting:health:coronary",
+      nodeIds: ["n_cardiac"],
+      score: 0.86,
+    }),
+  ];
+
+  const motifs = reconcileMotifsWithGraph({
+    graph,
+    concepts,
+    baseMotifs: [],
+    locale: "zh-CN",
+  });
+  const titles = motifs.map((m) => m.title).join(" | ");
+
+  assert.equal(/恐高/.test(titles), true);
+  assert.equal(/冠心病/.test(titles), true);
+  assert.equal(/同行人数|2人/.test(titles), true);
 });
 
 console.log("All motif pipeline checks passed.");

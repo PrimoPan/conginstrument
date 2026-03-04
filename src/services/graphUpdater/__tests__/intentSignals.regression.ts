@@ -373,6 +373,16 @@ const cases: Case[] = [
     },
   },
   {
+    name: "high-building wording should not be parsed as destination",
+    run: () => {
+      const s = extractIntentSignals(
+        "我有恐高症，不能去很高的建筑，尽量安排地面活动"
+      );
+      assert.equal((s.destinations || []).length, 0);
+      assert.equal(s.destination, undefined);
+    },
+  },
+  {
     name: "comparative phrase like '比较好' should not be parsed as destination",
     run: () => {
       const merged = extractIntentSignalsWithRecency(

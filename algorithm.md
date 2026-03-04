@@ -1,241 +1,251 @@
-# CogInstrument Backend Algorithms (Aligned Spec)
+# CogInstrument Algorithm (Strict AGENTS Alignment)
 
 Last updated: 2026-03-04
 
-This document describes the live backend algorithm after strict AGENTS alignment. It is implementation-oriented and only documents behaviors currently implemented in the backend.
+This document describes the current implemented algorithm across backend and frontend for cognitive graphing, motif generation, planning state maintenance, and export.
 
-## 1. Scope and Source Modules
+## 1. Runtime Chain (Per Turn)
 
-Primary implementation modules:
+Backend turn processing is executed in a fixed chain:
+
+1. Normalize graph snapshot and apply guarded graph patching.
+2. Reconcile `concepts_from_user` from graph evidence.
+3. Reconcile motif instances from concept dependencies.
+4. Enforce motif coverage invariant over causal edges.
+5. Reconcile motif links.
+6. Build motif reasoning view.
+7. Reconcile task contexts.
+8. Update planning states (`travel_plan_state`, `task_detection`, `cognitive_state`, `portfolio_document_state`).
+9. Apply conflict gate when unresolved hard conflicts exist.
+10. Return payload for UI and persistence.
+
+Canonical chain entrypoint:
 
 - `/Users/primopan/UISTcoginstrument/app/conginstrument/src/services/cognitiveModel.ts`
-- `/Users/primopan/UISTcoginstrument/app/conginstrument/src/services/concepts.ts`
-- `/Users/primopan/UISTcoginstrument/app/conginstrument/src/services/motif/conceptMotifs.ts`
-- `/Users/primopan/UISTcoginstrument/app/conginstrument/src/services/motif/motifLinks.ts`
-- `/Users/primopan/UISTcoginstrument/app/conginstrument/src/services/motif/reasoningView.ts`
-- `/Users/primopan/UISTcoginstrument/app/conginstrument/src/services/contexts.ts`
-- `/Users/primopan/UISTcoginstrument/app/conginstrument/src/services/travelPlan/state.ts`
-- `/Users/primopan/UISTcoginstrument/app/conginstrument/src/services/planningState.ts`
-- `/Users/primopan/UISTcoginstrument/app/conginstrument/src/services/travelPlan/pdf.ts`
-- `/Users/primopan/UISTcoginstrument/app/conginstrument/src/routes/conversations.ts`
 
-## 2. Runtime Chain (Turn-Level)
+## 2. Three-Layer Boundary Contract
 
-For each user turn, the runtime flow is:
+### 2.1 User-grounded cognitive layer
 
-1. Update/normalize graph snapshot and apply guarded patch operations.
-2. Run cognitive chain in fixed order:
-   - `concepts`
-   - `motifs`
-   - `motif links`
-   - `reasoning view`
-   - `contexts`
-3. Gate unresolved hard motif conflicts (`deprecated` + unresolved) before normal generation.
-4. Build/update `travel_plan_state` from graph + turns + current model.
-5. Build/update planning-layer states:
-   - `task_detection`
-   - `cognitive_state`
-   - `portfolio_document_state`
-6. Persist all states in conversation record and stream/return payload.
+Contains only user-grounded evidence structures:
 
-The canonical cognitive pipeline entrypoint is `runMotifGenerationChain(...)` in `cognitiveModel.ts`.
+- `concepts_from_user`
+- typed causal dependencies
+- motif instances built from those dependencies
 
-## 3. Three-Layer Boundary Contract
+Assistant proposals are not directly written as user-grounded concepts.
 
-### 3.1 User-Grounded Cognitive Layer
+### 2.2 Assistant planning layer
 
-Contains only user-grounded evidence:
+Contains assistant/co-authored plan artifacts:
 
-- Concepts extracted from user evidence.
-- Typed dependencies among those concepts.
-- Motif instances built on those dependencies.
+- itinerary drafts
+- transport/stay/food options
+- risk and budget notes
+- open questions
+- export-ready plan text
 
-Assistant proposal content must not be written directly as user-grounded concept evidence.
+These are maintained continuously in `travel_plan_state`, not only at PDF export time.
 
-### 3.2 Assistant Planning Layer
+### 2.3 Portfolio/PDF layer
 
-Contains assistant-generated and co-authored planning content:
+Contains multi-task aggregation for one user:
 
-- Itinerary drafts
-- Alternatives
-- Risk notes
-- Transport/stay/food proposals
-- Versioned plan text
+- trip sections (`trips`)
+- export order and combined outline
+- combined export-ready text and metadata
 
-All plan text is maintained in `travel_plan_state` continuously, not only at export time.
+Final export is generated from `portfolio_document_state`.
 
-### 3.3 Portfolio/PDF Layer
+## 3. Concept -> Motif -> Links -> Reasoning
 
-Contains cross-task aggregation:
+### 3.1 Concepts
 
-- Multi-trip sections (`trips`)
-- Export order and combined outline
-- Combined export text
-
-Final PDF is generated from `portfolio_document_state` (single-trip is a degenerate case).
-
-## 4. Concept Model
-
-Concepts remain atomic and typed:
+Concept extraction remains user-evidence-grounded and typed:
 
 - `belief`
 - `constraint`
 - `preference`
 - `factual_assertion`
 
-Concept extraction and normalization remain deterministic over graph evidence with strict schema adapters. Planning-layer suggestion text is not auto-promoted to concept evidence.
+### 3.2 Motif generation
 
-## 5. Motif Generation and Semantics
+Motifs are built from typed graph edges and triad composition:
 
-## 5.1 Chain Order
+- pair motifs from direct typed dependencies
+- triad motifs from shared anchors and compositional structure
+- pattern aggregation and status inference
 
-Motif generation always follows:
-
-1. Build pair motifs from typed graph edges.
-2. Build triad motifs from shared anchors.
-3. Aggregate to reusable pattern motifs.
-4. Apply status inference and conflict/redundancy gates.
-5. Enrich motif with causal + reusable schema metadata.
-
-## 5.2 Typed Dependency Classes
-
-Only three dependency classes are used for reusable cognitive dependency:
+Supported reusable dependency classes are:
 
 - `enable`
 - `constraint`
 - `determine`
 
-`conflicts_with` is treated as conflict relation, not reusable planning dependency.
+`conflicts_with` is conflict semantics and not treated as reusable dependency class.
 
-## 5.3 Motif Pattern vs Instance
+### 3.3 Causal coverage invariant (hard rule)
 
-The data model explicitly separates:
+After motif generation, the system enforces exact edge-level coverage for all causal edges:
 
-- Pattern fields: `motif_type_id`, `motif_type_title`, `motif_type_dependency`, role schema, reusable description.
-- Instance fields: `motif_instance_id`, `motif_instance_status`, bound concepts, context, evidence, rationale.
+- required edges: all graph edges with type in `{enable, constraint, determine}`
+- edge `(u -> v, type)` is covered iff at least one motif has:
+  - same dependency class `type`
+  - `u` mapped in motif source role
+  - `v` mapped in motif target role
 
-## 5.4 Status Model
+If uncovered edges exist, the system auto-repairs by generating deterministic `edge_repair` motifs.
 
-Cognitive status set:
+Convergence rule:
 
-- `active`
-- `uncertain`
-- `deprecated`
-- `cancelled`
+- max 2 rounds in chain integration (bounded repair)
 
-Compatibility handling:
+Motif-level invariant metadata:
 
-- legacy/UI `disabled` is normalized to `cancelled` in reasoning semantics.
-- `deprecated` is reserved for explicit contradiction-like conflicts.
-- soft pruning reasons are converted to `cancelled`.
+- `coverage_origin`: `native` | `edge_repair`
+- `subgraph_verified`: boolean
 
-## 5.5 Evidence Boundary in Motif Build
+Payload report:
 
-Assistant-only grounded concepts are excluded or downgraded in motif generation:
+- `motifInvariantReport.requiredCausalEdges`
+- `motifInvariantReport.coveredCausalEdges`
+- `motifInvariantReport.uncoveredCausalEdges`
+- `motifInvariantReport.repairedMotifCount`
+- `motifInvariantReport.componentCount`
 
-- assistant-only concept pairs are skipped.
-- motifs with assistant-only grounding become `cancelled` with grounding reason.
+### 3.4 Motif links
 
-## 6. Motif Link Graph and Reasoning
-
-## 6.1 Motif Links
-
-Canonical motif link types:
+Link graph is reconciled with canonical link types:
 
 - `precedes`
 - `supports`
 - `conflicts_with`
 - `refines`
 
-Link reconciliation rules:
+System performs bounded transitive reduction for non-user redundant edges.
 
-- merge auto links + user links
-- preserve user link intent
-- remap alias motif IDs to canonical IDs
-- cap total links
+### 3.5 Reasoning view
 
-## 6.2 Transitive Reduction
+Reasoning view is produced from motifs + links and rendered as a motif forest.
 
-System-generated non-conflict links are reduced with bounded alternate-path search.
+- SCC condensation + topological ordering inside connected components
+- component packing for multi-component forest
+- stable deterministic ordering to reduce visual jitter
 
-For candidate edge `(u -> v)`, remove if an alternate path exists with comparable minimum confidence and edge is not user-authored.
+## 4. Forest Semantics and Layout
 
-## 6.3 Reasoning Order with SCC Condensation
+### 4.1 Concept graph
 
-Reasoning steps are not naive topological sort only.
+Concept canvas supports forest topology (multi-component DAG allowed):
 
-Algorithm:
+- no single-root requirement
+- connected-component decomposition
+- per-component semantic layering
+- component grid packing with stable order
 
-1. Build motif DAG view (excluding invalid self edges).
-2. Detect SCCs via Tarjan.
-3. Condense SCCs and perform priority-aware DAG ordering.
-4. Rank nodes inside SCC by influence score.
+### 4.2 Motif graph
 
-Influence score combines confidence, status, indegree/outdegree, and concept coverage.
+Motif reasoning canvas supports motif forest:
 
-## 7. Planning State (`travel_plan_state`)
+- no single-root requirement
+- component-local layered layout
+- global packing with consistent whitespace
+- edge routing tuned for readability
 
-Each task maintains a versioned `travel_plan_state` containing:
+## 5. Planning State Update Algorithm
 
-- scope/duration/travelers
-- candidate options and day-by-day plan
+`travel_plan_state` is updated every relevant turn with versioned changelog:
+
+- destination scope
+- dates/duration
+- travelers
+- itinerary and options
 - transport/stay/food/risk/budget notes
-- open questions and rationale refs
-- `source_map`
-- export-ready text
-- changelog
+- open questions
+- rationale references to active concepts/motifs
+- source map labels
 
-Key rules:
+Source map rule:
 
-1. Assistant proposals enter planning layer immediately.
-2. `source_map` defaults to `assistant_proposed`.
-3. Only user-confirmed evidence upgrades item source to `user_confirmed`.
-4. `rationale_refs` prioritizes active motif/concept references.
+- default: `assistant_proposed`
+- only user confirmation upgrades to `user_confirmed`
 
-## 8. Task Detection and Multi-Task State
+## 6. Task/Portfolio State Machine
 
-`task_detection` evaluates whether current update is:
+`task_detection` decides same-task refinement vs task switch.
 
-- same-task refinement
-- likely task switch
+On new task detection:
 
-Multi-task persistence rules:
+1. Previous task plan snapshot remains in portfolio trips.
+2. New task state track is created.
+3. Current task pointer is switched.
+4. Existing trip sections are preserved (no overwrite).
 
-- old task segments are not overwritten.
-- new task segment gets new task identity/version track.
-- historical segments remain in portfolio trips.
+`cognitive_state.tasks` keeps current and historical task fragments.
 
-`cognitive_state.tasks` includes current task and historical task fragments used for portfolio continuity.
+## 7. Save Interaction Rules (Frontend)
 
-## 9. Portfolio and PDF Export
+### 7.1 Default collapsed plan state panel
 
-`portfolio_document_state` is the export source of truth:
+Plan state UI is collapsed by default.
 
-- `trips`: per-task sections
-- `export_order`
-- `combined_outline`
-- `combined_export_ready_text`
+### 7.2 Auto-save before send
 
-PDF export behavior:
+If concept/motif graph has unsaved edits and user sends a new message:
 
-- prefer portfolio export structure
-- render cover + overview + per-trip sections
-- retain single-trip compatibility when only one section exists
+1. frontend performs silent graph save first (`requestAdvice=false`, `saveReason=auto_before_turn`)
+2. only on save success does the turn submission continue
+3. on save failure, send is blocked and error is surfaced
 
-## 10. Conflict Gate
+### 7.3 Virtual structure message
 
-Response generation is blocked when unresolved hard conflicts remain:
+After successful manual save or auto-before-turn save, frontend appends a virtual user message:
 
-- unresolved `deprecated` motifs trigger gate payload
-- users are asked to keep/cancel before plan advice generation continues
+- `已更改coginstrument结构`
 
-## 11. Regression Baseline
+This message is frontend-only and not persisted as backend turn text.
 
-The backend must pass at least:
+### 7.4 Reasoning steps panel behavior
+
+Reasoning steps panel:
+
+- default expanded
+- no idle auto-collapse
+- manual collapse/expand only
+
+## 8. Conflict Gate
+
+When unresolved hard conflicts remain (typically unresolved `deprecated` motifs), normal advice generation is blocked and user conflict resolution is requested first.
+
+## 9. PDF Export Semantics
+
+PDF export uses `portfolio_document_state` as source of truth:
+
+- cover and overview
+- per-trip sections
+- unresolved/open items grouped explicitly
+- single-trip remains compatible as a degenerate portfolio
+
+Route:
+
+- `/api/conversations/:id/travel-plan/export`
+
+## 10. Regression Baseline
+
+Required backend checks:
 
 - `npm run test:motif-pipeline`
 - `npm run test:prd-realignment`
 - `npm run test:motif-compression`
 - `npm run test:graph-regression`
 
-Plus build/compat checks for planning and PDF export paths.
+Required frontend checks:
+
+- `npm run build`
+
+Additional expected assertions in current baseline:
+
+- every causal edge has motif coverage after repair
+- isolated concepts without causal edges are not forced into motif coverage
+- multi-component causal structures yield motif forest
+- destination noise guard prevents high-building phrases from becoming destinations

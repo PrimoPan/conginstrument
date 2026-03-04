@@ -7,6 +7,8 @@ import {
 } from "./concepts.js";
 import {
   attachMotifIdsToConcepts,
+  enforceCausalEdgeCoverage,
+  type MotifCoverageInvariantReport,
   reconcileMotifsWithGraph,
   type ConceptMotif,
 } from "./motif/conceptMotifs.js";
@@ -36,6 +38,7 @@ export type CognitiveModel = {
   motifs: ConceptMotif[];
   motifLinks: MotifLink[];
   motifReasoningView: MotifReasoningView;
+  motifInvariantReport?: MotifCoverageInvariantReport;
   contexts: ContextItem[];
 };
 
@@ -45,6 +48,7 @@ export type MotifGenerationChain = {
   motifs: ConceptMotif[];
   motifLinks: MotifLink[];
   motifReasoningView: MotifReasoningView;
+  motifInvariantReport?: MotifCoverageInvariantReport;
   contexts: ContextItem[];
   validationStatus: ConceptValidationStatus;
 };
@@ -182,21 +186,29 @@ export function runMotifGenerationChain(params: {
       })
     : motifsPass1;
 
-  const motifLinks = reconcileMotifLinks({
+  const covered = enforceCausalEdgeCoverage({
+    graph: graphWithConceptState,
+    concepts: nextConceptsDraft,
     motifs,
+    locale: params.locale,
+    maxRounds: 2,
+  });
+  const coveredMotifs = covered.motifs;
+  const motifLinks = reconcileMotifLinks({
+    motifs: coveredMotifs,
     baseLinks: params.baseMotifLinks,
   });
   const motifReasoningView = buildMotifReasoningView({
     concepts: nextConceptsDraft,
-    motifs,
+    motifs: coveredMotifs,
     motifLinks,
     locale: params.locale,
   });
-  const concepts = attachMotifIdsToConcepts(nextConceptsDraft, motifs);
+  const concepts = attachMotifIdsToConcepts(nextConceptsDraft, coveredMotifs);
   const contexts = reconcileContextsWithGraph({
     graph: graphWithConceptState,
     concepts,
-    motifs,
+    motifs: coveredMotifs,
     baseContexts: params.baseContexts,
   });
   const validationStatus = deriveInteractionValidationStatus(concepts);
@@ -205,9 +217,10 @@ export function runMotifGenerationChain(params: {
     graph: graphWithConceptState,
     concepts,
     validationStatus,
-    motifs,
+    motifs: coveredMotifs,
     motifLinks,
     motifReasoningView,
+    motifInvariantReport: covered.report,
     contexts,
   };
 }
@@ -234,6 +247,7 @@ export function buildCognitiveModel(params: {
     motifs: chain.motifs,
     motifLinks: chain.motifLinks,
     motifReasoningView: chain.motifReasoningView,
+    motifInvariantReport: chain.motifInvariantReport,
     contexts: chain.contexts,
   };
 }
