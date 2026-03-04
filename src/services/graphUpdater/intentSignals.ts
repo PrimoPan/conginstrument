@@ -692,6 +692,8 @@ function pickBudgetFromText(text: string): { value: number; evidence: string } |
 function pickBudgetDeltaFromText(text: string): { delta: number; evidence: string } | null {
   const t = String(text || "").replace(/,/g, "");
   if (!t) return null;
+  const foreignUnitRe =
+    /^\s*(欧元|eur|€|美元|usd|\$|英镑|gbp|£|港币|港元|hkd|日元|jpy|yen|円)/i;
 
   const defs: Array<{
     re: RegExp;
@@ -770,12 +772,22 @@ function pickBudgetDeltaFromText(text: string): { delta: number; evidence: strin
     for (const m of t.matchAll(def.re)) {
       if (!m?.[1]) continue;
       const raw = m[1];
-      const value = def.parser ? def.parser(raw) : Number(raw);
+      let value = def.parser ? def.parser(raw) : Number(raw);
       if (!Number.isFinite(value) || value <= 0) continue;
       const index = Number(m.index) || 0;
+      const matched = String(m[0] || raw);
+      let evidence = cleanStatement(matched || raw, 40);
+      const tail = t.slice(index + matched.length, Math.min(t.length, index + matched.length + 16));
+      const foreignUnit = tail.match(foreignUnitRe)?.[1] || "";
+      if (foreignUnit) {
+        const converted = fxToCny(value, foreignUnit);
+        if (!converted || converted <= 0) continue;
+        value = converted;
+        evidence = cleanStatement(`${matched}${foreignUnit}（约${Math.round(value)}元）`, 64);
+      }
       const cand: BudgetDeltaMatch = {
         delta: Math.round(value) * def.sign,
-        evidence: cleanStatement(m[0] || raw, 40),
+        evidence,
         index,
       };
       if (!best || cand.index >= best.index) best = cand;

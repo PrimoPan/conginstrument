@@ -14,6 +14,15 @@ export type TravelPlanDay = {
   items: string[];
 };
 
+export type TravelPlanAssistantPlan = {
+  sourceTurnIndex: number;
+  sourceTurnCreatedAt?: string;
+  rawText: string;
+  narrative: string;
+  parser: "day_header" | "date_header" | "mixed" | "fallback";
+  dayPlans: TravelPlanDay[];
+};
+
 export type TravelPlanState = {
   version: number;
   updatedAt: string;
@@ -36,6 +45,7 @@ export type TravelPlanState = {
   };
   narrativeText?: string;
   exportNarrative?: string;
+  assistantPlan?: TravelPlanAssistantPlan;
   evidenceAppendix?: Array<{
     title: string;
     content: string;
@@ -198,6 +208,9 @@ function parseDaysFromNodeStatement(node: ConceptNode | undefined, prefixes: str
 
 const DAY_HEADER_RE =
   /(第\s*[一二三四五六七八九十两0-9]{1,3}\s*天|day\s*[0-9]{1,2}|[0-9]{1,2}[\.、]\s*第\s*[一二三四五六七八九十两0-9]{1,3}\s*天|day\s*[0-9]{1,2}\s*[:：\-]?)/gi;
+const DATE_HEADER_RE = /([0-9]{1,2})\s*月\s*([0-9]{1,2})\s*日/g;
+const STRUCTURED_ITINERARY_RE =
+  /第\s*[一二三四五六七八九十两0-9]{1,3}\s*天|day\s*[0-9]{1,2}|[0-9]{1,2}\s*月\s*[0-9]{1,2}\s*日/i;
 const CONFIRMATION_QUESTION_RE =
   /(请确认|是否是硬约束|是否为硬约束|还是可协商偏好|你希望优先满足哪一项|是否允许微调|这条信息是否是硬约束|please confirm|hard constraint|negotiable preference|which should be prioritized|allow adjustment)/i;
 
@@ -319,6 +332,98 @@ function parseDayBlocksFromText(text: string): TravelPlanDay[] {
     .filter((x, i, arr) => i === arr.findIndex((y) => y.day === x.day));
 }
 
+function parseDateBlocksFromText(text: string): TravelPlanDay[] {
+  const src = String(text || "").replace(/\r/g, "");
+  if (!src.trim()) return [];
+
+  type Header = { dateLabel: string; start: number; bodyStart: number };
+  const headers: Header[] = [];
+  for (const m of src.matchAll(DATE_HEADER_RE)) {
+    if (!m?.[0] || !m?.[1] || !m?.[2]) continue;
+    const month = Number(m[1]);
+    const day = Number(m[2]);
+    if (!Number.isFinite(month) || !Number.isFinite(day)) continue;
+    if (month < 1 || month > 12 || day < 1 || day > 31) continue;
+    const dateLabel = `${month}月${day}日`;
+    const start = Number(m.index) || 0;
+    const bodyStart = start + String(m[0]).length;
+    headers.push({ dateLabel, start, bodyStart });
+  }
+  if (!headers.length) return [];
+
+  const orderedHeaders = headers.sort((a, b) => a.start - b.start);
+  const dedupHeaders: Header[] = [];
+  for (const h of orderedHeaders) {
+    const prev = dedupHeaders[dedupHeaders.length - 1];
+    if (prev && prev.dateLabel === h.dateLabel && Math.abs(prev.start - h.start) <= 2) continue;
+    dedupHeaders.push(h);
+  }
+
+  const out: TravelPlanDay[] = [];
+  for (let i = 0; i < dedupHeaders.length; i += 1) {
+    const cur = dedupHeaders[i];
+    const next = dedupHeaders[i + 1];
+    const rawBody = src.slice(cur.bodyStart, next ? next.start : src.length).trim();
+    const body = rawBody
+      .replace(/(?:请问|你觉得|是否需要|是否有|有其他问题|还需要|do you|would you|any other|need me to|confirm).{0,160}(?:吗|？|\?)?$/i, "")
+      .trim();
+    if (!body) continue;
+    const items = splitItineraryItems(body).filter((x) => !shouldDropQuestionLikeSentence(x));
+    if (!items.length && clean(body, 200).length < 10) continue;
+    const firstSentence = clean(body.split(/[。；;\n\r]/)[0] || "", 64);
+    const title = clean(
+      firstSentence
+        .replace(/^(上午|早上|中午|下午|傍晚|晚上|夜间|晚间|午后)\s*[：:]\s*/i, "")
+        .trim(),
+      48
+    ) || `${cur.dateLabel} 行程`;
+    out.push({
+      day: out.length + 1,
+      dateLabel: cur.dateLabel,
+      title,
+      items: items.length ? items : [clean(body, 160)],
+    });
+  }
+
+  return out;
+}
+
+function scoreParsedDayPlans(dayPlans: TravelPlanDay[], expectedDays?: number): number {
+  if (!dayPlans.length) return -1;
+  const itemCount = dayPlans.reduce((sum, d) => sum + Math.min(8, (d.items || []).length), 0);
+  const datedCount = dayPlans.filter((d) => String(d.dateLabel || "").trim()).length;
+  let score = dayPlans.length * 8 + itemCount * 2 + datedCount;
+  if (expectedDays && expectedDays > 0) {
+    if (dayPlans.length === expectedDays) score += 10;
+    else score -= Math.min(12, Math.abs(dayPlans.length - expectedDays) * 3);
+  }
+  return score;
+}
+
+function pickBestParsedDayPlans(params: {
+  byDayHeader: TravelPlanDay[];
+  byDateHeader: TravelPlanDay[];
+  expectedDays?: number;
+}): { dayPlans: TravelPlanDay[]; parser: "day_header" | "date_header" | "mixed" | "fallback" } {
+  const dayScore = scoreParsedDayPlans(params.byDayHeader, params.expectedDays);
+  const dateScore = scoreParsedDayPlans(params.byDateHeader, params.expectedDays);
+
+  if (dayScore < 0 && dateScore < 0) return { dayPlans: [], parser: "fallback" };
+  if (dayScore >= 0 && dateScore < 0) return { dayPlans: params.byDayHeader, parser: "day_header" };
+  if (dayScore < 0 && dateScore >= 0) return { dayPlans: params.byDateHeader, parser: "date_header" };
+
+  const chooseDate = dateScore > dayScore;
+  if (chooseDate) return { dayPlans: params.byDateHeader, parser: "date_header" };
+
+  const merged = params.byDayHeader.map((d, idx) => {
+    const fromDate = params.byDateHeader[idx];
+    if (!fromDate?.dateLabel || String(d.dateLabel || "").trim()) return d;
+    return { ...d, dateLabel: fromDate.dateLabel };
+  });
+  const parser = params.byDateHeader.length > 0 ? "mixed" : "day_header";
+  return { dayPlans: merged, parser };
+}
+
 function buildFallbackDayPlans(params: {
   totalDays?: number;
   cityDurations: Array<{ city: string; days: number }>;
@@ -361,15 +466,20 @@ function scoreItineraryText(text: string): number {
   const t = String(text || "");
   if (!t.trim()) return -1;
   const dayMarkers = (t.match(/第\s*[一二三四五六七八九十两0-9]{1,3}\s*天|day\s*[0-9]{1,2}/gi) || []).length;
+  const dateMarkers = (t.match(/[0-9]{1,2}\s*月\s*[0-9]{1,2}\s*日/g) || []).length;
   const timeMarkers = (t.match(/上午|早上|中午|下午|傍晚|晚上|夜间|晚间/g) || []).length;
   const listMarkers = (t.match(/[0-9]{1,2}[\.、]/g) || []).length + (t.match(/[-•*]\s/g) || []).length;
-  const hasPlanCue = /(行程|安排|建议|第1天|第一天|Day 1)/i.test(t) ? 1 : 0;
+  const hasPlanCue = /(行程|安排|建议|第1天|第一天|Day 1|月[0-9]{1,2}日)/i.test(t) ? 1 : 0;
   const hasQuestionTail = /(请问|你觉得|是否|吗？|吗\?|还有什么|需要调整)/.test(clean(t.slice(-120), 140)) ? 1 : 0;
-  return dayMarkers * 4 + timeMarkers * 2 + Math.min(listMarkers, 8) + hasPlanCue * 2 - hasQuestionTail;
+  return dayMarkers * 4 + dateMarkers * 3 + timeMarkers * 2 + Math.min(listMarkers, 8) + hasPlanCue * 2 - hasQuestionTail;
 }
 
-function pickBestItineraryAssistantText(turns: Array<{ assistantText: string }>): string {
+function pickBestItineraryAssistantText(
+  turns: Array<{ createdAt?: Date | string; assistantText: string }>
+): { text: string; turnIndex: number } {
+  if (!turns.length) return { text: "", turnIndex: -1 };
   let bestText = "";
+  let bestIndex = turns.length - 1;
   let bestScore = -Infinity;
   for (let i = 0; i < turns.length; i += 1) {
     const t = String(turns[i]?.assistantText || "");
@@ -377,15 +487,20 @@ function pickBestItineraryAssistantText(turns: Array<{ assistantText: string }>)
     if (score > bestScore || (score === bestScore && i === turns.length - 1)) {
       bestScore = score;
       bestText = t;
+      bestIndex = i;
     }
   }
-  return bestText || String(turns[turns.length - 1]?.assistantText || "");
+  if (!bestText) {
+    bestIndex = turns.length - 1;
+    bestText = String(turns[bestIndex]?.assistantText || "");
+  }
+  return { text: bestText, turnIndex: bestIndex };
 }
 
 function extractNarrativeText(text: string): string {
   const src = String(text || "").trim();
   if (!src) return "";
-  const dayHeaderIdx = src.search(/第\s*[一二三四五六七八九十两0-9]{1,3}\s*天|day\s*[0-9]{1,2}/i);
+  const dayHeaderIdx = src.search(STRUCTURED_ITINERARY_RE);
   const start = dayHeaderIdx >= 0 ? Math.max(0, dayHeaderIdx - 40) : 0;
   let out = clean(src.slice(start), 3600);
   out = out.replace(/(?:你对.*(?:吗|？|\?)|请问.*(?:吗|？|\?)|是否需要.*(?:吗|？|\?)).*$/i, "").trim();
@@ -535,12 +650,24 @@ function normalizeConstraintStatement(s: string): string {
   return clean(out, 100);
 }
 
+function stripQuestionTail(s: string): string {
+  const src = clean(s, 2200);
+  if (!src) return "";
+  return src
+    .replace(
+      /(?:请确认|请问|你觉得|是否需要|是否有|有其他问题|还有其他问题|还有其他需要调整|还需要我|do you|would you|any other|need me to|confirm).{0,180}(?:吗|？|\?)?$/i,
+      ""
+    )
+    .trim();
+}
+
 function dedupeParagraphs(text: string, maxLen = 3600): string {
   const src = String(text || "").replace(/\r/g, "");
   if (!src.trim()) return "";
+  const lineMax = Math.max(260, Math.min(2000, maxLen));
   const parts = src
     .split(/\n{1,}/)
-    .map((x) => clean(x, 260))
+    .map((x) => stripQuestionTail(clean(x, lineMax)))
     .filter(Boolean)
     .filter((x) => !shouldDropQuestionLikeSentence(x));
   const seen = new Set<string>();
@@ -580,10 +707,17 @@ function buildExportNarrative(plan: {
   summary: string;
   narrativeText?: string;
   dayPlans: TravelPlanDay[];
+  assistantPlan?: TravelPlanAssistantPlan;
 }): string {
+  const assistantNarrative = dedupeParagraphs(
+    String(plan.assistantPlan?.narrative || plan.assistantPlan?.rawText || ""),
+    5200
+  );
+  if (assistantNarrative.length >= 80) return assistantNarrative;
+
   const narrative = dedupeParagraphs(String(plan.narrativeText || ""), 4600);
-  const hasStructuredDayPlan = /第\s*[一二三四五六七八九十两0-9]{1,3}\s*天|day\s*[0-9]{1,2}/i.test(narrative);
-  if (hasStructuredDayPlan && narrative.length >= 80) return narrative;
+  const hasStructuredDayPlan = STRUCTURED_ITINERARY_RE.test(narrative);
+  if ((hasStructuredDayPlan && narrative.length >= 80) || narrative.length >= 220) return narrative;
 
   const fallback = buildFallbackNarrativeFromDayPlans(plan.dayPlans || [], plan.locale);
   if (fallback) return fallback;
@@ -681,9 +815,15 @@ export function buildTravelPlanState(params: {
 
   const cityDurations = parseCityDurations(graph);
 
-  const itineraryText = pickBestItineraryAssistantText(turns);
-  const narrativeText = dedupeParagraphs(extractNarrativeText(itineraryText), 3600);
-  let dayPlans = parseDayBlocksFromText(itineraryText);
+  const itineraryPick = pickBestItineraryAssistantText(turns);
+  const itineraryText = String(itineraryPick.text || "");
+  const narrativeText = dedupeParagraphs(extractNarrativeText(itineraryText), 4200);
+  const parsedDayPlans = pickBestParsedDayPlans({
+    byDayHeader: parseDayBlocksFromText(itineraryText),
+    byDateHeader: parseDateBlocksFromText(itineraryText),
+    expectedDays: totalDays,
+  });
+  let dayPlans = parsedDayPlans.dayPlans.slice();
   if (!dayPlans.length) {
     dayPlans = buildFallbackDayPlans({
       totalDays,
@@ -706,6 +846,20 @@ export function buildTravelPlanState(params: {
 
   const dateAnchor = parseDateRangeFromTurns(turns);
   dayPlans = addDateLabelsToDayPlans(dayPlans, dateAnchor);
+  const assistantDayPlansWithDate = addDateLabelsToDayPlans(parsedDayPlans.dayPlans.slice(), dateAnchor);
+  const assistantPlan =
+    itineraryPick.turnIndex >= 0 && itineraryText.trim()
+      ? {
+          sourceTurnIndex: itineraryPick.turnIndex,
+          sourceTurnCreatedAt: turns[itineraryPick.turnIndex]?.createdAt
+            ? new Date(turns[itineraryPick.turnIndex].createdAt as any).toISOString()
+            : undefined,
+          rawText: dedupeParagraphs(itineraryText, 5200),
+          narrative: narrativeText || dedupeParagraphs(itineraryText, 5200),
+          parser: parsedDayPlans.parser,
+          dayPlans: assistantDayPlansWithDate,
+        }
+      : undefined;
 
   const hasGraphCurrencyOverride =
     totalBudgetParsed.hasExplicitCurrency ||
@@ -787,6 +941,7 @@ export function buildTravelPlanState(params: {
     summary,
     narrativeText,
     dayPlans,
+    assistantPlan,
   });
 
   return {
@@ -812,6 +967,7 @@ export function buildTravelPlanState(params: {
     budgetLedger: budgetLedger.events,
     narrativeText,
     exportNarrative,
+    assistantPlan,
     evidenceAppendix: dedupAppendix,
     dayPlans,
     source: {
@@ -862,8 +1018,8 @@ export function buildTravelPlanText(plan: TravelPlanState, locale?: AppLocale): 
     }
   }
 
-  const narrativeHasDay = /第\s*[一二三四五六七八九十两0-9]{1,3}\s*天|day\s*[0-9]{1,2}/i.test(
-    String(plan.exportNarrative || "")
+  const narrativeHasDay = STRUCTURED_ITINERARY_RE.test(
+    String(plan.exportNarrative || plan.assistantPlan?.narrative || "")
   );
 
   if (plan.exportNarrative) {

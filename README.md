@@ -140,7 +140,7 @@ Base URL 示例：`http://localhost:3001`
 接口返回补充字段：
 
 - `concepts`: `ConceptItem[]`
-- `motifs`: `ConceptMotif[]`（含 `status/novelty/statusReason`）
+- `motifs`: `ConceptMotif[]`（含 `status/novelty/statusReason/reuseClass/reuseReason`）
 - `motifLinks`: `MotifLink[]`（motif 间关系，可由用户编辑后保存）
 - `motifReasoningView`: `MotifReasoningView`（后端标准化的 motif 推理视图，供前端右侧 `Motif Reasoning` 画布直接渲染）
 - `contexts`: `ContextItem[]`
@@ -517,6 +517,20 @@ data: {"assistantText":"...","graphPatch":{"ops":[]},"graph":{"id":"65f1...","ve
    - 低置信 motif 按因果类型触发三类提问模板：
      `direct confirmation` / `counterfactual probing` / `mediation check`；
    - 与 slot 不确定性提问统一去重，避免近期重复发问。
+5. motif 可复用白名单矩阵（reusable vs context_specific）：
+   - 关系仅支持 `constraint/determine/enable` 的 family 白名单组合；
+   - 命中场景特定 family（如 `destination/duration_city/sub_location/...`）或不在矩阵内的 motif，会被标记
+     `reuseClass=context_specific`，并降级为 `status=cancelled`（`statusReason=non_reusable_context_specific:*`）。
+6. 压缩与推理仅消费可复用 motif：
+   - `buildTriadMotifs`、`applyRelayChainCompression` 只处理 `reuseClass=reusable`；
+   - `buildMotifReasoningView` 与 `reconcileMotifLinks` 会过滤 `cancelled` 与 `context_specific` motif，
+     避免把场景链路（如“坐船->香港”）展示为可复用主路径。
+7. 低置信阈值改为按关系分级：
+   - `determine < 0.82` -> `uncertain`
+   - `constraint < 0.78` -> `uncertain`
+   - `enable < 0.75` -> `uncertain`
+   - `planMotifQuestion` 仅从 `reuseClass=reusable && status=uncertain` 的 motif 中提问；
+     若存在 motif 提问，聊天侧不再拼接第二条 slot 不确定性问题。
 
 ---
 

@@ -258,7 +258,9 @@ export function buildMotifReasoningView(params: {
   locale?: AppLocale;
 }): MotifReasoningView {
   const conceptById = new Map((params.concepts || []).map((c) => [c.id, c]));
-  const motifs = (params.motifs || []).slice();
+  const motifs = (params.motifs || [])
+    .filter((m) => m.status !== "cancelled" && (m.reuseClass || "reusable") === "reusable")
+    .slice();
   const motifById = new Map(motifs.map((m) => [m.id, m]));
 
   const nodes: MotifReasoningNode[] = motifs

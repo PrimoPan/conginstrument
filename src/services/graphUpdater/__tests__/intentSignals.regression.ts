@@ -12,7 +12,11 @@ import { buildSlotStateMachine } from "../slotStateMachine.js";
 import { compileSlotStateToPatch } from "../slotGraphCompiler.js";
 import { planUncertaintyQuestion } from "../../uncertainty/questionPlanner.js";
 import { reconcileConceptsWithGraph } from "../../concepts.js";
-import { reconcileMotifsWithGraph } from "../../motif/conceptMotifs.js";
+import {
+  isMotifLowConfidence,
+  motifLowConfidenceThreshold,
+  reconcileMotifsWithGraph,
+} from "../../motif/conceptMotifs.js";
 import { reconcileMotifLinks } from "../../motif/motifLinks.js";
 import { buildMotifReasoningView } from "../../motif/reasoningView.js";
 import { planMotifQuestion } from "../../motif/questionPlanner.js";
@@ -79,6 +83,34 @@ const cases: Case[] = [
         "我父亲又跟我增添了5000预算"
       );
       assert.equal(merged.budgetCny, 10000);
+    },
+  },
+  {
+    name: "foreign-currency budget delta should convert to CNY",
+    run: () => {
+      const prevRate = process.env.CI_FX_EUR_TO_CNY;
+      process.env.CI_FX_EUR_TO_CNY = "8";
+      try {
+        const s = extractIntentSignals("预算减少300欧元");
+        assert.equal(s.budgetDeltaCny, -2400);
+      } finally {
+        if (prevRate == null) delete process.env.CI_FX_EUR_TO_CNY;
+        else process.env.CI_FX_EUR_TO_CNY = prevRate;
+      }
+    },
+  },
+  {
+    name: "foreign-currency budget delta merge should not degrade to raw number",
+    run: () => {
+      const prevRate = process.env.CI_FX_EUR_TO_CNY;
+      process.env.CI_FX_EUR_TO_CNY = "8";
+      try {
+        const merged = extractIntentSignalsWithRecency("预算10000元", "预算减少300欧元");
+        assert.equal(merged.budgetCny, 7600);
+      } finally {
+        if (prevRate == null) delete process.env.CI_FX_EUR_TO_CNY;
+        else process.env.CI_FX_EUR_TO_CNY = prevRate;
+      }
     },
   },
   {
@@ -513,6 +545,35 @@ const cases: Case[] = [
     },
   },
   {
+    name: "sub-location hard-constraint confirmation should not be re-asked after user answered",
+    run: () => {
+      const plan = planUncertaintyQuestion({
+        graph: {
+          id: "g_sub_loc",
+          version: 1,
+          nodes: [
+            {
+              id: "n_sub_loc",
+              type: "constraint",
+              layer: "requirement",
+              statement: "子地点: 圣西罗（米兰）",
+              status: "proposed",
+              confidence: 0.43,
+              importance: 0.82,
+              key: "slot:sub_location:米兰:圣西罗",
+            } as any,
+          ],
+          edges: [],
+        },
+        recentTurns: [
+          { role: "assistant", content: "请确认这条信息是否是硬约束：“子地点: 圣西罗（米兰）”？" },
+          { role: "user", content: "是硬约束" },
+        ],
+      });
+      assert.equal(/硬约束.*圣西罗|圣西罗.*硬约束/.test(String(plan.question || "")), false);
+    },
+  },
+  {
     name: "travel plan state should prefer ledger budget over stale graph budget slot",
     run: () => {
       const state = buildTravelPlanState({
@@ -651,6 +712,64 @@ const cases: Case[] = [
       assert.equal(state.budget?.totalCny, 10000);
       assert.equal(state.budget?.spentCny, 474);
       assert.equal(state.budget?.remainingCny, 9526);
+    },
+  },
+  {
+    name: "travel plan state should keep detailed assistant itinerary snapshot for date-based plans",
+    run: () => {
+      const state = buildTravelPlanState({
+        graph: {
+          id: "g4_plan_snapshot",
+          version: 1,
+          nodes: [
+            {
+              id: "n_goal",
+              type: "belief",
+              layer: "intent",
+              statement: "意图：去米兰旅游3天",
+              status: "confirmed",
+              confidence: 0.9,
+              importance: 0.9,
+              key: "slot:goal",
+            } as any,
+            {
+              id: "n_dest",
+              type: "factual_assertion",
+              layer: "requirement",
+              statement: "目的地: 米兰",
+              status: "confirmed",
+              confidence: 0.91,
+              importance: 0.86,
+              key: "slot:destination:米兰",
+            } as any,
+            {
+              id: "n_duration",
+              type: "constraint",
+              layer: "requirement",
+              statement: "总行程时长: 3天",
+              status: "confirmed",
+              confidence: 0.9,
+              importance: 0.8,
+              key: "slot:duration_total",
+            } as any,
+          ],
+          edges: [],
+        },
+        turns: [
+          {
+            createdAt: "2026-03-04T05:00:00.000Z",
+            userText: "好的，就按你说的制定旅行计划",
+            assistantText:
+              "明白了，参观圣西罗是硬约束。4月10日 上午：参观米兰大教堂及其屋顶。下午：逛埃马努埃莱二世长廊和蒙特拿破仑大街。晚上：在布雷拉区晚餐。4月11日 上午：游览斯福尔扎城堡。下午：参观布雷拉画廊。晚上：布雷拉区用餐。4月12日 上午：自由活动。下午：前往圣西罗体育场参观。晚上：返回市中心晚餐。请确认这条信息是否是硬约束：“子地点: 圣西罗（米兰）”？",
+          },
+        ],
+        previous: null,
+      });
+
+      assert.equal(state.assistantPlan?.parser, "date_header");
+      assert.equal(state.assistantPlan?.dayPlans.length, 3);
+      assert.equal(String(state.assistantPlan?.rawText || "").includes("4月10日"), true);
+      assert.equal(String(state.exportNarrative || "").includes("圣西罗体育场"), true);
     },
   },
   {
@@ -1159,7 +1278,11 @@ const cases: Case[] = [
       const concepts = reconcileConceptsWithGraph({ graph, baseConcepts: [] });
       const motifs = reconcileMotifsWithGraph({ graph, concepts, baseMotifs: [] });
       assert.equal(
-        motifs.some((m) => m.status === "cancelled" && String(m.statusReason || "").startsWith("high_similarity_with:")),
+        motifs.some((m) => {
+          if (m.status !== "cancelled") return false;
+          const reason = String(m.statusReason || "");
+          return reason.startsWith("high_similarity_with:") || reason.startsWith("non_reusable_context_specific:");
+        }),
         true
       );
     },
@@ -1330,6 +1453,82 @@ const cases: Case[] = [
     },
   },
   {
+    name: "activity/scenic to destination motif should be downgraded as context-specific and cancelled",
+    run: () => {
+      const graph = {
+        id: "g_non_reusable_destination_link",
+        version: 1,
+        nodes: [
+          {
+            id: "n_activity",
+            type: "preference",
+            layer: "preference",
+            statement: "活动偏好: 坐船",
+            status: "confirmed",
+            confidence: 0.9,
+            importance: 0.86,
+            key: "slot:activity_preference",
+          },
+          {
+            id: "n_scenic",
+            type: "preference",
+            layer: "preference",
+            statement: "景点偏好: 自然之旅",
+            status: "confirmed",
+            confidence: 0.88,
+            importance: 0.8,
+            key: "slot:scenic_preference",
+          },
+          {
+            id: "n_destination",
+            type: "factual_assertion",
+            layer: "requirement",
+            statement: "目的地: 香港",
+            status: "confirmed",
+            confidence: 0.9,
+            importance: 0.82,
+            key: "slot:destination:香港",
+          },
+        ] as any,
+        edges: [
+          { id: "e1", from: "n_activity", to: "n_destination", type: "determine", confidence: 0.9 },
+          { id: "e2", from: "n_scenic", to: "n_destination", type: "determine", confidence: 0.88 },
+        ] as any,
+      } as any;
+
+      const concepts = reconcileConceptsWithGraph({ graph, baseConcepts: [] });
+      const motifs = reconcileMotifsWithGraph({ graph, concepts, baseMotifs: [] });
+
+      const destinationMotifs = motifs.filter((m) => {
+        const includesDestinationConcept = (m.conceptIds || []).some((cid) => {
+          const c = concepts.find((x) => x.id === cid);
+          return c?.family === "destination";
+        });
+        return includesDestinationConcept;
+      });
+      assert.equal(destinationMotifs.length > 0, true);
+      assert.equal(destinationMotifs.every((m) => m.reuseClass === "context_specific"), true);
+      assert.equal(destinationMotifs.every((m) => m.status === "cancelled"), true);
+      assert.equal(
+        destinationMotifs.every((m) => String(m.statusReason || "").startsWith("non_reusable_context_specific:")),
+        true
+      );
+    },
+  },
+  {
+    name: "motif low-confidence thresholds should be relation-specific",
+    run: () => {
+      assert.equal(motifLowConfidenceThreshold("determine" as any), 0.82);
+      assert.equal(motifLowConfidenceThreshold("constraint" as any), 0.78);
+      assert.equal(motifLowConfidenceThreshold("enable" as any), 0.75);
+
+      assert.equal(isMotifLowConfidence(0.79, "determine" as any), true);
+      assert.equal(isMotifLowConfidence(0.77, "constraint" as any), true);
+      assert.equal(isMotifLowConfidence(0.74, "enable" as any), true);
+      assert.equal(isMotifLowConfidence(0.83, "determine" as any), false);
+    },
+  },
+  {
     name: "motif uncertain question should use direct confirmation template",
     run: () => {
       const plan = planMotifQuestion({
@@ -1356,16 +1555,27 @@ const cases: Case[] = [
             causalOperator: "direct_causation",
             novelty: "new",
             updatedAt: new Date().toISOString(),
+            reuseClass: "reusable",
           },
         ] as any,
         concepts: [
-          { id: "c_budget", title: "预算上限", kind: "constraint", family: "budget", nodeIds: [], sourceMsgIds: [] },
+          {
+            id: "c_budget",
+            title: "预算上限",
+            kind: "constraint",
+            family: "budget",
+            nodeIds: [],
+            sourceMsgIds: [],
+            evidenceTerms: ["2000元预算上限"],
+          },
           { id: "c_goal", title: "旅行目标", kind: "belief", family: "goal", nodeIds: [], sourceMsgIds: [] },
         ] as any,
         recentTurns: [],
         locale: "zh-CN" as any,
       });
       assert.equal(/直接确认/.test(String(plan.question || "")), true);
+      assert.equal(/2000|预算/.test(String(plan.question || "")), true);
+      assert.equal(/旅行目标/.test(String(plan.question || "")), true);
       assert.equal(/motif_uncertain:/.test(String(plan.rationale)), true);
     },
   },
@@ -1396,16 +1606,27 @@ const cases: Case[] = [
             causalOperator: "intervention",
             novelty: "new",
             updatedAt: new Date().toISOString(),
+            reuseClass: "reusable",
           },
         ] as any,
         concepts: [
-          { id: "c_city", title: "目的地城市", kind: "belief", family: "destination", nodeIds: [], sourceMsgIds: [] },
+          {
+            id: "c_city",
+            title: "目的地城市",
+            kind: "belief",
+            family: "destination",
+            nodeIds: [],
+            sourceMsgIds: [],
+            evidenceTerms: ["巴黎目的地城市"],
+          },
           { id: "c_plan", title: "执行方案", kind: "belief", family: "goal", nodeIds: [], sourceMsgIds: [] },
         ] as any,
         recentTurns: [],
         locale: "zh-CN" as any,
       });
       assert.equal(/反事实确认/.test(String(plan.question || "")), true);
+      assert.equal(/巴黎|目的地城市/.test(String(plan.question || "")), true);
+      assert.equal(/执行方案/.test(String(plan.question || "")), true);
       assert.equal(/counterfactual/.test(String(plan.rationale)), true);
     },
   },
@@ -1436,6 +1657,7 @@ const cases: Case[] = [
             causalOperator: "mediated_causation",
             novelty: "new",
             updatedAt: new Date().toISOString(),
+            reuseClass: "reusable",
           },
         ] as any,
         concepts: [
@@ -1447,6 +1669,8 @@ const cases: Case[] = [
         locale: "zh-CN" as any,
       });
       assert.equal(/中介链路确认/.test(String(plan.question || "")), true);
+      assert.equal(/出行日期/.test(String(plan.question || "")), true);
+      assert.equal(/总成本/.test(String(plan.question || "")), true);
       assert.equal(/mediation/.test(String(plan.rationale)), true);
     },
   },
@@ -1476,6 +1700,7 @@ const cases: Case[] = [
           causalOperator: "direct_causation",
           novelty: "new",
           updatedAt: new Date().toISOString(),
+          reuseClass: "reusable",
         },
       ] as any;
       const concepts = [

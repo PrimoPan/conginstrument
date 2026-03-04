@@ -55,6 +55,8 @@ export type ConceptMotif = {
   }>;
   novelty: MotifChangeState;
   updatedAt: string;
+  reuseClass?: "reusable" | "context_specific";
+  reuseReason?: string;
 };
 
 const MAX_ACTIVE_MOTIFS_PER_ANCHOR = 3;
@@ -121,6 +123,142 @@ function normalizeDependencyClass(raw: any, fallback: EdgeType): EdgeType {
 
 function motifDependencyClass(m: Pick<ConceptMotif, "relation" | "dependencyClass">): EdgeType {
   return normalizeDependencyClass(m.dependencyClass, m.relation);
+}
+
+const REUSABLE_FAMILIES = new Set([
+  "budget",
+  "duration_total",
+  "people",
+  "lodging",
+  "limiting_factor",
+  "activity_preference",
+  "scenic_preference",
+  "goal",
+]);
+
+const CONTEXT_SPECIFIC_FAMILIES = new Set([
+  "destination",
+  "duration_city",
+  "sub_location",
+  "meeting_critical",
+  "generic_constraint",
+  "other",
+]);
+
+const REUSE_MATRIX: Record<
+  "constraint" | "determine" | "enable",
+  { sources: Set<string>; targets: Set<string> }
+> = {
+  constraint: {
+    sources: new Set(["budget", "duration_total", "people", "limiting_factor"]),
+    targets: new Set(["goal", "lodging", "activity_preference", "scenic_preference", "budget", "duration_total"]),
+  },
+  determine: {
+    sources: new Set(["budget", "people", "duration_total", "activity_preference", "scenic_preference", "limiting_factor"]),
+    targets: new Set(["lodging", "activity_preference", "scenic_preference", "duration_total", "budget", "goal"]),
+  },
+  enable: {
+    sources: new Set(["budget", "people", "activity_preference", "scenic_preference", "limiting_factor", "lodging"]),
+    targets: new Set(["goal", "lodging", "activity_preference", "scenic_preference", "duration_total"]),
+  },
+};
+
+type MotifReuseInfo = {
+  reuseClass: "reusable" | "context_specific";
+  reuseReason?: string;
+};
+
+function motifSourceIds(m: ConceptMotif): string[] {
+  const ids = (m.conceptIds || []).slice();
+  if (m.anchorConceptId) {
+    const idx = ids.indexOf(m.anchorConceptId);
+    if (idx >= 0) ids.splice(idx, 1);
+  }
+  return ids;
+}
+
+function motifReuseInfo(m: ConceptMotif, conceptById: Map<string, ConceptItem>): MotifReuseInfo {
+  const dep = motifDependencyClass(m);
+  if (dep === "conflicts_with") {
+    return { reuseClass: "reusable" };
+  }
+  const matrix = REUSE_MATRIX[dep as "constraint" | "determine" | "enable"];
+  if (!matrix) return { reuseClass: "reusable" };
+
+  const anchorFamily = canonicalConceptFamily(conceptById.get(m.anchorConceptId));
+  if (CONTEXT_SPECIFIC_FAMILIES.has(anchorFamily)) {
+    return { reuseClass: "context_specific", reuseReason: `target_context_specific:${anchorFamily}` };
+  }
+  if (!REUSABLE_FAMILIES.has(anchorFamily)) {
+    return { reuseClass: "context_specific", reuseReason: `target_non_reusable:${anchorFamily || "other"}` };
+  }
+  if (!matrix.targets.has(anchorFamily)) {
+    return { reuseClass: "context_specific", reuseReason: `target_not_allowed:${dep}:${anchorFamily}` };
+  }
+
+  const sourceFamilies = motifSourceIds(m)
+    .map((id) => canonicalConceptFamily(conceptById.get(id)))
+    .filter(Boolean);
+  if (!sourceFamilies.length) {
+    return { reuseClass: "context_specific", reuseReason: `source_missing:${dep}` };
+  }
+  for (const sf of sourceFamilies) {
+    if (CONTEXT_SPECIFIC_FAMILIES.has(sf)) {
+      return { reuseClass: "context_specific", reuseReason: `source_context_specific:${sf}` };
+    }
+    if (!REUSABLE_FAMILIES.has(sf)) {
+      return { reuseClass: "context_specific", reuseReason: `source_non_reusable:${sf || "other"}` };
+    }
+    if (!matrix.sources.has(sf)) {
+      return { reuseClass: "context_specific", reuseReason: `source_not_allowed:${dep}:${sf}` };
+    }
+  }
+  return { reuseClass: "reusable" };
+}
+
+function applyMotifReuseClassification(motif: ConceptMotif, conceptById: Map<string, ConceptItem>): ConceptMotif {
+  const info = motifReuseInfo(motif, conceptById);
+  if (info.reuseClass === "reusable") {
+    return {
+      ...motif,
+      reuseClass: "reusable",
+      reuseReason: undefined,
+    };
+  }
+  const reason = cleanText(info.reuseReason, 120) || "non_reusable";
+  const statusReasonCore = `non_reusable_context_specific:${reason}`;
+  const existingReason = cleanText(motif.statusReason, 180);
+  const statusReason = !existingReason
+    ? statusReasonCore
+    : existingReason.startsWith("non_reusable_context_specific:")
+    ? existingReason
+    : cleanText(`${statusReasonCore};${existingReason}`, 180);
+  return {
+    ...motif,
+    reuseClass: "context_specific",
+    reuseReason: reason,
+    status: "cancelled",
+    statusReason,
+    resolved: true,
+    resolvedBy: motif.resolvedBy || "system",
+    resolvedAt: motif.resolvedAt || motif.updatedAt || new Date().toISOString(),
+    novelty: motif.novelty === "new" ? "new" : "updated",
+  };
+}
+
+function applyReuseClassification(motifs: ConceptMotif[], conceptById: Map<string, ConceptItem>): ConceptMotif[] {
+  return (motifs || []).map((m) => applyMotifReuseClassification(m, conceptById));
+}
+
+export function motifLowConfidenceThreshold(dep: EdgeType): number {
+  if (dep === "determine") return 0.82;
+  if (dep === "constraint") return 0.78;
+  if (dep === "enable") return 0.75;
+  return 0.7;
+}
+
+export function isMotifLowConfidence(confidence: number, dep: EdgeType): boolean {
+  return Number(confidence) < motifLowConfidenceThreshold(dep);
 }
 
 function familyLabel(family: ConceptItem["family"], locale?: AppLocale): string {
@@ -235,15 +373,6 @@ function conceptTitleOf(id: string, conceptById: Map<string, ConceptItem>): stri
   return cleanText(conceptById.get(id)?.title, 28) || cleanText(id, 28) || "C";
 }
 
-function motifSourceIds(m: ConceptMotif): string[] {
-  const ids = (m.conceptIds || []).slice();
-  if (m.anchorConceptId) {
-    const idx = ids.indexOf(m.anchorConceptId);
-    if (idx >= 0) ids.splice(idx, 1);
-  }
-  return ids;
-}
-
 function causalFormula(m: ConceptMotif, conceptById: Map<string, ConceptItem>): string {
   const sourceIds = motifSourceIds(m);
   const anchorId = m.anchorConceptId || (m.conceptIds || [])[m.conceptIds.length - 1] || "";
@@ -304,6 +433,8 @@ function withCausalSemantics(
     dependencyClass: dep,
     causalOperator: op,
     causalFormula: causalFormula(m, conceptById),
+    reuseClass: m.reuseClass === "context_specific" ? "context_specific" : "reusable",
+    reuseReason: m.reuseClass === "context_specific" ? cleanText(m.reuseReason, 120) || undefined : undefined,
     description:
       cleanText(m.description, 220) ||
       cleanText(`${relationTheoryHint(dep, m.motifType, locale)} · ${causalFormula(m, conceptById)}`, 220),
@@ -454,6 +585,7 @@ function aggregateToPatternMotifs(
       status: "active",
       novelty: "new",
       updatedAt: now,
+      reuseClass: "reusable",
     });
   }
   return out;
@@ -563,6 +695,7 @@ function buildPairMotifs(graph: CDG, concepts: ConceptItem[], locale?: AppLocale
       status: "active",
       novelty: "new",
       updatedAt: now,
+      reuseClass: "reusable",
     });
   }
   return out;
@@ -574,6 +707,8 @@ function buildTriadMotifs(pairMotifs: ConceptMotif[], concepts: ConceptItem[], l
   const now = new Date().toISOString();
 
   for (const m of pairMotifs) {
+    const pairReuse = motifReuseInfo(m, byId);
+    if (pairReuse.reuseClass !== "reusable") continue;
     const target = m.conceptIds[1];
     if (!target) continue;
     if (!incoming.has(target)) incoming.set(target, []);
@@ -656,6 +791,7 @@ function buildTriadMotifs(pairMotifs: ConceptMotif[], concepts: ConceptItem[], l
         status: "active",
         novelty: "new",
         updatedAt: now,
+        reuseClass: "reusable",
       });
     }
   }
@@ -681,6 +817,7 @@ function normalizeMotifs(input: any): ConceptMotif[] {
     const statusRaw = cleanText((raw as any)?.status, 24).toLowerCase();
     const noveltyRaw = cleanText((raw as any)?.novelty, 24).toLowerCase();
     const causalRaw = cleanText((raw as any)?.causalOperator, 40).toLowerCase();
+    const reuseClassRaw = cleanText((raw as any)?.reuseClass, 32).toLowerCase();
     const resolved = !!(raw as any)?.resolved;
     const resolvedByRaw = cleanText((raw as any)?.resolvedBy, 24).toLowerCase();
     const conceptIds = uniq(
@@ -787,6 +924,8 @@ function normalizeMotifs(input: any): ConceptMotif[] {
         : undefined,
       novelty: noveltyRaw === "updated" || noveltyRaw === "unchanged" ? (noveltyRaw as MotifChangeState) : "new",
       updatedAt: cleanText((raw as any)?.updatedAt, 40) || new Date().toISOString(),
+      reuseClass: reuseClassRaw === "context_specific" ? "context_specific" : "reusable",
+      reuseReason: cleanText((raw as any)?.reuseReason, 120) || undefined,
     });
   }
   return out;
@@ -836,7 +975,14 @@ function inferBaseStatus(m: ConceptMotif, prev: ConceptMotif | undefined, concep
   if (prev?.status === "disabled" && !!prev.resolved && !allPaused) {
     return { status: "disabled" as MotifLifecycleStatus, reason: prev.statusReason || "user_disabled" };
   }
-  if (m.confidence < 0.7) return { status: "uncertain" as MotifLifecycleStatus, reason: "low_confidence" };
+  const dep = motifDependencyClass(m);
+  const threshold = motifLowConfidenceThreshold(dep);
+  if (isMotifLowConfidence(m.confidence, dep)) {
+    return {
+      status: "uncertain" as MotifLifecycleStatus,
+      reason: `low_confidence:${dep}:${threshold.toFixed(2)}`,
+    };
+  }
   return { status: "active" as MotifLifecycleStatus, reason: "" };
 }
 
@@ -1492,6 +1638,7 @@ function applyRelayChainCompression(
 ): ConceptMotif[] {
   const candidates = motifs.filter((m) => {
     if (m.status !== "active" || m.resolved || m.motifType !== "pair") return false;
+    if ((m.reuseClass || "reusable") !== "reusable") return false;
     if (!m.anchorConceptId || m.relation === "conflicts_with") return false;
     const sources = motifSourceIds(m);
     return sources.length === 1 && !!sources[0];
@@ -1570,6 +1717,7 @@ function applyRelayChainCompression(
     const existingDirect = motifs.find((m) => {
       if (m.id === chain.left.id || m.id === chain.right.id) return false;
       if (m.status !== "active" || m.resolved) return false;
+      if ((m.reuseClass || "reusable") !== "reusable") return false;
       if (motifDependencyClass(m) !== chain.dep) return false;
       if (m.anchorConceptId !== chain.targetId) return false;
       const sources = motifSourceIds(m);
@@ -1627,6 +1775,7 @@ function applyRelayChainCompression(
         statusReason: `chain_composite:${chain.left.id}+${chain.right.id}`,
         resolved: false,
         dependencyClass: chain.dep,
+        reuseClass: "reusable",
         novelty: "new",
         updatedAt: now,
       });
@@ -1794,7 +1943,11 @@ export function reconcileMotifsWithGraph(params: {
     };
   });
 
-  const relationConflicted = applyRelationConflictDeprecation(mergedDerived, conceptById);
+  const semanticMerged = applyReuseClassification(
+    mergedDerived.map((m) => withCausalSemantics(m, conceptById, params.locale)),
+    conceptById
+  );
+  const relationConflicted = applyRelationConflictDeprecation(semanticMerged, conceptById);
   const deprecationApplied = applyRedundancyDeprecation(relationConflicted, conceptById);
   const highSimilarityCollapsed = applyHighSimilarityCancellation(deprecationApplied);
   const crossAnchorDeduped = applyCrossAnchorPathDedup(highSimilarityCollapsed, conceptById);
@@ -1859,6 +2012,7 @@ export function reconcileMotifsWithGraph(params: {
 
   const all = [...softPrunedCollapsed, ...manualPersistedFromHistory, ...cancelledFromHistory]
     .map((m) => withCausalSemantics(m, conceptById, params.locale))
+    .map((m) => applyMotifReuseClassification(m, conceptById))
     .map((m) => appendStatusHistory(m, baseById.get(m.id)));
   return all
     .slice()

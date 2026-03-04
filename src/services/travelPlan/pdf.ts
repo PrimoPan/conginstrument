@@ -81,7 +81,9 @@ function sectionTitle(doc: PDFKit.PDFDocument, text: string) {
 }
 
 function hasDayStructuredText(text: string): boolean {
-  return /第\s*[一二三四五六七八九十两0-9]{1,3}\s*天|day\s*[0-9]{1,2}/i.test(String(text || ""));
+  return /第\s*[一二三四五六七八九十两0-9]{1,3}\s*天|day\s*[0-9]{1,2}|[0-9]{1,2}\s*月\s*[0-9]{1,2}\s*日/i.test(
+    String(text || "")
+  );
 }
 
 export async function renderTravelPlanPdf(params: {
@@ -202,9 +204,12 @@ export async function renderTravelPlanPdf(params: {
   }
 
   sectionTitle(doc, t(locale, "可执行行程", "Executable Itinerary"));
-  const executableText = String(plan.exportNarrative || plan.narrativeText || "").trim();
+  const executableText = String(
+    plan.assistantPlan?.narrative || plan.assistantPlan?.rawText || plan.exportNarrative || plan.narrativeText || ""
+  ).trim();
   const narrativeContainsDays = hasDayStructuredText(executableText);
-  if (narrativeContainsDays && executableText.length > 40) {
+  const hasAssistantSnapshot = String(plan.assistantPlan?.rawText || "").trim().length > 0;
+  if ((narrativeContainsDays && executableText.length > 40) || (hasAssistantSnapshot && executableText.length > 120)) {
     doc.fontSize(10.8).fillColor("#111827").text(executableText, { lineGap: 3 });
   } else if (!plan.dayPlans?.length) {
     doc

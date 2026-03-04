@@ -119,7 +119,7 @@ function buildAutoLinks(motifs: ConceptMotif[]): MotifLink[] {
   const out: MotifLink[] = [];
   const seen = new Set<string>();
   const candidates = (motifs || [])
-    .filter((m) => m.status !== "cancelled")
+    .filter((m) => m.status !== "cancelled" && (m.reuseClass || "reusable") === "reusable")
     .slice()
     .sort((a, b) => b.confidence - a.confidence || a.id.localeCompare(b.id))
     .slice(0, 140);
@@ -183,8 +183,9 @@ export function reconcileMotifLinks(params: {
   baseLinks?: any;
 }): MotifLink[] {
   const now = new Date().toISOString();
+  const effectiveMotifs = (params.motifs || []).filter((m) => (m.reuseClass || "reusable") === "reusable");
   const aliasToCanonical = new Map<string, string>();
-  for (const m of params.motifs || []) {
+  for (const m of effectiveMotifs || []) {
     const canonicalId = cleanText(m.id, 120);
     if (!canonicalId) continue;
     aliasToCanonical.set(canonicalId, canonicalId);
@@ -196,8 +197,8 @@ export function reconcileMotifLinks(params: {
     }
   }
   const remapMotifId = (id: string) => aliasToCanonical.get(cleanText(id, 120)) || cleanText(id, 120);
-  const motifIds = new Set((params.motifs || []).map((m) => m.id));
-  const auto = buildAutoLinks(params.motifs || []);
+  const motifIds = new Set((effectiveMotifs || []).map((m) => m.id));
+  const auto = buildAutoLinks(effectiveMotifs || []);
   const base = normalizeLinks(params.baseLinks)
     .map((x) => ({
       ...x,

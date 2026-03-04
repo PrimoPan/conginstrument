@@ -175,6 +175,12 @@ function normalizeForMatch(s: string): string {
   return cleanText(s, 400).toLowerCase().replace(/\s+/g, "");
 }
 
+function normalizeLooseForMatch(s: string): string {
+  return cleanText(s, 400)
+    .toLowerCase()
+    .replace(/[^\p{L}\p{N}]+/gu, "");
+}
+
 function hasHardnessDecision(text: string): boolean {
   return /(硬约束|可协商偏好|可协商|软约束|偏好|不是硬约束|hard constraint|soft preference|negotiable|not hard)/i.test(
     cleanText(text, 200)
@@ -216,6 +222,60 @@ function isLimitingFactorResolved(
   );
   const lastUser = recentUsers[recentUsers.length - 1] || "";
   if (askedRecently && hasHardnessDecision(lastUser)) return true;
+
+  return false;
+}
+
+function normalizeHardnessTargetStatement(statement: string): string {
+  return cleanText(statement || "", 140)
+    .replace(
+      /^(限制因素|limiting factor|子地点|sub-location|sub location|预算(?:上限)?|budget(?:\s+cap)?|关键日|critical day|总行程时长|行程时长|total duration|trip duration)[:：]\s*/i,
+      ""
+    )
+    .replace(/[“”"']/g, "")
+    .trim();
+}
+
+function containsTargetPhrase(text: string, phrase: string): boolean {
+  const nText = normalizeLooseForMatch(text);
+  const nPhrase = normalizeLooseForMatch(phrase);
+  if (!nText || !nPhrase) return false;
+  return nText.includes(nPhrase);
+}
+
+function isHardnessPrompt(text: string): boolean {
+  return /(是否是硬约束|是否为硬约束|硬约束|可协商偏好|可上下浮动|allow adjustment|hard constraint|negotiable preference)/i.test(
+    cleanText(text, 240)
+  );
+}
+
+function isHardnessQuestionResolved(
+  target: UncertaintyTarget,
+  recentTurns: Array<{ role: "user" | "assistant"; content: string }>
+): boolean {
+  const phrase = normalizeHardnessTargetStatement(target.statement);
+  if (!phrase) return false;
+
+  const recent = (recentTurns || []).slice(-12);
+  const explicitByPhrase = recent.some(
+    (turn) => turn.role === "user" && hasHardnessDecision(turn.content || "") && containsTargetPhrase(turn.content || "", phrase)
+  );
+  if (explicitByPhrase) return true;
+
+  for (let i = recent.length - 1; i >= 0; i -= 1) {
+    const askTurn = recent[i];
+    if (askTurn.role !== "assistant") continue;
+    const askText = cleanText(askTurn.content || "", 260);
+    if (!isHardnessPrompt(askText)) continue;
+    if (!containsTargetPhrase(askText, phrase) && !containsTargetPhrase(askText, target.statement || "")) continue;
+
+    for (let j = i + 1; j < recent.length; j += 1) {
+      const replyTurn = recent[j];
+      if (replyTurn.role === "assistant") break;
+      if (replyTurn.role === "user" && hasHardnessDecision(replyTurn.content || "")) return true;
+    }
+    break;
+  }
 
   return false;
 }
@@ -339,9 +399,12 @@ export function planUncertaintyQuestion(params: {
   }
 
   const sorted = candidates.sort((a, b) => b.score - a.score).slice(0, 6);
-  const unresolvedSorted = sorted.filter(
-    (x) => !(x.slotFamily === "limiting_factor" && isLimitingFactorResolved(x, params.recentTurns))
-  );
+  const unresolvedSorted = sorted.filter((x) => {
+    if (x.slotFamily === "limiting_factor" && isLimitingFactorResolved(x, params.recentTurns)) return false;
+    const q = questionForTarget(x, slots, params.locale);
+    if (isHardnessPrompt(q) && isHardnessQuestionResolved(x, params.recentTurns)) return false;
+    return true;
+  });
   let pickedQuestion: string | null = null;
   for (const c of unresolvedSorted) {
     const q = questionForTarget(c, slots, params.locale);
@@ -350,8 +413,6 @@ export function planUncertaintyQuestion(params: {
       break;
     }
   }
-  if (!pickedQuestion && unresolvedSorted.length)
-    pickedQuestion = questionForTarget(unresolvedSorted[0], slots, params.locale);
 
   const rationale = sorted.length
     ? sorted

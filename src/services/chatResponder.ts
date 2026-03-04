@@ -179,13 +179,6 @@ function graphSummaryForChat(graph: CDG): string {
   ].join("\n");
 }
 
-function normalizeForMatch(input: string): string {
-  return String(input || "")
-    .toLowerCase()
-    .replace(/\s+/g, "")
-    .slice(0, 240);
-}
-
 function chooseQuestionWithPriority(params: {
   motifQuestion: string | null;
   uncertaintyQuestion: string | null;
@@ -194,12 +187,8 @@ function chooseQuestionWithPriority(params: {
   const m = String(params.motifQuestion || "").trim();
   const u = String(params.uncertaintyQuestion || "").trim();
   if (!m && !u) return null;
-  if (m && !u) return m;
-  if (!m && u) return u;
-  if (normalizeForMatch(m).includes(normalizeForMatch(u)) || normalizeForMatch(u).includes(normalizeForMatch(m))) {
-    return m;
-  }
-  return isEnglishLocale(params.locale) ? `${m} Also, ${u}` : `${m}；另外，${u}`;
+  if (m) return m;
+  return u;
 }
 
 function motifPriorityQuestion(params: {

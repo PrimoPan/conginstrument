@@ -43,8 +43,25 @@ function isResolvedDeprecated(m: ConceptMotif): boolean {
   return reason.startsWith("user_resolved");
 }
 
-function conceptTitle(id: string, conceptById: Map<string, ConceptItem>): string {
-  return cleanText(conceptById.get(id)?.title, 56) || cleanText(id, 32) || "concept";
+function termPriorityScore(raw: string): number {
+  const text = cleanText(raw, 80);
+  if (!text) return -1;
+  let score = 0;
+  if (/[0-9]/.test(text)) score += 2;
+  if (/(元|人民币|预算|cny|usd|eur|gbp|hkd|jpy|\$|€|£|hotel|酒店|住宿|dining|餐饮)/i.test(text)) score += 2;
+  if (text.length >= 6) score += 1;
+  return score;
+}
+
+function conceptPhrase(id: string, conceptById: Map<string, ConceptItem>): string {
+  const concept = conceptById.get(id);
+  const evidenceTerms = Array.isArray(concept?.evidenceTerms) ? concept!.evidenceTerms : [];
+  const bestEvidence = evidenceTerms
+    .map((x) => cleanText(x, 80))
+    .filter(Boolean)
+    .sort((a, b) => termPriorityScore(b) - termPriorityScore(a) || b.length - a.length)[0];
+  if (bestEvidence) return bestEvidence;
+  return cleanText(concept?.title, 56) || cleanText(id, 32) || "concept";
 }
 
 function motifSourceIds(m: ConceptMotif): string[] {
@@ -72,20 +89,20 @@ function directTemplate(params: {
 }): string {
   const sourceId = motifSourceIds(params.motif)[0] || "";
   const targetId = motifTargetId(params.motif);
-  const source = conceptTitle(sourceId, params.conceptById);
-  const target = conceptTitle(targetId, params.conceptById);
+  const source = conceptPhrase(sourceId, params.conceptById);
+  const target = conceptPhrase(targetId, params.conceptById);
   const dep = cleanText(params.motif.dependencyClass || params.motif.relation, 40);
   if (dep === "constraint") {
     return t(
       params.locale,
-      `直接确认：你的意思是“${source}”正在直接限制“${target}”吗？`,
-      `Direct confirmation: do you mean "${source}" is directly constraining "${target}"?`
+      `直接确认：你是说“${source}”会直接限制“${target}”吗？`,
+      `Direct confirmation: do you mean "${source}" directly limits "${target}"?`
     );
   }
   return t(
     params.locale,
-    `直接确认：你的意思是“${source}”会直接让“${target}”变得可行吗？`,
-    `Direct confirmation: do you mean "${source}" directly makes "${target}" actionable?`
+    `直接确认：你是说“${source}”会直接促成“${target}”吗？`,
+    `Direct confirmation: do you mean "${source}" directly enables "${target}"?`
   );
 }
 
@@ -96,12 +113,12 @@ function counterfactualTemplate(params: {
 }): string {
   const sourceId = motifSourceIds(params.motif)[0] || "";
   const targetId = motifTargetId(params.motif);
-  const source = conceptTitle(sourceId, params.conceptById);
-  const target = conceptTitle(targetId, params.conceptById);
+  const source = conceptPhrase(sourceId, params.conceptById);
+  const target = conceptPhrase(targetId, params.conceptById);
   return t(
     params.locale,
-    `反事实确认：如果把“${source}”调整为另一种选择，你对“${target}”的决定还会保持不变吗？`,
-    `Counterfactual probe: if "${source}" changed to another option, would your commitment on "${target}" stay the same?`
+    `反事实确认：如果“${source}”变成另一种情况，你对“${target}”的决策会改变吗？`,
+    `Counterfactual probe: if "${source}" changed, would your decision on "${target}" change as well?`
   );
 }
 
@@ -114,13 +131,13 @@ function mediationTemplate(params: {
   const sourceId = sourceIds[0] || "";
   const mediatorId = sourceIds[1] || "";
   const targetId = motifTargetId(params.motif);
-  const source = conceptTitle(sourceId, params.conceptById);
-  const mediator = conceptTitle(mediatorId, params.conceptById);
-  const target = conceptTitle(targetId, params.conceptById);
+  const source = conceptPhrase(sourceId, params.conceptById);
+  const mediator = conceptPhrase(mediatorId, params.conceptById);
+  const target = conceptPhrase(targetId, params.conceptById);
   return t(
     params.locale,
-    `中介链路确认：你的意思是“${source}”会通过“${mediator}”进一步影响“${target}”吗？`,
-    `Mediation check: do you mean "${source}" influences "${target}" through "${mediator}"?`
+    `中介链路确认：你是说“${source}”会先影响“${mediator}”，再影响“${target}”吗？`,
+    `Mediation check: do you mean "${source}" influences "${mediator}" first, then affects "${target}"?`
   );
 }
 
@@ -153,7 +170,9 @@ export function planMotifQuestion(params: {
   recentTurns: Array<{ role: "user" | "assistant"; content: string }>;
   locale?: AppLocale;
 }): MotifQuestionPlan {
-  const motifs = Array.isArray(params.motifs) ? params.motifs : [];
+  const motifs = (Array.isArray(params.motifs) ? params.motifs : []).filter(
+    (m) => (m.reuseClass || "reusable") === "reusable"
+  );
   const conceptById = new Map((params.concepts || []).map((c) => [c.id, c]));
 
   const deprecated = motifs
