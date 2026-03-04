@@ -2057,7 +2057,7 @@ const POSITIVE_PREFIX_RE =
   /(?:必须|务必|一定|需要|要|应当|应该|优先|尽量|最好|must|need|should|prefer|required|include|with)/gi;
 const NON_NEGATION_IDIOM_RE = /(?:不但|不光|不仅|不止|不得不|不少|不错|不一定|不太|不够)/i;
 const LEADING_NOISE_RE =
-  /^(?:我|我们|希望|想|要|需要|必须|务必|一定|请|尽量|最好|优先|一般|通常|可能|也许|先|再|然后|另外|顺便|限制因素|limiting|factor|constraint)+/i;
+  /^(?:我|我们|希望|想|要|需要|必须|务必|一定|请|尽量|最好|优先|一般|通常|可能|也许|先|再|然后|另外|顺便|好的?|好吧|行吧|行|那就|嗯|哦|收到|ok(?:ay)?|alright|限制因素|limiting|factor|constraint)+/i;
 const AXIS_STOPWORDS = new Set([
   "限制因素",
   "limiting",
@@ -2081,6 +2081,22 @@ const AXIS_STOPWORDS = new Set([
   "the",
   "a",
   "to",
+  "好",
+  "好的",
+  "好吧",
+  "行",
+  "行吧",
+  "那就",
+  "嗯",
+  "哦",
+  "收到",
+  "ok",
+  "okay",
+  "alright",
+  "喜欢",
+  "喜歡",
+  "prefer",
+  "like",
 ]);
 
 const SCENIC_PREF_NEGATION_RE =
@@ -2171,12 +2187,24 @@ function normalizeConstraintAxisText(text: string): string {
   if (!s) return "";
   s = s.replace(/^限制因素[:：]?\s*/i, "").replace(/^limiting factor[:：]?\s*/i, "").trim();
 
+  const transportAxis = (() => {
+    if (/(?:船|渡轮|轮渡|ferry|boat)/i.test(s)) return "boat";
+    if (/(?:地铁|捷运|metro|subway)/i.test(s)) return "metro";
+    if (/(?:火车|高铁|train|rail)/i.test(s)) return "train";
+    if (/(?:飞机|航班|flight|plane|air)/i.test(s)) return "flight";
+    if (/(?:打车|出租车|网约车|taxi|cab)/i.test(s)) return "taxi";
+    if (/(?:坐车|乘车|开车|驾车|car|drive|driving|vehicle)/i.test(s)) return "car";
+    return "";
+  })();
+  if (transportAxis) return transportAxis;
+
   const normalizedChunks = s
     .split(/[。！？!?；;，,\n]/)
     .map((part) => cleanStatement(part, 120))
     .filter(Boolean)
     .map((part) =>
       part
+        .replace(/^(?:好的?|好吧|行吧|行|那就|嗯|哦|收到|ok(?:ay)?|alright)\s*/i, " ")
         .replace(NEGATIVE_PREFIX_RE, " ")
         .replace(POSITIVE_PREFIX_RE, " ")
         .replace(LEADING_NOISE_RE, " ")
@@ -2196,6 +2224,8 @@ function normalizeConstraintAxisText(text: string): string {
     .map((token) =>
       token
         .replace(/^(?:不再|不要|不能|不可|不得|别|勿|避免|禁止|取消|去掉|不用|无需|不必|不想|不)/, "")
+        .replace(/^(?:喜欢|喜歡|prefer|like)/i, "")
+        .replace(/^(?:坐|乘|搭|开|驾)(?=船|车|地铁|火车|飞机)/, "")
         .replace(/(?:了|吧|呢|呀|啊)$/g, "")
         .trim()
     )

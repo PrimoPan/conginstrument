@@ -755,6 +755,32 @@ const cases: Case[] = [
     },
   },
   {
+    name: "opposite limiting factor with acknowledgement/noisy phrasing should still revoke axis",
+    run: () => {
+      const merged = extractIntentSignalsWithRecency(
+        "限制因素：好的一定要坐船",
+        "限制因素：不坐船了，不喜欢船了"
+      );
+      const state = buildSlotStateMachine({
+        userText: "限制因素：不坐船了，不喜欢船了",
+        recentTurns: [
+          { role: "user", content: "限制因素：好的一定要坐船" },
+          { role: "assistant", content: "收到" },
+          { role: "user", content: "限制因素：不坐船了，不喜欢船了" },
+        ],
+        signals: merged,
+      });
+
+      const boatNodes = state.nodes.filter((n: any) => {
+        const key = String(n?.slotKey || "");
+        const statement = String(n?.statement || "");
+        return key.startsWith("slot:constraint:limiting:") && /坐船|乘船|ferry|boat|船/i.test(statement);
+      });
+      assert.equal(boatNodes.length, 0);
+      assert.equal((merged.revokedConstraintAxes || []).length > 0, true);
+    },
+  },
+  {
     name: "opposite limiting factor update should remove stale node and detach stale edge",
     run: () => {
       const merged = extractIntentSignalsWithRecency(
