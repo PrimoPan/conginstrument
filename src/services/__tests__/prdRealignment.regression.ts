@@ -3,8 +3,10 @@ import assert from "node:assert/strict";
 import { normalizeConceptType, normalizeExtractionStage, normalizeMotifLinkType } from "../../core/graph/schemaAdapters.js";
 import { deriveConceptsFromGraph, CONCEPT_EXTRACTION_STAGES } from "../concepts.js";
 import { buildCognitiveModel } from "../cognitiveModel.js";
+import { reconcileMotifsWithGraph } from "../motif/conceptMotifs.js";
 import { reconcileMotifLinks } from "../motif/motifLinks.js";
 import { buildMotifReasoningView } from "../motif/reasoningView.js";
+import { buildConflictGatePayload } from "../motif/conflictGate.js";
 
 function run(name: string, fn: () => void) {
   try {
@@ -392,6 +394,176 @@ run("long motif identifiers should not drop reasoning edges", () => {
     view.edges.some((e) => e.from === motifIdToNodeId.get(longA) && e.to === motifIdToNodeId.get(longB)),
     true
   );
+});
+
+run("user-resolved motif edits should persist relation/structure/status", () => {
+  const graph = {
+    id: "g_motif_user_edit",
+    version: 1,
+    nodes: [
+      {
+        id: "n_goal",
+        type: "belief",
+        layer: "intent",
+        statement: "意图：完成旅行计划",
+        status: "confirmed",
+        confidence: 0.9,
+        importance: 0.88,
+        key: "slot:goal",
+      },
+      {
+        id: "n_budget",
+        type: "constraint",
+        layer: "requirement",
+        statement: "预算上限：10000元",
+        status: "confirmed",
+        confidence: 0.88,
+        importance: 0.8,
+        key: "slot:budget",
+      },
+    ],
+    edges: [{ id: "e1", from: "n_budget", to: "n_goal", type: "constraint", confidence: 0.86 }],
+  } as any;
+  const concepts = deriveConceptsFromGraph(graph);
+  const first = reconcileMotifsWithGraph({ graph, concepts, baseMotifs: [] });
+  assert.ok(first.length >= 1);
+  const baseline = first[0];
+  const edited = {
+    ...baseline,
+    title: "用户改写标题",
+    description: "用户自定义结构",
+    relation: "determine",
+    dependencyClass: "determine",
+    causalOperator: "intervention",
+    status: "disabled",
+    statusReason: "user_disabled",
+    resolved: true,
+    resolvedBy: "user",
+    resolvedAt: new Date().toISOString(),
+    conceptIds: baseline.conceptIds.slice(0, 2),
+    concept_bindings: baseline.conceptIds.slice(0, 2),
+    anchorConceptId: baseline.anchorConceptId,
+    roles: {
+      sources: baseline.conceptIds.filter((x) => x !== baseline.anchorConceptId).slice(0, 1),
+      target: baseline.anchorConceptId,
+    },
+  };
+
+  const next = reconcileMotifsWithGraph({
+    graph,
+    concepts,
+    baseMotifs: [edited],
+  });
+  const persisted = next.find((m) => m.id === baseline.id);
+  assert.ok(persisted);
+  assert.equal(persisted?.title, "用户改写标题");
+  assert.equal(persisted?.relation, "determine");
+  assert.equal(persisted?.status, "disabled");
+  assert.equal(persisted?.resolvedBy, "user");
+});
+
+run("manual user motif should not be cancelled when still supported by concepts", () => {
+  const graph = {
+    id: "g_manual_user_motif",
+    version: 1,
+    nodes: [
+      {
+        id: "n_goal",
+        type: "belief",
+        layer: "intent",
+        statement: "意图：旅行规划",
+        status: "confirmed",
+        confidence: 0.9,
+        importance: 0.86,
+        key: "slot:goal",
+      },
+      {
+        id: "n_budget",
+        type: "constraint",
+        layer: "requirement",
+        statement: "预算上限：8000元",
+        status: "confirmed",
+        confidence: 0.84,
+        importance: 0.78,
+        key: "slot:budget",
+      },
+    ],
+    edges: [{ id: "e1", from: "n_budget", to: "n_goal", type: "constraint", confidence: 0.84 }],
+  } as any;
+  const concepts = deriveConceptsFromGraph(graph);
+  const budgetConcept = concepts.find((c) => c.semanticKey === "slot:budget");
+  const goalConcept = concepts.find((c) => c.semanticKey === "slot:goal");
+  assert.ok(budgetConcept && goalConcept);
+
+  const manualMotif = {
+    id: "m_manual_custom",
+    motif_id: "m_manual_custom",
+    motif_type: "determine",
+    motifType: "pair",
+    relation: "determine",
+    dependencyClass: "determine",
+    roles: { sources: [budgetConcept!.id], target: goalConcept!.id },
+    scope: "global",
+    aliases: ["m_manual_custom"],
+    concept_bindings: [budgetConcept!.id, goalConcept!.id],
+    conceptIds: [budgetConcept!.id, goalConcept!.id],
+    anchorConceptId: goalConcept!.id,
+    title: "用户手工 motif",
+    description: "manual motif",
+    confidence: 0.81,
+    supportEdgeIds: [],
+    supportNodeIds: [],
+    status: "active",
+    statusReason: "user_manual_created",
+    resolved: true,
+    resolvedBy: "user",
+    resolvedAt: new Date().toISOString(),
+    novelty: "updated",
+    updatedAt: new Date().toISOString(),
+  } as any;
+
+  const next = reconcileMotifsWithGraph({
+    graph,
+    concepts,
+    baseMotifs: [manualMotif],
+  });
+  const kept = next.find((m) => m.id === "m_manual_custom");
+  assert.ok(kept, "manual motif should be retained");
+  assert.equal(kept?.status, "active");
+  assert.equal(kept?.statusReason?.startsWith("not_supported_by_current_graph"), false);
+});
+
+run("conflict gate payload should block only unresolved deprecated motifs", () => {
+  const blocked = buildConflictGatePayload(
+    [
+      {
+        id: "m_conflict",
+        title: "冲突关系",
+        status: "deprecated",
+        confidence: 0.82,
+        statusReason: "relation_conflict_with:m_x",
+        resolved: false,
+      },
+    ] as any,
+    "zh-CN" as any
+  );
+  assert.ok(blocked?.blocked);
+  assert.equal(blocked?.unresolvedMotifs.length, 1);
+
+  const cleared = buildConflictGatePayload(
+    [
+      {
+        id: "m_conflict",
+        title: "冲突关系",
+        status: "deprecated",
+        confidence: 0.82,
+        statusReason: "user_resolved",
+        resolved: true,
+      },
+    ] as any,
+    "zh-CN" as any
+  );
+  assert.equal(cleared, null);
 });
 
 console.log("All PRD re-alignment checks passed.");

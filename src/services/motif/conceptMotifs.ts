@@ -840,6 +840,108 @@ function inferBaseStatus(m: ConceptMotif, prev: ConceptMotif | undefined, concep
   return { status: "active" as MotifLifecycleStatus, reason: "" };
 }
 
+function isUserEditableStatus(status: MotifLifecycleStatus | undefined): status is "active" | "disabled" {
+  return status === "active" || status === "disabled";
+}
+
+function sanitizeMotifStructure(params: {
+  conceptIds: string[];
+  anchorConceptId?: string;
+  conceptById: Map<string, ConceptItem>;
+}): { conceptIds: string[]; anchorConceptId: string; sourceIds: string[] } | null {
+  const conceptIds = uniq(
+    (params.conceptIds || [])
+      .map((id) => cleanText(id, 100))
+      .filter((id) => id && params.conceptById.has(id)),
+    12
+  );
+  if (conceptIds.length < 2) return null;
+
+  let anchorConceptId = cleanText(params.anchorConceptId, 100);
+  if (!anchorConceptId || !conceptIds.includes(anchorConceptId)) {
+    anchorConceptId = conceptIds[conceptIds.length - 1];
+  }
+  const sourceIds = conceptIds.filter((id) => id !== anchorConceptId);
+  if (!sourceIds.length) return null;
+  return { conceptIds, anchorConceptId, sourceIds };
+}
+
+function motifEditableSignature(m: ConceptMotif | undefined): string {
+  if (!m) return "none";
+  return [
+    cleanText(m.title, 160),
+    cleanText(m.description, 220),
+    cleanText(m.relation, 40),
+    cleanText(m.causalOperator, 40),
+    cleanText(m.status, 24),
+    cleanText(m.statusReason, 120),
+    cleanText(m.anchorConceptId, 120),
+    (m.conceptIds || []).slice().sort().join("|"),
+  ].join("::");
+}
+
+function applyUserEditableOverlay(params: {
+  current: ConceptMotif;
+  prev?: ConceptMotif;
+  conceptById: Map<string, ConceptItem>;
+}): ConceptMotif {
+  const { current, prev, conceptById } = params;
+  if (!prev || prev.resolvedBy !== "user" || !prev.resolved) return current;
+
+  const structure = sanitizeMotifStructure({
+    conceptIds: (prev.conceptIds || prev.concept_bindings || []).slice(),
+    anchorConceptId: prev.anchorConceptId,
+    conceptById,
+  });
+  if (!structure) return current;
+
+  const relation = normalizeDependencyClass(prev.dependencyClass || prev.relation, current.relation);
+  const nextStatus: MotifLifecycleStatus = isUserEditableStatus(prev.status) ? prev.status : current.status;
+  const nextStatusReason =
+    nextStatus === current.status
+      ? current.statusReason
+      : cleanText(prev.statusReason, 180) || `user_status_${nextStatus}`;
+
+  return {
+    ...current,
+    title: cleanText(prev.title, 160) || current.title,
+    description: cleanText(prev.description, 240) || current.description,
+    relation,
+    dependencyClass: relation,
+    causalOperator: prev.causalOperator || current.causalOperator,
+    motifType: structure.conceptIds.length >= 3 ? "triad" : "pair",
+    conceptIds: structure.conceptIds,
+    concept_bindings: structure.conceptIds,
+    anchorConceptId: structure.anchorConceptId,
+    roles: {
+      sources: structure.sourceIds,
+      target: structure.anchorConceptId,
+    },
+    status: nextStatus,
+    statusReason: nextStatusReason,
+    resolved: true,
+    resolvedBy: "user",
+    resolvedAt: prev.resolvedAt || current.updatedAt || new Date().toISOString(),
+  };
+}
+
+function shouldPersistUserManualMotif(params: {
+  motif: ConceptMotif;
+  conceptById: Map<string, ConceptItem>;
+}): boolean {
+  const { motif, conceptById } = params;
+  if (motif.resolvedBy !== "user") return false;
+  if (!motif.resolved && !isUserEditableStatus(motif.status)) return false;
+  const structure = sanitizeMotifStructure({
+    conceptIds: (motif.conceptIds || motif.concept_bindings || []).slice(),
+    anchorConceptId: motif.anchorConceptId,
+    conceptById,
+  });
+  if (!structure) return false;
+  const relation = normalizeDependencyClass(motif.dependencyClass || motif.relation, "enable");
+  return relation !== "conflicts_with";
+}
+
 function motifPriorityScore(m: ConceptMotif): number {
   const dep = motifDependencyClass(m);
   const relationBoost =
@@ -1664,12 +1766,7 @@ export function reconcileMotifsWithGraph(params: {
       isEnglishLocale(params.locale) &&
       (hasCjk(prev?.description || "") ||
         /模式：|复合结构：|限制|支持|决定|冲突/.test(cleanText(prev?.description, 160)));
-    const changed =
-      !!prev &&
-      (Math.abs((prev.confidence || 0) - (m.confidence || 0)) >= 0.04 ||
-        prev.status !== status ||
-        isSupportChanged(prev, m));
-    return {
+    const baseMerged = {
       ...m,
       title: prev?.title && !preferDerivedTitle ? prev.title : m.title,
       description:
@@ -1679,8 +1776,21 @@ export function reconcileMotifsWithGraph(params: {
       resolved: !!prev?.resolved && status !== "deprecated",
       resolvedAt: prev?.resolvedAt,
       resolvedBy: prev?.resolvedBy,
-      novelty: prev ? (changed ? "updated" : "unchanged") : "new",
       updatedAt: now,
+    };
+    const withUserOverlay = applyUserEditableOverlay({
+      current: baseMerged,
+      prev,
+      conceptById,
+    });
+    const changed =
+      !!prev &&
+      (Math.abs((prev.confidence || 0) - (withUserOverlay.confidence || 0)) >= 0.04 ||
+        isSupportChanged(prev, withUserOverlay) ||
+        motifEditableSignature(prev) !== motifEditableSignature(withUserOverlay));
+    return {
+      ...withUserOverlay,
+      novelty: prev ? (changed ? "updated" : "unchanged") : "new",
     };
   });
 
@@ -1701,17 +1811,53 @@ export function reconcileMotifsWithGraph(params: {
   });
 
   const derivedIds = new Set(softPrunedCollapsed.map((m) => m.id));
-  const cancelledFromHistory: ConceptMotif[] = base
-    .filter((old) => !derivedIds.has(old.id))
-    .map((old) => ({
+  const manualPersistedFromHistory: ConceptMotif[] = [];
+  const cancelledFromHistory: ConceptMotif[] = [];
+  for (const old of base) {
+    if (derivedIds.has(old.id)) continue;
+    const shouldPersist = shouldPersistUserManualMotif({ motif: old, conceptById });
+    if (!shouldPersist) {
+      cancelledFromHistory.push({
+        ...old,
+        status: "cancelled",
+        statusReason: "not_supported_by_current_graph",
+        novelty: "updated",
+        updatedAt: now,
+      });
+      continue;
+    }
+
+    const structure = sanitizeMotifStructure({
+      conceptIds: (old.conceptIds || old.concept_bindings || []).slice(),
+      anchorConceptId: old.anchorConceptId,
+      conceptById,
+    });
+    if (!structure) continue;
+    const relation = normalizeDependencyClass(old.dependencyClass || old.relation, "enable");
+    const keptStatus: MotifLifecycleStatus = isUserEditableStatus(old.status) ? old.status : "active";
+    manualPersistedFromHistory.push({
       ...old,
-      status: "cancelled",
-      statusReason: "not_supported_by_current_graph",
+      relation,
+      dependencyClass: relation,
+      conceptIds: structure.conceptIds,
+      concept_bindings: structure.conceptIds,
+      anchorConceptId: structure.anchorConceptId,
+      roles: {
+        sources: structure.sourceIds,
+        target: structure.anchorConceptId,
+      },
+      motifType: structure.conceptIds.length >= 3 ? "triad" : "pair",
+      status: keptStatus,
+      statusReason: cleanText(old.statusReason, 180) || "user_manual_motif_persisted",
+      resolved: true,
+      resolvedBy: "user",
+      resolvedAt: old.resolvedAt || now,
       novelty: "updated",
       updatedAt: now,
-    }));
+    });
+  }
 
-  const all = [...softPrunedCollapsed, ...cancelledFromHistory]
+  const all = [...softPrunedCollapsed, ...manualPersistedFromHistory, ...cancelledFromHistory]
     .map((m) => withCausalSemantics(m, conceptById, params.locale))
     .map((m) => appendStatusHistory(m, baseById.get(m.id)));
   return all

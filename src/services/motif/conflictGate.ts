@@ -9,6 +9,12 @@ export type ConflictGateItem = {
   confidence: number;
 };
 
+export type ConflictGatePayload = {
+  blocked: true;
+  unresolvedMotifs: ConflictGateItem[];
+  message: string;
+};
+
 function cleanText(input: any, max = 140): string {
   return String(input ?? "")
     .replace(/\s+/g, " ")
@@ -58,4 +64,14 @@ export function buildConflictGateMessage(items: ConflictGateItem[], locale?: App
     t(locale, "待确认冲突：", "Pending conflicts:"),
     lines || "- (none)",
   ].join("\n");
+}
+
+export function buildConflictGatePayload(motifs: ConceptMotif[], locale?: AppLocale): ConflictGatePayload | null {
+  const unresolved = listUnresolvedDeprecatedMotifs(Array.isArray(motifs) ? motifs : []);
+  if (!unresolved.length) return null;
+  return {
+    blocked: true,
+    unresolvedMotifs: unresolved,
+    message: buildConflictGateMessage(unresolved, locale),
+  };
 }

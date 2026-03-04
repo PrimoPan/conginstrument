@@ -11,6 +11,7 @@ import { reconcileConceptsWithGraph } from "./concepts.js";
 import { reconcileMotifsWithGraph } from "./motif/conceptMotifs.js";
 import { reconcileContextsWithGraph } from "./contexts.js";
 import { isEnglishLocale, type AppLocale } from "../i18n/locale.js";
+import { planMotifQuestion } from "./motif/questionPlanner.js";
 
 const STREAM_MODE = (process.env.CI_STREAM_MODE || "pseudo") as "upstream" | "pseudo";
 const DEBUG = process.env.CI_DEBUG_LLM === "1";
@@ -204,6 +205,7 @@ function chooseQuestionWithPriority(params: {
 function motifPriorityQuestion(params: {
   graph: CDG;
   concepts: ReturnType<typeof reconcileConceptsWithGraph>;
+  recentTurns: Array<{ role: "user" | "assistant"; content: string }>;
   locale?: AppLocale;
 }) {
   const motifs = reconcileMotifsWithGraph({
@@ -217,58 +219,17 @@ function motifPriorityQuestion(params: {
     motifs,
     baseContexts: [],
   });
-
-  const deprecated = motifs
-    .filter((m) => m.status === "deprecated")
-    .slice()
-    .sort((a, b) => b.confidence - a.confidence || a.id.localeCompare(b.id));
-  if (deprecated.length) {
-    const top = deprecated[0];
-    const conflictWithId = String(top.statusReason || "").match(/relation_conflict_with:([a-z0-9_\-:]+)/i)?.[1] || "";
-    const peer = conflictWithId ? motifs.find((m) => m.id === conflictWithId) : undefined;
-    const pairHint =
-      peer && peer.title
-        ? t(
-            params.locale,
-            `冲突关系：A=「${top.title}」 vs B=「${peer.title}」`,
-            `Conflicting relation: A="${top.title}" vs B="${peer.title}"`
-          )
-        : "";
-    return {
-      motifs,
-      contexts,
-      question: t(
-        params.locale,
-        `检测到冲突 motif。继续规划前需要先确认保留哪一侧关系。${pairHint}`.trim(),
-        `A deprecated/conflicting motif is detected. Before we continue, choose which side to keep. ${pairHint}`.trim()
-      ),
-      rationale: `motif_conflict:${top.id}`,
-    };
-  }
-
-  const uncertain = motifs
-    .filter((m) => m.status === "uncertain")
-    .slice()
-    .sort((a, b) => b.confidence - a.confidence || a.id.localeCompare(b.id));
-  if (uncertain.length) {
-    const top = uncertain[0];
-    return {
-      motifs,
-      contexts,
-      question: t(
-        params.locale,
-        `这条 motif 目前不确定：${top.title}。你希望继续启用，还是先停用它？`,
-        `This motif is uncertain: ${top.title}. Do you want to keep it active or disable it for now?`
-      ),
-      rationale: `motif_uncertain:${top.id}`,
-    };
-  }
-
+  const motifPlan = planMotifQuestion({
+    motifs,
+    concepts: params.concepts,
+    recentTurns: params.recentTurns,
+    locale: params.locale,
+  });
   return {
     motifs,
     contexts,
-    question: null,
-    rationale: "motif_stable",
+    question: motifPlan.question,
+    rationale: motifPlan.rationale,
   };
 }
 
@@ -312,7 +273,12 @@ export async function generateAssistantTextNonStreaming(params: {
   const safeRecent = normalizeRecentTurns(params.recentTurns);
   const gsum = graphSummaryForChat(params.graph);
   const concepts = reconcileConceptsWithGraph({ graph: params.graph, baseConcepts: [] });
-  const motifCtx = motifPriorityQuestion({ graph: params.graph, concepts, locale: params.locale });
+  const motifCtx = motifPriorityQuestion({
+    graph: params.graph,
+    concepts,
+    recentTurns: safeRecent,
+    locale: params.locale,
+  });
   const uncertaintyPlan = planUncertaintyQuestion({
     graph: params.graph,
     recentTurns: safeRecent,
@@ -397,7 +363,12 @@ export async function streamAssistantText(params: {
   const safeRecent = normalizeRecentTurns(params.recentTurns);
   const gsum = graphSummaryForChat(params.graph);
   const concepts = reconcileConceptsWithGraph({ graph: params.graph, baseConcepts: [] });
-  const motifCtx = motifPriorityQuestion({ graph: params.graph, concepts, locale: params.locale });
+  const motifCtx = motifPriorityQuestion({
+    graph: params.graph,
+    concepts,
+    recentTurns: safeRecent,
+    locale: params.locale,
+  });
   const uncertaintyPlan = planUncertaintyQuestion({
     graph: params.graph,
     recentTurns: safeRecent,

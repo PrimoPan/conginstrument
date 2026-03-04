@@ -8,7 +8,7 @@ import type { CDG } from "../core/graph.js";
 import { config } from "../server/config.js";
 import { generateAssistantTextNonStreaming } from "../services/chatResponder.js";
 import { buildCognitiveModel } from "../services/cognitiveModel.js";
-import { buildConflictGateMessage, listUnresolvedDeprecatedMotifs } from "../services/motif/conflictGate.js";
+import { buildConflictGatePayload } from "../services/motif/conflictGate.js";
 import { buildTravelPlanState, type TravelPlanState } from "../services/travelPlan/state.js";
 import { defaultTravelPlanFileName, renderTravelPlanPdf } from "../services/travelPlan/pdf.js";
 import { normalizeLocale, isEnglishLocale, type AppLocale } from "../i18n/locale.js";
@@ -162,16 +162,6 @@ async function persistConversationModel(params: {
     }
   );
   return travelPlanState;
-}
-
-function toConflictGatePayload(motifs: any[], locale?: AppLocale) {
-  const unresolved = listUnresolvedDeprecatedMotifs(Array.isArray(motifs) ? motifs : []);
-  if (!unresolved.length) return null;
-  return {
-    blocked: true,
-    unresolvedMotifs: unresolved,
-    message: buildConflictGateMessage(unresolved, locale),
-  };
 }
 
 function normalizeReasoningSteps(model: ReturnType<typeof buildCognitiveModel>) {
@@ -420,6 +410,7 @@ convRouter.put("/:id/graph", async (req: AuthedRequest, res) => {
   model.graph.version = prevGraph.version + (graphChanged(prevGraph, model.graph) ? 1 : 0);
 
   const requestAdvice = parseBoolFlag(req.body?.requestAdvice);
+  const conflictGate = requestAdvice ? buildConflictGatePayload(model.motifs, locale) : null;
   const advicePrompt = String(req.body?.advicePrompt || "").trim().slice(0, 1200);
   const travelPlanState = await computeTravelPlanState({
     conversationId: oid,
@@ -449,7 +440,7 @@ convRouter.put("/:id/graph", async (req: AuthedRequest, res) => {
 
   let assistantText = "";
   let adviceError = "";
-  if (requestAdvice) {
+  if (requestAdvice && !conflictGate) {
     try {
       const recent = await collections.turns
         .find({ conversationId: oid, userId })
@@ -479,6 +470,8 @@ convRouter.put("/:id/graph", async (req: AuthedRequest, res) => {
     } catch (e: any) {
       adviceError = String(e?.message || "advice_generation_failed");
     }
+  } else if (requestAdvice && conflictGate) {
+    adviceError = "blocked:motif_conflict_gate";
   }
 
   res.json({
@@ -489,6 +482,7 @@ convRouter.put("/:id/graph", async (req: AuthedRequest, res) => {
     updatedAt: now,
     assistantText,
     adviceError,
+    conflictGate,
   });
 });
 
@@ -706,7 +700,7 @@ convRouter.post("/:id/turn", async (req: AuthedRequest, res) => {
     baseContexts: (conv as any).contexts || [],
     locale,
   });
-  const conflictGate = toConflictGatePayload(preModel.motifs, locale);
+  const conflictGate = buildConflictGatePayload(preModel.motifs, locale);
   if (conflictGate) {
     const now = new Date();
     const blockedPatch = { ops: [], notes: ["blocked:motif_conflict_gate"] };
@@ -836,7 +830,7 @@ convRouter.post("/:id/turn/stream", async (req: AuthedRequest, res) => {
     baseContexts: (conv as any).contexts || [],
     locale,
   });
-  const conflictGate = toConflictGatePayload(preModel.motifs, locale);
+  const conflictGate = buildConflictGatePayload(preModel.motifs, locale);
   if (conflictGate) {
     const now = new Date();
     const blockedPatch = { ops: [], notes: ["blocked:motif_conflict_gate"] };

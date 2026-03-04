@@ -15,6 +15,7 @@ import { reconcileConceptsWithGraph } from "../../concepts.js";
 import { reconcileMotifsWithGraph } from "../../motif/conceptMotifs.js";
 import { reconcileMotifLinks } from "../../motif/motifLinks.js";
 import { buildMotifReasoningView } from "../../motif/reasoningView.js";
+import { planMotifQuestion } from "../../motif/questionPlanner.js";
 
 type Case = {
   name: string;
@@ -1300,6 +1301,176 @@ const cases: Case[] = [
         view.steps.some((s) => /我想|I want|because|推理过程|chain of thought/i.test(String(s.explanation || ""))),
         false
       );
+    },
+  },
+  {
+    name: "motif uncertain question should use direct confirmation template",
+    run: () => {
+      const plan = planMotifQuestion({
+        motifs: [
+          {
+            id: "m_direct",
+            motif_id: "m_direct",
+            motif_type: "enable",
+            motifType: "pair",
+            relation: "enable",
+            dependencyClass: "enable",
+            roles: { sources: ["c_budget"], target: "c_goal" },
+            scope: "global",
+            aliases: [],
+            concept_bindings: ["c_budget", "c_goal"],
+            conceptIds: ["c_budget", "c_goal"],
+            anchorConceptId: "c_goal",
+            title: "预算影响目标",
+            description: "d",
+            confidence: 0.61,
+            supportEdgeIds: [],
+            supportNodeIds: [],
+            status: "uncertain",
+            causalOperator: "direct_causation",
+            novelty: "new",
+            updatedAt: new Date().toISOString(),
+          },
+        ] as any,
+        concepts: [
+          { id: "c_budget", title: "预算上限", kind: "constraint", family: "budget", nodeIds: [], sourceMsgIds: [] },
+          { id: "c_goal", title: "旅行目标", kind: "belief", family: "goal", nodeIds: [], sourceMsgIds: [] },
+        ] as any,
+        recentTurns: [],
+        locale: "zh-CN" as any,
+      });
+      assert.equal(/直接确认/.test(String(plan.question || "")), true);
+      assert.equal(/motif_uncertain:/.test(String(plan.rationale)), true);
+    },
+  },
+  {
+    name: "motif uncertain question should use counterfactual template for intervention",
+    run: () => {
+      const plan = planMotifQuestion({
+        motifs: [
+          {
+            id: "m_cf",
+            motif_id: "m_cf",
+            motif_type: "determine",
+            motifType: "pair",
+            relation: "determine",
+            dependencyClass: "determine",
+            roles: { sources: ["c_city"], target: "c_plan" },
+            scope: "global",
+            aliases: [],
+            concept_bindings: ["c_city", "c_plan"],
+            conceptIds: ["c_city", "c_plan"],
+            anchorConceptId: "c_plan",
+            title: "城市决定方案",
+            description: "d",
+            confidence: 0.58,
+            supportEdgeIds: [],
+            supportNodeIds: [],
+            status: "uncertain",
+            causalOperator: "intervention",
+            novelty: "new",
+            updatedAt: new Date().toISOString(),
+          },
+        ] as any,
+        concepts: [
+          { id: "c_city", title: "目的地城市", kind: "belief", family: "destination", nodeIds: [], sourceMsgIds: [] },
+          { id: "c_plan", title: "执行方案", kind: "belief", family: "goal", nodeIds: [], sourceMsgIds: [] },
+        ] as any,
+        recentTurns: [],
+        locale: "zh-CN" as any,
+      });
+      assert.equal(/反事实确认/.test(String(plan.question || "")), true);
+      assert.equal(/counterfactual/.test(String(plan.rationale)), true);
+    },
+  },
+  {
+    name: "motif uncertain question should use mediation template for mediated causation",
+    run: () => {
+      const plan = planMotifQuestion({
+        motifs: [
+          {
+            id: "m_med",
+            motif_id: "m_med",
+            motif_type: "enable",
+            motifType: "triad",
+            relation: "enable",
+            dependencyClass: "enable",
+            roles: { sources: ["c_date", "c_season"], target: "c_cost" },
+            scope: "global",
+            aliases: [],
+            concept_bindings: ["c_date", "c_season", "c_cost"],
+            conceptIds: ["c_date", "c_season", "c_cost"],
+            anchorConceptId: "c_cost",
+            title: "日期通过季节影响成本",
+            description: "d",
+            confidence: 0.55,
+            supportEdgeIds: [],
+            supportNodeIds: [],
+            status: "uncertain",
+            causalOperator: "mediated_causation",
+            novelty: "new",
+            updatedAt: new Date().toISOString(),
+          },
+        ] as any,
+        concepts: [
+          { id: "c_date", title: "出行日期", kind: "belief", family: "duration_total", nodeIds: [], sourceMsgIds: [] },
+          { id: "c_season", title: "季节定价", kind: "factual_assertion", family: "other", nodeIds: [], sourceMsgIds: [] },
+          { id: "c_cost", title: "总成本", kind: "constraint", family: "budget", nodeIds: [], sourceMsgIds: [] },
+        ] as any,
+        recentTurns: [],
+        locale: "zh-CN" as any,
+      });
+      assert.equal(/中介链路确认/.test(String(plan.question || "")), true);
+      assert.equal(/mediation/.test(String(plan.rationale)), true);
+    },
+  },
+  {
+    name: "motif uncertain question should not repeat when asked recently",
+    run: () => {
+      const motifs = [
+        {
+          id: "m_repeat",
+          motif_id: "m_repeat",
+          motif_type: "enable",
+          motifType: "pair",
+          relation: "enable",
+          dependencyClass: "enable",
+          roles: { sources: ["c_src"], target: "c_tgt" },
+          scope: "global",
+          aliases: [],
+          concept_bindings: ["c_src", "c_tgt"],
+          conceptIds: ["c_src", "c_tgt"],
+          anchorConceptId: "c_tgt",
+          title: "A影响B",
+          description: "d",
+          confidence: 0.62,
+          supportEdgeIds: [],
+          supportNodeIds: [],
+          status: "uncertain",
+          causalOperator: "direct_causation",
+          novelty: "new",
+          updatedAt: new Date().toISOString(),
+        },
+      ] as any;
+      const concepts = [
+        { id: "c_src", title: "源概念", kind: "belief", family: "other", nodeIds: [], sourceMsgIds: [] },
+        { id: "c_tgt", title: "目标概念", kind: "belief", family: "other", nodeIds: [], sourceMsgIds: [] },
+      ] as any;
+      const first = planMotifQuestion({
+        motifs,
+        concepts,
+        recentTurns: [],
+        locale: "zh-CN" as any,
+      });
+      const second = planMotifQuestion({
+        motifs,
+        concepts,
+        recentTurns: [{ role: "assistant", content: String(first.question || "") }],
+        locale: "zh-CN" as any,
+      });
+      assert.ok(first.question);
+      assert.equal(second.question, null);
+      assert.equal(/recently_asked/.test(String(second.rationale)), true);
     },
   },
 ];

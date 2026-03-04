@@ -501,6 +501,23 @@ data: {"assistantText":"...","graphPatch":{"ops":[]},"graph":{"id":"65f1...","ve
 10. 持久化 `turns` 与 `conversations.graph`。
 11. 若调用 `PUT /api/conversations/:id/graph` 保存前端改图，后续 turn 会使用这份更新图作为最新真值。
 
+### 9.1 Motif 核心闭环补充（2026-03）
+
+1. 用户编辑 motif 的持久化：
+   - 对用户锁定（`resolvedBy=user`）的 motif，后端会保留用户可编辑字段：
+     `title/description/relation/causalOperator/conceptIds/anchor/status(active|disabled)`。
+   - 对“用户手工创建且仍被当前 concept 结构支持”的 motif，不再直接 `cancelled:not_supported_by_current_graph`。
+2. 状态权限收敛：
+   - 用户侧仅控制 `active/disabled` 与锁定；
+   - `uncertain/deprecated/cancelled` 由系统推断维护，避免 UI 手工改完被系统回滚。
+3. 冲突门控统一：
+   - `POST /turn`、`POST /turn/stream` 与 `PUT /graph`（仅 `requestAdvice=true`）统一执行 conflict gate；
+   - 若存在 unresolved `deprecated` motif，则阻断建议生成并返回 `conflictGate` 负载。
+4. 主动提问升级：
+   - 低置信 motif 按因果类型触发三类提问模板：
+     `direct confirmation` / `counterfactual probing` / `mediation check`；
+   - 与 slot 不确定性提问统一去重，避免近期重复发问。
+
 ---
 
 ### 10. Mongo 集合与索引
