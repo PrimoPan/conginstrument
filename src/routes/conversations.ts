@@ -10,7 +10,19 @@ import { generateAssistantTextNonStreaming } from "../services/chatResponder.js"
 import { buildCognitiveModel } from "../services/cognitiveModel.js";
 import { buildConflictGatePayload } from "../services/motif/conflictGate.js";
 import { buildTravelPlanState, type TravelPlanState } from "../services/travelPlan/state.js";
-import { defaultTravelPlanFileName, renderTravelPlanPdf } from "../services/travelPlan/pdf.js";
+import {
+  defaultTravelPlanFileName,
+  renderPortfolioTravelPlanPdf,
+  renderTravelPlanPdf,
+} from "../services/travelPlan/pdf.js";
+import {
+  buildTaskDetection,
+  buildCognitiveState,
+  buildPortfolioDocumentState,
+  type TaskDetection,
+  type CognitiveState,
+  type PortfolioDocumentState,
+} from "../services/planningState.js";
 import { normalizeLocale, isEnglishLocale, type AppLocale } from "../i18n/locale.js";
 
 export const convRouter = Router();
@@ -110,6 +122,8 @@ async function computeTravelPlanState(params: {
   conversationId: ObjectId;
   userId: ObjectId;
   graph: CDG;
+  concepts?: any[];
+  motifs?: any[];
   previous?: TravelPlanState | null;
   locale: AppLocale;
 }): Promise<TravelPlanState> {
@@ -121,6 +135,9 @@ async function computeTravelPlanState(params: {
   return buildTravelPlanState({
     locale: params.locale,
     graph: params.graph,
+    concepts: Array.isArray(params.concepts) ? params.concepts : [],
+    motifs: Array.isArray(params.motifs) ? params.motifs : [],
+    taskId: String(params.conversationId),
     turns: turns.map((t) => ({
       createdAt: t.createdAt,
       userText: t.userText,
@@ -130,6 +147,90 @@ async function computeTravelPlanState(params: {
   });
 }
 
+type PlanningStateBundle = {
+  taskDetection: TaskDetection;
+  cognitiveState: CognitiveState;
+  portfolioDocumentState: PortfolioDocumentState;
+};
+
+type PersistedConversationSnapshot = PlanningStateBundle & {
+  travelPlanState: TravelPlanState;
+};
+
+async function buildPlanningStateBundle(params: {
+  conversationId: ObjectId;
+  userId: ObjectId;
+  locale: AppLocale;
+  model: ReturnType<typeof buildCognitiveModel>;
+  travelPlanState: TravelPlanState;
+  previousTravelPlan?: TravelPlanState | null;
+}): Promise<PlanningStateBundle> {
+  const convs = await collections.conversations
+    .find({ userId: params.userId })
+    .project({ title: 1, travelPlanState: 1, updatedAt: 1 })
+    .sort({ updatedAt: -1 })
+    .limit(80)
+    .toArray();
+  const conversationRecords = convs.map((c) => ({
+    conversationId: String(c._id),
+    title: String((c as any)?.title || ""),
+    travelPlanState: (c as any)?.travelPlanState || null,
+    updatedAt: (c as any)?.updatedAt,
+  }));
+  const currentId = String(params.conversationId);
+  const idx = conversationRecords.findIndex((x) => x.conversationId === currentId);
+  if (idx >= 0) {
+    conversationRecords[idx] = {
+      ...conversationRecords[idx],
+      travelPlanState: params.travelPlanState,
+      updatedAt: new Date(),
+    };
+  } else {
+    conversationRecords.unshift({
+      conversationId: currentId,
+      title: "",
+      travelPlanState: params.travelPlanState,
+      updatedAt: new Date(),
+    });
+  }
+
+  const currentDestinationScope =
+    (params.travelPlanState as any)?.destination_scope ||
+    params.travelPlanState.destinations ||
+    [];
+  const previousDestinationScope =
+    (params.previousTravelPlan as any)?.destination_scope ||
+    params.previousTravelPlan?.destinations ||
+    [];
+
+  const taskDetection = buildTaskDetection({
+    conversationId: String(params.travelPlanState.task_id || params.conversationId),
+    locale: params.locale,
+    currentDestinations: currentDestinationScope,
+    previousDestinations: previousDestinationScope,
+  });
+
+  const cognitiveState = buildCognitiveState({
+    conversationId: String(params.conversationId),
+    locale: params.locale,
+    model: params.model,
+    travelPlanState: params.travelPlanState,
+    conversations: conversationRecords,
+  });
+
+  const portfolioDocumentState = buildPortfolioDocumentState({
+    userId: String(params.userId),
+    locale: params.locale,
+    conversations: conversationRecords,
+  });
+
+  return {
+    taskDetection,
+    cognitiveState,
+    portfolioDocumentState,
+  };
+}
+
 async function persistConversationModel(params: {
   conversationId: ObjectId;
   userId: ObjectId;
@@ -137,13 +238,23 @@ async function persistConversationModel(params: {
   updatedAt: Date;
   previousTravelPlan?: TravelPlanState | null;
   locale: AppLocale;
-}): Promise<TravelPlanState> {
+}): Promise<PersistedConversationSnapshot> {
   const travelPlanState = await computeTravelPlanState({
     conversationId: params.conversationId,
     userId: params.userId,
     graph: params.model.graph,
+    concepts: params.model.concepts,
+    motifs: params.model.motifs,
     previous: params.previousTravelPlan || null,
     locale: params.locale,
+  });
+  const planning = await buildPlanningStateBundle({
+    conversationId: params.conversationId,
+    userId: params.userId,
+    locale: params.locale,
+    model: params.model,
+    travelPlanState,
+    previousTravelPlan: params.previousTravelPlan || null,
   });
   await collections.conversations.updateOne(
     { _id: params.conversationId, userId: params.userId },
@@ -157,11 +268,17 @@ async function persistConversationModel(params: {
         contexts: params.model.contexts,
         validationStatus: params.model.validationStatus,
         travelPlanState,
+        taskDetection: planning.taskDetection,
+        cognitiveState: planning.cognitiveState,
+        portfolioDocumentState: planning.portfolioDocumentState,
         updatedAt: params.updatedAt,
       },
     }
   );
-  return travelPlanState;
+  return {
+    travelPlanState,
+    ...planning,
+  };
 }
 
 function normalizeReasoningSteps(model: ReturnType<typeof buildCognitiveModel>) {
@@ -266,12 +383,33 @@ convRouter.post("/", async (req: AuthedRequest, res) => {
     validationStatus: "unasked",
     travelPlanState: {
       version: 1,
+      task_id: "temp",
+      plan_version: 1,
       updatedAt: now.toISOString(),
+      last_updated: now.toISOString(),
       summary: isEnglishLocale(locale)
         ? "No travel plan yet. Start chatting to build one."
         : "暂无旅行计划，请先开始对话。",
+      trip_goal_summary: isEnglishLocale(locale)
+        ? "No travel plan yet. Start chatting to build one."
+        : "暂无旅行计划，请先开始对话。",
       destinations: [],
+      destination_scope: [],
       constraints: [],
+      travelers: [isEnglishLocale(locale) ? "TBD" : "待确认"],
+      candidate_options: [],
+      itinerary_outline: [],
+      day_by_day_plan: [],
+      transport_plan: [],
+      stay_plan: [],
+      food_plan: [],
+      risk_notes: [],
+      budget_notes: [],
+      open_questions: [],
+      rationale_refs: [],
+      source_map: {},
+      export_ready_text: "",
+      changelog: [],
       dayPlans: [],
       source: { turnCount: 0 },
     },
@@ -292,12 +430,33 @@ convRouter.post("/", async (req: AuthedRequest, res) => {
         validationStatus: "unasked",
         travelPlanState: {
           version: 1,
+          task_id: conversationId,
+          plan_version: 1,
           updatedAt: now.toISOString(),
+          last_updated: now.toISOString(),
           summary: isEnglishLocale(locale)
             ? "No travel plan yet. Start chatting to build one."
             : "暂无旅行计划，请先开始对话。",
+          trip_goal_summary: isEnglishLocale(locale)
+            ? "No travel plan yet. Start chatting to build one."
+            : "暂无旅行计划，请先开始对话。",
           destinations: [],
+          destination_scope: [],
           constraints: [],
+          travelers: [isEnglishLocale(locale) ? "TBD" : "待确认"],
+          candidate_options: [],
+          itinerary_outline: [],
+          day_by_day_plan: [],
+          transport_plan: [],
+          stay_plan: [],
+          food_plan: [],
+          risk_notes: [],
+          budget_notes: [],
+          open_questions: [],
+          rationale_refs: [],
+          source_map: {},
+          export_ready_text: "",
+          changelog: [],
           dayPlans: [],
           source: { turnCount: 0 },
         },
@@ -317,6 +476,25 @@ convRouter.post("/", async (req: AuthedRequest, res) => {
     baseContexts: (conv as any).contexts || [],
     locale,
   });
+  const travelPlanState = (conv as any).travelPlanState as TravelPlanState;
+  const planning = await buildPlanningStateBundle({
+    conversationId: inserted.insertedId,
+    userId,
+    locale,
+    model,
+    travelPlanState,
+    previousTravelPlan: null,
+  });
+  await collections.conversations.updateOne(
+    { _id: inserted.insertedId, userId },
+    {
+      $set: {
+        taskDetection: planning.taskDetection,
+        cognitiveState: planning.cognitiveState,
+        portfolioDocumentState: planning.portfolioDocumentState,
+      },
+    }
+  );
 
   res.json({
     conversationId,
@@ -324,7 +502,10 @@ convRouter.post("/", async (req: AuthedRequest, res) => {
     locale: normalizeLocale((conv as any).locale),
     systemPrompt: conv.systemPrompt,
     ...modelPayload(model),
-    travelPlanState: (conv as any).travelPlanState || null,
+    travelPlanState,
+    taskDetection: planning.taskDetection,
+    cognitiveState: planning.cognitiveState,
+    portfolioDocumentState: planning.portfolioDocumentState,
   });
 });
 
@@ -348,6 +529,15 @@ convRouter.get("/:id", async (req: AuthedRequest, res) => {
     baseContexts: (conv as any).contexts || [],
     locale,
   });
+  const travelPlanState = (conv as any).travelPlanState as TravelPlanState;
+  const planning = await buildPlanningStateBundle({
+    conversationId: oid,
+    userId,
+    locale,
+    model,
+    travelPlanState,
+    previousTravelPlan: (conv as any).travelPlanState || null,
+  });
 
   res.json({
     conversationId: id,
@@ -355,7 +545,10 @@ convRouter.get("/:id", async (req: AuthedRequest, res) => {
     locale,
     systemPrompt: conv.systemPrompt,
     ...modelPayload(model),
-    travelPlanState: (conv as any).travelPlanState || null,
+    travelPlanState,
+    taskDetection: (conv as any).taskDetection || planning.taskDetection,
+    cognitiveState: (conv as any).cognitiveState || planning.cognitiveState,
+    portfolioDocumentState: (conv as any).portfolioDocumentState || planning.portfolioDocumentState,
   });
 });
 
@@ -416,8 +609,18 @@ convRouter.put("/:id/graph", async (req: AuthedRequest, res) => {
     conversationId: oid,
     userId,
     graph: model.graph,
+    concepts: model.concepts,
+    motifs: model.motifs,
     previous: (conv as any).travelPlanState || null,
     locale,
+  });
+  const planning = await buildPlanningStateBundle({
+    conversationId: oid,
+    userId,
+    locale,
+    model,
+    travelPlanState,
+    previousTravelPlan: (conv as any).travelPlanState || null,
   });
 
   const now = new Date();
@@ -433,6 +636,9 @@ convRouter.put("/:id/graph", async (req: AuthedRequest, res) => {
         contexts: model.contexts,
         validationStatus: model.validationStatus,
         travelPlanState,
+        taskDetection: planning.taskDetection,
+        cognitiveState: planning.cognitiveState,
+        portfolioDocumentState: planning.portfolioDocumentState,
         updatedAt: now,
       },
     }
@@ -479,6 +685,9 @@ convRouter.put("/:id/graph", async (req: AuthedRequest, res) => {
     locale,
     ...modelPayload(model),
     travelPlanState,
+    taskDetection: planning.taskDetection,
+    cognitiveState: planning.cognitiveState,
+    portfolioDocumentState: planning.portfolioDocumentState,
     updatedAt: now,
     assistantText,
     adviceError,
@@ -520,8 +729,18 @@ convRouter.put("/:id/concepts", async (req: AuthedRequest, res) => {
     conversationId: oid,
     userId,
     graph: model.graph,
+    concepts: model.concepts,
+    motifs: model.motifs,
     previous: (conv as any).travelPlanState || null,
     locale,
+  });
+  const planning = await buildPlanningStateBundle({
+    conversationId: oid,
+    userId,
+    locale,
+    model,
+    travelPlanState,
+    previousTravelPlan: (conv as any).travelPlanState || null,
   });
 
   const now = new Date();
@@ -537,6 +756,9 @@ convRouter.put("/:id/concepts", async (req: AuthedRequest, res) => {
         contexts: model.contexts,
         validationStatus: model.validationStatus,
         travelPlanState,
+        taskDetection: planning.taskDetection,
+        cognitiveState: planning.cognitiveState,
+        portfolioDocumentState: planning.portfolioDocumentState,
         updatedAt: now,
       },
     }
@@ -547,6 +769,9 @@ convRouter.put("/:id/concepts", async (req: AuthedRequest, res) => {
     locale,
     ...modelPayload(model),
     travelPlanState,
+    taskDetection: planning.taskDetection,
+    cognitiveState: planning.cognitiveState,
+    portfolioDocumentState: planning.portfolioDocumentState,
     updatedAt: now,
   });
 });
@@ -589,11 +814,8 @@ async function handleTravelPlanPdfExport(req: AuthedRequest, res: any) {
 
     const conv = await collections.conversations.findOne({ _id: oid, userId });
     if (!conv) return res.status(404).json({ error: "conversation not found" });
-
+    const locale = normalizeLocale((conv as any).locale);
     const turns = await loadRecentTurnsForPlan({ conversationId: oid, userId, limit: 240 });
-    if (!turns.length) {
-      return res.status(400).json({ error: "no conversation turns yet, cannot export plan" });
-    }
 
     const graph: CDG = {
       id: String(conv.graph?.id || id),
@@ -601,15 +823,41 @@ async function handleTravelPlanPdfExport(req: AuthedRequest, res: any) {
       nodes: Array.isArray(conv.graph?.nodes) ? conv.graph.nodes : [],
       edges: Array.isArray(conv.graph?.edges) ? conv.graph.edges : [],
     };
-    const travelPlanState = buildTravelPlanState({
-      locale: normalizeLocale((conv as any).locale),
+    const model = buildCognitiveModel({
       graph,
-      turns: turns.map((t) => ({
-        createdAt: t.createdAt,
-        userText: t.userText,
-        assistantText: t.assistantText,
-      })),
-      previous: (conv as any).travelPlanState || null,
+      prevConcepts: conv.concepts || [],
+      baseConcepts: conv.concepts || [],
+      baseMotifs: (conv as any).motifs || [],
+      baseMotifLinks: (conv as any).motifLinks || [],
+      baseContexts: (conv as any).contexts || [],
+      locale,
+    });
+    const travelPlanState =
+      turns.length > 0
+        ? buildTravelPlanState({
+            locale,
+            graph,
+            concepts: model.concepts || [],
+            motifs: model.motifs || [],
+            taskId: String(oid),
+            turns: turns.map((t) => ({
+              createdAt: t.createdAt,
+              userText: t.userText,
+              assistantText: t.assistantText,
+            })),
+            previous: (conv as any).travelPlanState || null,
+          })
+        : ((conv as any).travelPlanState as TravelPlanState | null);
+    if (!travelPlanState) {
+      return res.status(400).json({ error: "no travel plan state yet, cannot export plan" });
+    }
+    const planning = await buildPlanningStateBundle({
+      conversationId: oid,
+      userId,
+      locale,
+      model,
+      travelPlanState,
+      previousTravelPlan: (conv as any).travelPlanState || null,
     });
 
     const now = new Date();
@@ -618,16 +866,27 @@ async function handleTravelPlanPdfExport(req: AuthedRequest, res: any) {
       {
         $set: {
           travelPlanState,
+          taskDetection: planning.taskDetection,
+          cognitiveState: planning.cognitiveState,
+          portfolioDocumentState: planning.portfolioDocumentState,
           updatedAt: now,
         },
       }
     );
 
-    const pdf = await renderTravelPlanPdf({
-      plan: travelPlanState,
-      conversationId: id,
-      locale: normalizeLocale((conv as any).locale),
-    });
+    const pdf =
+      planning.portfolioDocumentState?.trips?.length > 0
+        ? await renderPortfolioTravelPlanPdf({
+            portfolio: planning.portfolioDocumentState,
+            conversationId: id,
+            locale,
+            fallbackPlan: travelPlanState,
+          })
+        : await renderTravelPlanPdf({
+            plan: travelPlanState,
+            conversationId: id,
+            locale,
+          });
     const filename = defaultTravelPlanFileName(id);
     res.setHeader("Content-Type", "application/pdf");
     res.setHeader("Content-Length", String(pdf.length));
@@ -714,7 +973,7 @@ convRouter.post("/:id/turn", async (req: AuthedRequest, res) => {
       graphVersion: preModel.graph.version,
     } as any);
 
-    const travelPlanState = await persistConversationModel({
+    const persisted = await persistConversationModel({
       conversationId: oid,
       userId,
       model: preModel,
@@ -727,7 +986,10 @@ convRouter.post("/:id/turn", async (req: AuthedRequest, res) => {
       assistantText: conflictGate.message,
       graphPatch: blockedPatch,
       ...modelPayload(preModel),
-      travelPlanState,
+      travelPlanState: persisted.travelPlanState,
+      taskDetection: persisted.taskDetection,
+      cognitiveState: persisted.cognitiveState,
+      portfolioDocumentState: persisted.portfolioDocumentState,
       conflictGate,
     });
   }
@@ -765,7 +1027,7 @@ convRouter.post("/:id/turn", async (req: AuthedRequest, res) => {
     graphVersion: model.graph.version,
   } as any);
 
-  const travelPlanState = await persistConversationModel({
+  const persisted = await persistConversationModel({
     conversationId: oid,
     userId,
     model,
@@ -778,7 +1040,10 @@ convRouter.post("/:id/turn", async (req: AuthedRequest, res) => {
     assistantText: out.assistant_text,
     graphPatch: merged.appliedPatch,
     ...modelPayload(model),
-    travelPlanState,
+    travelPlanState: persisted.travelPlanState,
+    taskDetection: persisted.taskDetection,
+    cognitiveState: persisted.cognitiveState,
+    portfolioDocumentState: persisted.portfolioDocumentState,
   });
 });
 
@@ -845,7 +1110,7 @@ convRouter.post("/:id/turn/stream", async (req: AuthedRequest, res) => {
       graphVersion: preModel.graph.version,
     } as any);
 
-    const travelPlanState = await persistConversationModel({
+    const persisted = await persistConversationModel({
       conversationId: oid,
       userId,
       model: preModel,
@@ -866,7 +1131,10 @@ convRouter.post("/:id/turn/stream", async (req: AuthedRequest, res) => {
       assistantText: conflictGate.message,
       graphPatch: blockedPatch,
       ...modelPayload(preModel),
-      travelPlanState,
+      travelPlanState: persisted.travelPlanState,
+      taskDetection: persisted.taskDetection,
+      cognitiveState: persisted.cognitiveState,
+      portfolioDocumentState: persisted.portfolioDocumentState,
       conflictGate,
     });
     return res.end();
@@ -945,7 +1213,7 @@ convRouter.post("/:id/turn/stream", async (req: AuthedRequest, res) => {
       graphVersion: model.graph.version,
     } as any);
 
-    const travelPlanState = await persistConversationModel({
+    const persisted = await persistConversationModel({
       conversationId: oid,
       userId,
       model,
@@ -958,7 +1226,10 @@ convRouter.post("/:id/turn/stream", async (req: AuthedRequest, res) => {
       assistantText: out.assistant_text,
       graphPatch: merged.appliedPatch,
       ...modelPayload(model),
-      travelPlanState,
+      travelPlanState: persisted.travelPlanState,
+      taskDetection: persisted.taskDetection,
+      cognitiveState: persisted.cognitiveState,
+      portfolioDocumentState: persisted.portfolioDocumentState,
     });
 
     clearInterval(pingTimer);
@@ -999,7 +1270,7 @@ convRouter.post("/:id/turn/stream", async (req: AuthedRequest, res) => {
           graphVersion: model2.graph.version,
         } as any);
 
-        const travelPlanState = await persistConversationModel({
+        const persisted = await persistConversationModel({
           conversationId: oid,
           userId,
           model: model2,
@@ -1012,7 +1283,10 @@ convRouter.post("/:id/turn/stream", async (req: AuthedRequest, res) => {
           assistantText: out2.assistant_text,
           graphPatch: merged2.appliedPatch,
           ...modelPayload(model2),
-          travelPlanState,
+          travelPlanState: persisted.travelPlanState,
+          taskDetection: persisted.taskDetection,
+          cognitiveState: persisted.cognitiveState,
+          portfolioDocumentState: persisted.portfolioDocumentState,
         });
 
         clearInterval(pingTimer);

@@ -1,456 +1,241 @@
-# CogInstrument Backend Algorithms (English Spec)
+# CogInstrument Backend Algorithms (Aligned Spec)
 
-Last updated: 2026-02-26
+Last updated: 2026-03-04
 
-This document defines the current production algorithm for Concept–Motif–Context modeling, graph compilation, conflict control, and planning export.
+This document describes the live backend algorithm after strict AGENTS alignment. It is implementation-oriented and only documents behaviors currently implemented in the backend.
 
 ## 1. Scope and Source Modules
 
-Primary implementation files:
+Primary implementation modules:
 
-- `/Users/primopan/UISTcoginstrument/app/conginstrument/src/services/graphUpdater.ts`
-- `/Users/primopan/UISTcoginstrument/app/conginstrument/src/services/graphUpdater/intentSignals.ts`
-- `/Users/primopan/UISTcoginstrument/app/conginstrument/src/services/graphUpdater/slotFunctionCall.ts`
-- `/Users/primopan/UISTcoginstrument/app/conginstrument/src/services/graphUpdater/signalSanitizer.ts`
-- `/Users/primopan/UISTcoginstrument/app/conginstrument/src/services/graphUpdater/slotStateMachine.ts`
-- `/Users/primopan/UISTcoginstrument/app/conginstrument/src/services/graphUpdater/conflictAnalyzer.ts`
-- `/Users/primopan/UISTcoginstrument/app/conginstrument/src/services/graphUpdater/slotGraphCompiler.ts`
+- `/Users/primopan/UISTcoginstrument/app/conginstrument/src/services/cognitiveModel.ts`
+- `/Users/primopan/UISTcoginstrument/app/conginstrument/src/services/concepts.ts`
 - `/Users/primopan/UISTcoginstrument/app/conginstrument/src/services/motif/conceptMotifs.ts`
 - `/Users/primopan/UISTcoginstrument/app/conginstrument/src/services/motif/motifLinks.ts`
 - `/Users/primopan/UISTcoginstrument/app/conginstrument/src/services/motif/reasoningView.ts`
-- `/Users/primopan/UISTcoginstrument/app/conginstrument/src/services/travelPlan/budgetLedger.ts`
+- `/Users/primopan/UISTcoginstrument/app/conginstrument/src/services/contexts.ts`
 - `/Users/primopan/UISTcoginstrument/app/conginstrument/src/services/travelPlan/state.ts`
+- `/Users/primopan/UISTcoginstrument/app/conginstrument/src/services/planningState.ts`
 - `/Users/primopan/UISTcoginstrument/app/conginstrument/src/services/travelPlan/pdf.ts`
-- `/Users/primopan/UISTcoginstrument/app/conginstrument/src/core/graph/patchApply.ts`
-- `/Users/primopan/UISTcoginstrument/app/conginstrument/src/core/graph/topology.ts`
+- `/Users/primopan/UISTcoginstrument/app/conginstrument/src/routes/conversations.ts`
 
-## 2. End-to-End Runtime
+## 2. Runtime Chain (Turn-Level)
 
-For each turn:
+For each user turn, the runtime flow is:
 
-1. Parse deterministic signals + function-call slots.
-2. Sanitize and merge signals.
-3. Build slot-state machine output.
-4. Compile slot graph with stale-node cleanup.
-5. Reconcile concepts from graph.
-6. Reconcile motifs from concept graph.
-7. Reconcile motif links and reasoning view.
-8. Apply patch guard and topology rebalance.
-9. Persist conversation, graph, concepts, motifs, contexts, travel plan state.
+1. Update/normalize graph snapshot and apply guarded patch operations.
+2. Run cognitive chain in fixed order:
+   - `concepts`
+   - `motifs`
+   - `motif links`
+   - `reasoning view`
+   - `contexts`
+3. Gate unresolved hard motif conflicts (`deprecated` + unresolved) before normal generation.
+4. Build/update `travel_plan_state` from graph + turns + current model.
+5. Build/update planning-layer states:
+   - `task_detection`
+   - `cognitive_state`
+   - `portfolio_document_state`
+6. Persist all states in conversation record and stream/return payload.
 
-## 3. Concept–Motif–Context Data Semantics
+The canonical cognitive pipeline entrypoint is `runMotifGenerationChain(...)` in `cognitiveModel.ts`.
 
-## 3.1 Concept
+## 3. Three-Layer Boundary Contract
 
-Atomic cognitive unit:
+### 3.1 User-Grounded Cognitive Layer
+
+Contains only user-grounded evidence:
+
+- Concepts extracted from user evidence.
+- Typed dependencies among those concepts.
+- Motif instances built on those dependencies.
+
+Assistant proposal content must not be written directly as user-grounded concept evidence.
+
+### 3.2 Assistant Planning Layer
+
+Contains assistant-generated and co-authored planning content:
+
+- Itinerary drafts
+- Alternatives
+- Risk notes
+- Transport/stay/food proposals
+- Versioned plan text
+
+All plan text is maintained in `travel_plan_state` continuously, not only at export time.
+
+### 3.3 Portfolio/PDF Layer
+
+Contains cross-task aggregation:
+
+- Multi-trip sections (`trips`)
+- Export order and combined outline
+- Combined export text
+
+Final PDF is generated from `portfolio_document_state` (single-trip is a degenerate case).
+
+## 4. Concept Model
+
+Concepts remain atomic and typed:
 
 - `belief`
 - `constraint`
 - `preference`
-- `factual assertion`
+- `factual_assertion`
 
-Concept extraction pipeline is fixed to three stages:
+Concept extraction and normalization remain deterministic over graph evidence with strict schema adapters. Planning-layer suggestion text is not auto-promoted to concept evidence.
 
-1. **Identification** (system-automatic): detect candidate concept spans from dialogue/graph evidence.
-2. **Disambiguation** (system-automatic): normalize, deduplicate, and map each candidate to exactly one of the four concept classes.
-3. **Validation** (user-facing): trigger explicit confirmation only for low-confidence or conflicting candidates.
+## 5. Motif Generation and Semantics
 
-## 3.2 Motif
+## 5.1 Chain Order
 
-Reusable dependency pattern built from concepts:
+Motif generation always follows:
 
-- `enable` (direct/mediated causation)
-- `constraint` (confounding-style restriction)
-- `determine` (intervention/commitment)
+1. Build pair motifs from typed graph edges.
+2. Build triad motifs from shared anchors.
+3. Aggregate to reusable pattern motifs.
+4. Apply status inference and conflict/redundancy gates.
+5. Enrich motif with causal + reusable schema metadata.
 
-## 3.3 Context
+## 5.2 Typed Dependency Classes
 
-Task situation composed by motif instances and linked concept instantiations.
+Only three dependency classes are used for reusable cognitive dependency:
 
-## 4. Budget Ledger State Machine
+- `enable`
+- `constraint`
+- `determine`
 
-Budget is event-sourced and replayed; no direct scalar overwrite.
+`conflicts_with` is treated as conflict relation, not reusable planning dependency.
 
-Event types:
+## 5.3 Motif Pattern vs Instance
 
-- `budget_set`
-- `budget_adjust`
-- `expense_commit`
-- `expense_refund`
-- `expense_pending`
+The data model explicitly separates:
 
-State variables:
+- Pattern fields: `motif_type_id`, `motif_type_title`, `motif_type_dependency`, role schema, reusable description.
+- Instance fields: `motif_instance_id`, `motif_instance_status`, bound concepts, context, evidence, rationale.
 
-$$
-\text{total}_0 = \varnothing
-$$
+## 5.4 Status Model
 
-$$
-\text{spent}_0 = 0
-$$
-
-$$
-\text{pending}_0 = 0
-$$
-
-Replay update:
-
-$$
-\text{total}_{t+1} =
-\begin{cases}
-e_t.\text{amount}, & e_t=\texttt{budget\_set}\\
-(\text{total}_t \text{ or } 0) + e_t.\text{amount}, & e_t=\texttt{budget\_adjust}\\
-\text{total}_t, & \text{otherwise}
-\end{cases}
-$$
-
-$$
-\text{spent}_{t+1} =
-\begin{cases}
-e_t.\text{amount}, & e_t=\texttt{expense\_commit}\land \texttt{mode}=\texttt{absolute}\\
-\text{spent}_t + e_t.\text{amount}, & e_t=\texttt{expense\_commit}\land \texttt{mode}=\texttt{incremental}\\
-\max(\text{spent}_t - e_t.\text{amount}, 0), & e_t=\texttt{expense\_refund}\\
-\text{spent}_t, & \text{otherwise}
-\end{cases}
-$$
-
-$$
-\text{pending}_{t+1} =
-\begin{cases}
-\text{pending}_t + e_t.\text{amount}, & e_t=\texttt{expense\_pending}\\
-\text{pending}_t, & \text{otherwise}
-\end{cases}
-$$
-
-$$
-\text{remaining} =
-\begin{cases}
-\max(\text{total}-\text{spent}, 0), & \text{if total is defined}\\
-\varnothing, & \text{otherwise}
-\end{cases}
-$$
-
-Hard policy:
-
-- Only user-confirmed spending enters `expense_commit`.
-- Suggested costs stay pending until user commitment.
-- FX conversion records rate snapshot as event evidence.
-
-## 5. Duration and Destination Stability
-
-Consensus duration:
-
-$$
-d^\* = \operatorname{WeightedMedian}
-\left(
-d_{\text{explicit}},
-d_{\text{city-sum}},
-d_{\text{max-segment}}
-\right)
-$$
-
-Conflict guard:
-
-$$
-|D_{\text{canonical}}| < 2 \Rightarrow
-\text{skip } \texttt{duration\_destination\_density}
-$$
-
-Destination canonicalization suppresses noise phrases (safety wording, procedural text, non-place action verbs).
-
-## 6. Motif Reconciliation and Minimality
-
-## 6.1 Motif Generation
-
-Two-stage generation:
-
-1. Pair motifs from concept edges.
-2. Triad motifs from shared anchors.
-3. Aggregate into pattern motifs.
-
-Pattern signature:
-
-$$
-\sigma(m)=
-\texttt{motifType}
-\;|\;
-\texttt{dependencyClass}
-\;|\;
-\texttt{sourceFamilies}
-\rightarrow
-\texttt{anchorFamily}
-$$
-
-## 6.2 Motif Priority
-
-$$
-P(m)=c_m+b_{\text{rel}}(m)+b_{\text{type}}(m)
-$$
-
-Where:
-
-$$
-b_{\text{rel}}=
-\begin{cases}
-0.03 & \text{constraint}\\
-0.02 & \text{determine}\\
-0.01 & \text{enable}\\
-0 & \text{other}
-\end{cases}
-$$
-
-$$
-b_{\text{type}}=
-\begin{cases}
-0.015 & \text{pair}\\
-0 & \text{triad}
-\end{cases}
-$$
-
-## 6.3 Status Inference (5-state model)
-
-States:
+Cognitive status set:
 
 - `active`
 - `uncertain`
 - `deprecated`
-- `disabled`
 - `cancelled`
 
-Status baseline:
+Compatibility handling:
 
-$$
-c_m < 0.7 \Rightarrow \texttt{uncertain}
-$$
+- legacy/UI `disabled` is normalized to `cancelled` in reasoning semantics.
+- `deprecated` is reserved for explicit contradiction-like conflicts.
+- soft pruning reasons are converted to `cancelled`.
 
-$$
-\texttt{relation}=\texttt{conflicts\_with} \Rightarrow \texttt{deprecated}
-$$
+## 5.5 Evidence Boundary in Motif Build
 
-$$
-\text{all related concepts paused} \Rightarrow \texttt{disabled}
-$$
+Assistant-only grounded concepts are excluded or downgraded in motif generation:
 
-Otherwise active, unless user-resolved lock keeps prior decision.
+- assistant-only concept pairs are skipped.
+- motifs with assistant-only grounding become `cancelled` with grounding reason.
 
-## 6.4 Red Conflict Gate (strict)
+## 6. Motif Link Graph and Reasoning
 
-`deprecated` is reserved for real semantic contradiction only.
+## 6.1 Motif Links
 
-For motifs \(m_i, m_j\) sharing anchor:
+Canonical motif link types:
 
-$$
-\text{PotentialConflict}(m_i,m_j)=
-\left[
-\{\texttt{constraint},\texttt{determine}\}\subseteq R
-\;\lor\;
-\{\texttt{constraint},\texttt{enable}\}\subseteq R
-\right]
-$$
-
-$$
-\text{ExplicitConflict}(m_i,m_j)=
-(\text{negation polarity differs})
-\;\lor\;
-(\text{explicit conflict lexicon hit})
-$$
-
-$$
-\neg \text{ExplicitConflict} \Rightarrow
-\text{loser status}=\texttt{cancelled}
-$$
-
-$$
-\text{ExplicitConflict} \Rightarrow
-\text{loser status}=\texttt{deprecated}
-$$
-
-## 6.5 Soft Pruning Policy
-
-Soft reasons must never remain red:
-
-- `redundant_with:*`
-- `subsumed_by:*`
-- `density_pruned:*`
-- `relation_shadowed_by:*`
-
-Mapping rule:
-
-$$
-\texttt{deprecated} \land \texttt{softReason}
-\Rightarrow \texttt{cancelled}
-$$
-
-## 6.6 Active Motif Density Cap
-
-Per anchor concept:
-
-$$
-N_{\text{active}}(a)\le 3
-$$
-
-Overflow motifs are soft-pruned and cancelled.
-
-## 7. Motif Links and Reasoning Graph
-
-Motif link types:
-
+- `precedes`
 - `supports`
-- `depends_on`
-- `conflicts`
+- `conflicts_with`
 - `refines`
 
-The motif reasoning canvas visualizes:
+Link reconciliation rules:
 
-- motif internal structure (concept chain + dependency)
-- motif status changes
-- motif-to-motif structural propagation used by LLM reasoning
+- merge auto links + user links
+- preserve user link intent
+- remap alias motif IDs to canonical IDs
+- cap total links
 
-## 8. Topology Optimization (A* + Tarjan + Adaptive Control)
+## 6.2 Transitive Reduction
 
-## 8.1 A*-style Anchor Assignment
+System-generated non-conflict links are reduced with bounded alternate-path search.
 
-$$
-a^\*=
-\arg\min_{a\in\mathcal{A}}
-\left[
-g(x,a)+h(x,a)
-\right]
-$$
+For candidate edge `(u -> v)`, remove if an alternate path exists with comparable minimum confidence and edge is not user-authored.
 
-Edge travel cost:
+## 6.3 Reasoning Order with SCC Condensation
 
-$$
-\operatorname{travelCost}(e)=
-b_{\text{type}(e)} + 0.35\cdot(1-c_e)
-$$
+Reasoning steps are not naive topological sort only.
 
-$$
-b_{\texttt{determine}}=1.08
-$$
+Algorithm:
 
-$$
-b_{\texttt{enable}}=0.95
-$$
+1. Build motif DAG view (excluding invalid self edges).
+2. Detect SCCs via Tarjan.
+3. Condense SCCs and perform priority-aware DAG ordering.
+4. Rank nodes inside SCC by influence score.
 
-$$
-b_{\texttt{constraint}}=0.88
-$$
+Influence score combines confidence, status, indegree/outdegree, and concept coverage.
 
-Heuristic:
+## 7. Planning State (`travel_plan_state`)
 
-$$
-h(x,a)=
-\left(1-\operatorname{Jaccard}(T_x,T_a)\right)
-\;+\;
-\Delta_{\text{slot}}
-\;+\;
-\Delta_{\text{type}}
-\;+\;
-\Delta_{\text{risk}}
-$$
+Each task maintains a versioned `travel_plan_state` containing:
 
-## 8.2 Adaptive Control
+- scope/duration/travelers
+- candidate options and day-by-day plan
+- transport/stay/food/risk/budget notes
+- open questions and rationale refs
+- `source_map`
+- export-ready text
+- changelog
 
-$$
-\rho=
-\frac{|E|}
-{|V|\cdot\log_2(|V|+1)}
-$$
+Key rules:
 
-$$
-\kappa=
-\frac{|V_{\text{SCC-cycle}}|}{|V|}
-$$
+1. Assistant proposals enter planning layer immediately.
+2. `source_map` defaults to `assistant_proposed`.
+3. Only user-confirmed evidence upgrades item source to `user_confirmed`.
+4. `rationale_refs` prioritizes active motif/concept references.
 
-$$
-\lambda=
-\operatorname{clip}
-\left(
-0.38 + 0.24\tanh(\rho-1)+0.36\kappa,\;
-0,\;1
-\right)
-$$
+## 8. Task Detection and Multi-Task State
 
-Runtime controls:
+`task_detection` evaluates whether current update is:
 
-$$
-\text{maxRootIncoming}=
-\operatorname{clip}
-\left(
-\operatorname{round}(9-4\lambda),\;
-4,\;10
-\right)
-$$
+- same-task refinement
+- likely task switch
 
-$$
-\text{maxAStarSteps}=
-\operatorname{clip}
-\left(
-\operatorname{round}
-\left(
-30+|V|\cdot(0.28+(1-\lambda)\cdot0.35)
-\right),\;
-20,\;96
-\right)
-$$
+Multi-task persistence rules:
 
-$$
-\text{transitiveCutoff}=
-\operatorname{clip}(0.72-0.18\lambda,\;0.48,\;0.90)
-$$
+- old task segments are not overwritten.
+- new task segment gets new task identity/version track.
+- historical segments remain in portfolio trips.
 
-## 8.3 Tarjan SCC Cycle Breaking
+`cognitive_state.tasks` includes current task and historical task fragments used for portfolio continuity.
 
-Cycles are detected with Tarjan SCC (excluding `conflicts_with`).
+## 9. Portfolio and PDF Export
 
-Weakest removable edge per SCC:
+`portfolio_document_state` is the export source of truth:
 
-$$
-\operatorname{keepScore}(e)=
-s_{\text{type}}(e)
- + 0.9\,c_e
- + 0.65\,\overline{i}_e
- + b_{\text{touch}}
- + b_{\text{root}}
- + b_{\text{risk}}
-$$
+- `trips`: per-task sections
+- `export_order`
+- `combined_outline`
+- `combined_export_ready_text`
 
-Edges with lower keep score are removed first until acyclic or iteration limit.
+PDF export behavior:
 
-## 9. PDF Export Strategy
+- prefer portfolio export structure
+- render cover + overview + per-trip sections
+- retain single-trip compatibility when only one section exists
 
-Export sections:
+## 10. Conflict Gate
 
-1. Summary
-2. Executable itinerary (day-by-day)
-3. Budget ledger trace
-4. Key constraints
-5. Evidence appendix
+Response generation is blocked when unresolved hard conflicts remain:
 
-Deduplication:
+- unresolved `deprecated` motifs trigger gate payload
+- users are asked to keep/cancel before plan advice generation continues
 
-$$
-\text{drop paragraph } p_i
-\iff
-\operatorname{hash}(p_i)\in H_{\text{seen}}
-$$
+## 11. Regression Baseline
 
-Confirmation-prompt suppression excludes repeated system clarification templates from final narrative.
+The backend must pass at least:
 
-## 10. Regression Requirements (must pass)
+- `npm run test:motif-pipeline`
+- `npm run test:prd-realignment`
+- `npm run test:motif-compression`
+- `npm run test:graph-regression`
 
-Minimum non-regression set:
-
-1. Budget delta replay stability (e.g., \(5000+5000=10000\)).
-2. Spent and remaining budgets stay ledger-consistent.
-3. Single destination never triggers destination-density conflict.
-4. Duplicate semantic motifs do not appear as red+green contradiction.
-5. Soft-pruned motifs become `cancelled`, not `deprecated`.
-6. Active motifs per anchor remain capped.
-
-## 11. Known Next Steps
-
-1. Stronger motif-level intervention simulation (`do(X)` probes before commitment).
-2. Better motif scope control (global vs local context application).
-3. Cross-domain ontology calibration for non-travel tasks.
+Plus build/compat checks for planning and PDF export paths.

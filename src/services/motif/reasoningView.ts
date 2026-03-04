@@ -155,6 +155,156 @@ function roleLabel(role: MotifReasoningStepRole, locale?: AppLocale): string {
   return t(locale, "独立", "isolated");
 }
 
+function influenceScore(params: {
+  node: MotifReasoningNode;
+  indeg: number;
+  outdeg: number;
+}): number {
+  const statusBoost = statusRank(params.node.status) * 0.06;
+  const confidenceBoost = clamp01(params.node.confidence, 0.72);
+  const topologyBoost = Math.min(0.2, Math.max(0, params.outdeg) * 0.02 + Math.max(0, params.indeg) * 0.01);
+  const conceptBoost = Math.min(0.08, (params.node.conceptIds || []).length * 0.01);
+  return confidenceBoost + statusBoost + topologyBoost + conceptBoost;
+}
+
+function tarjanScc(params: {
+  nodeIds: string[];
+  adjacency: Map<string, string[]>;
+}): { components: string[][]; componentIndexByNodeId: Map<string, number> } {
+  const indexByNode = new Map<string, number>();
+  const lowLinkByNode = new Map<string, number>();
+  const onStack = new Set<string>();
+  const stack: string[] = [];
+  const components: string[][] = [];
+  let index = 0;
+
+  const strongConnect = (nodeId: string) => {
+    indexByNode.set(nodeId, index);
+    lowLinkByNode.set(nodeId, index);
+    index += 1;
+    stack.push(nodeId);
+    onStack.add(nodeId);
+
+    for (const to of params.adjacency.get(nodeId) || []) {
+      if (!indexByNode.has(to)) {
+        strongConnect(to);
+        lowLinkByNode.set(
+          nodeId,
+          Math.min(lowLinkByNode.get(nodeId) || 0, lowLinkByNode.get(to) || 0)
+        );
+      } else if (onStack.has(to)) {
+        lowLinkByNode.set(
+          nodeId,
+          Math.min(lowLinkByNode.get(nodeId) || 0, indexByNode.get(to) || 0)
+        );
+      }
+    }
+
+    if ((lowLinkByNode.get(nodeId) || 0) === (indexByNode.get(nodeId) || 0)) {
+      const component: string[] = [];
+      while (stack.length) {
+        const popped = stack.pop() as string;
+        onStack.delete(popped);
+        component.push(popped);
+        if (popped === nodeId) break;
+      }
+      components.push(component);
+    }
+  };
+
+  for (const nodeId of params.nodeIds || []) {
+    if (!indexByNode.has(nodeId)) strongConnect(nodeId);
+  }
+
+  const componentIndexByNodeId = new Map<string, number>();
+  components.forEach((component, idx) => {
+    component.forEach((nodeId) => componentIndexByNodeId.set(nodeId, idx));
+  });
+
+  return { components, componentIndexByNodeId };
+}
+
+function orderNodesByCondensedDag(params: {
+  nodeIds: string[];
+  adjacency: Map<string, string[]>;
+  nodePriorityById: Map<string, number>;
+}): string[] {
+  const scc = tarjanScc({
+    nodeIds: params.nodeIds,
+    adjacency: params.adjacency,
+  });
+  if (!scc.components.length) return params.nodeIds.slice();
+
+  const componentOut = new Map<number, Set<number>>();
+  const componentIndeg = new Map<number, number>();
+  const componentPriority = new Map<number, number>();
+
+  scc.components.forEach((component, cid) => {
+    componentOut.set(cid, new Set<number>());
+    componentIndeg.set(cid, 0);
+    const score =
+      component.reduce((sum, nodeId) => sum + (params.nodePriorityById.get(nodeId) || 0), 0) /
+      Math.max(1, component.length);
+    componentPriority.set(cid, score);
+  });
+
+  for (const from of params.nodeIds) {
+    const fromCid = scc.componentIndexByNodeId.get(from);
+    if (fromCid == null) continue;
+    for (const to of params.adjacency.get(from) || []) {
+      const toCid = scc.componentIndexByNodeId.get(to);
+      if (toCid == null || toCid === fromCid) continue;
+      const outs = componentOut.get(fromCid)!;
+      if (outs.has(toCid)) continue;
+      outs.add(toCid);
+      componentIndeg.set(toCid, (componentIndeg.get(toCid) || 0) + 1);
+    }
+  }
+
+  const queue = Array.from(componentIndeg.entries())
+    .filter(([, deg]) => deg <= 0)
+    .map(([cid]) => cid)
+    .sort((a, b) => {
+      const pa = componentPriority.get(a) || 0;
+      const pb = componentPriority.get(b) || 0;
+      if (pb !== pa) return pb - pa;
+      return a - b;
+    });
+
+  const orderedComponents: number[] = [];
+  const seen = new Set<number>();
+  while (queue.length) {
+    const cid = queue.shift() as number;
+    if (seen.has(cid)) continue;
+    seen.add(cid);
+    orderedComponents.push(cid);
+    for (const toCid of componentOut.get(cid) || []) {
+      componentIndeg.set(toCid, (componentIndeg.get(toCid) || 0) - 1);
+      if ((componentIndeg.get(toCid) || 0) <= 0) queue.push(toCid);
+    }
+    queue.sort((a, b) => {
+      const pa = componentPriority.get(a) || 0;
+      const pb = componentPriority.get(b) || 0;
+      if (pb !== pa) return pb - pa;
+      return a - b;
+    });
+  }
+
+  for (let cid = 0; cid < scc.components.length; cid += 1) {
+    if (seen.has(cid)) continue;
+    orderedComponents.push(cid);
+  }
+
+  const ordered: string[] = [];
+  for (const cid of orderedComponents) {
+    const component = (scc.components[cid] || [])
+      .slice()
+      .sort((a, b) => (params.nodePriorityById.get(b) || 0) - (params.nodePriorityById.get(a) || 0) || a.localeCompare(b));
+    ordered.push(...component);
+  }
+  return ordered;
+}
+
 function buildReasoningSteps(params: {
   nodes: MotifReasoningNode[];
   edges: MotifReasoningEdge[];
@@ -179,34 +329,22 @@ function buildReasoningSteps(params: {
     outgoing.get(e.from)!.push(e.to);
   }
 
-  const remainingIndeg = new Map(indeg);
-  const queue = (params.nodes || [])
-    .filter((n) => (remainingIndeg.get(n.id) || 0) <= 0)
-    .sort((a, b) => statusRank(b.status) - statusRank(a.status) || b.confidence - a.confidence || a.id.localeCompare(b.id))
-    .map((n) => n.id);
-
-  const orderedIds: string[] = [];
-  const visited = new Set<string>();
-  while (queue.length) {
-    const cur = queue.shift() as string;
-    if (visited.has(cur)) continue;
-    visited.add(cur);
-    orderedIds.push(cur);
-    for (const nxt of outgoing.get(cur) || []) {
-      remainingIndeg.set(nxt, (remainingIndeg.get(nxt) || 0) - 1);
-      if ((remainingIndeg.get(nxt) || 0) <= 0) queue.push(nxt);
-    }
-    queue.sort((a, b) => {
-      const na = nodeById.get(a)!;
-      const nb = nodeById.get(b)!;
-      return statusRank(nb.status) - statusRank(na.status) || nb.confidence - na.confidence || a.localeCompare(b);
-    });
-  }
-
+  const nodePriorityById = new Map<string, number>();
   for (const n of params.nodes || []) {
-    if (visited.has(n.id)) continue;
-    orderedIds.push(n.id);
+    nodePriorityById.set(
+      n.id,
+      influenceScore({
+        node: n,
+        indeg: indeg.get(n.id) || 0,
+        outdeg: outdeg.get(n.id) || 0,
+      })
+    );
   }
+  const orderedIds = orderNodesByCondensedDag({
+    nodeIds: (params.nodes || []).map((n) => n.id),
+    adjacency: outgoing,
+    nodePriorityById,
+  });
 
   return orderedIds
     .map((nodeId, idx) => {

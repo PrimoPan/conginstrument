@@ -178,6 +178,96 @@ function buildAutoLinks(motifs: ConceptMotif[]): MotifLink[] {
   return out;
 }
 
+function canParticipateInTransitivePath(link: MotifLink): boolean {
+  if (link.type === "conflicts_with") return false;
+  if (link.fromMotifId === link.toMotifId) return false;
+  return true;
+}
+
+function buildAdjacency(links: MotifLink[]): Map<string, Array<{ to: string; key: string; confidence: number }>> {
+  const out = new Map<string, Array<{ to: string; key: string; confidence: number }>>();
+  for (const l of links || []) {
+    if (!canParticipateInTransitivePath(l)) continue;
+    const from = cleanText(l.fromMotifId, 120);
+    const to = cleanText(l.toMotifId, 120);
+    if (!from || !to || from === to) continue;
+    if (!out.has(from)) out.set(from, []);
+    out.get(from)!.push({
+      to,
+      key: linkKey(from, to),
+      confidence: clamp01(l.confidence, 0.72),
+    });
+  }
+  return out;
+}
+
+function findAlternatePathStrength(params: {
+  from: string;
+  to: string;
+  ignoreKey: string;
+  adjacency: Map<string, Array<{ to: string; key: string; confidence: number }>>;
+  maxDepth?: number;
+}): number {
+  const maxDepth = Math.max(2, Math.min(params.maxDepth || 6, 10));
+  const queue: Array<{ node: string; depth: number; minConfidence: number }> = [
+    { node: params.from, depth: 0, minConfidence: 1 },
+  ];
+  const bestSeen = new Map<string, number>();
+  bestSeen.set(params.from, 1);
+  let bestTo = 0;
+
+  while (queue.length) {
+    const cur = queue.shift()!;
+    if (cur.depth >= maxDepth) continue;
+    const outs = params.adjacency.get(cur.node) || [];
+    for (const edge of outs) {
+      if (edge.key === params.ignoreKey) continue;
+      const nextDepth = cur.depth + 1;
+      const nextMin = Math.min(cur.minConfidence, edge.confidence);
+      if (edge.to === params.to) {
+        if (nextDepth >= 2 && nextMin > bestTo) bestTo = nextMin;
+        continue;
+      }
+      const seen = bestSeen.get(edge.to) || 0;
+      if (nextMin <= seen) continue;
+      bestSeen.set(edge.to, nextMin);
+      queue.push({ node: edge.to, depth: nextDepth, minConfidence: nextMin });
+    }
+  }
+  return bestTo;
+}
+
+function transitiveReduceSystemLinks(links: MotifLink[]): MotifLink[] {
+  const all = (links || []).slice();
+  if (all.length < 3) return all;
+  const adjacency = buildAdjacency(all);
+  const removable = new Set<string>();
+
+  const sorted = all
+    .slice()
+    .sort((a, b) => clamp01(a.confidence, 0.72) - clamp01(b.confidence, 0.72) || a.id.localeCompare(b.id));
+
+  for (const edge of sorted) {
+    if (edge.source === "user") continue;
+    if (!canParticipateInTransitivePath(edge)) continue;
+    const from = cleanText(edge.fromMotifId, 120);
+    const to = cleanText(edge.toMotifId, 120);
+    const key = linkKey(from, to);
+    const alt = findAlternatePathStrength({
+      from,
+      to,
+      ignoreKey: key,
+      adjacency,
+      maxDepth: 6,
+    });
+    const selfConfidence = clamp01(edge.confidence, 0.72);
+    if (alt >= selfConfidence - 0.02) removable.add(edge.id);
+  }
+
+  if (!removable.size) return all;
+  return all.filter((l) => !removable.has(l.id));
+}
+
 export function reconcileMotifLinks(params: {
   motifs: ConceptMotif[];
   baseLinks?: any;
@@ -234,7 +324,16 @@ export function reconcileMotifLinks(params: {
     });
   }
 
-  return Array.from(byKey.values())
+  const mergedLinks = Array.from(byKey.values())
+    .sort(
+      (a, b) =>
+        (a.source === "user" ? 1 : 0) - (b.source === "user" ? 1 : 0) ||
+        b.confidence - a.confidence ||
+        a.id.localeCompare(b.id)
+    )
+    .slice(0, 220);
+
+  return transitiveReduceSystemLinks(mergedLinks)
     .sort(
       (a, b) =>
         (a.source === "user" ? 1 : 0) - (b.source === "user" ? 1 : 0) ||

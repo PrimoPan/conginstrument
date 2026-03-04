@@ -59,20 +59,25 @@ function stableId(input: string): string {
 function motifStatusRank(s: MotifLifecycleStatus): number {
   if (s === "deprecated") return 4;
   if (s === "uncertain") return 3;
-  if (s === "disabled") return 2;
+  if (s === "disabled") return 1;
   if (s === "active") return 1;
   return 0;
+}
+
+function canonicalMotifStatus(s: MotifLifecycleStatus): "active" | "uncertain" | "deprecated" | "cancelled" {
+  if (s === "active" || s === "uncertain" || s === "deprecated" || s === "cancelled") return s;
+  return "cancelled";
 }
 
 function contextStatusFromMotifs(motifs: ConceptMotif[], paused: boolean): ContextStatus {
   if (paused) return "disabled";
   if (!motifs.length) return "active";
-  const statuses = motifs.map((m) => m.status);
+  const statuses = motifs.map((m) => canonicalMotifStatus(m.status));
   if (statuses.some((s) => s === "deprecated")) return "conflicted";
   if (statuses.some((s) => s === "uncertain")) return "uncertain";
   const activeCount = statuses.filter((s) => s === "active").length;
-  const disabledCount = statuses.filter((s) => s === "disabled").length;
-  if (!activeCount && disabledCount > 0) return "disabled";
+  const cancelledCount = statuses.filter((s) => s === "cancelled").length;
+  if (!activeCount && cancelledCount > 0) return "disabled";
   return "active";
 }
 

@@ -58,8 +58,8 @@ export function buildConflictGateMessage(items: ConflictGateItem[], locale?: App
     ),
     t(
       locale,
-      "请在中间 Motif 面板对冲突项选择“确认保留”或“确认停用”，然后点击“保存并生成建议”。",
-      'In the Motif panel, choose "keep" or "disable" for each conflict, then click "Save and generate advice".'
+      "请在中间 Motif 面板对冲突项选择“确认保留”或“确认取消”，然后点击“保存并生成建议”。",
+      'In the Motif panel, choose "keep" or "cancel" for each conflict, then click "Save and generate advice".'
     ),
     t(locale, "待确认冲突：", "Pending conflicts:"),
     lines || "- (none)",

@@ -39,6 +39,16 @@ export type CognitiveModel = {
   contexts: ContextItem[];
 };
 
+export type MotifGenerationChain = {
+  graph: CDG;
+  concepts: ConceptItem[];
+  motifs: ConceptMotif[];
+  motifLinks: MotifLink[];
+  motifReasoningView: MotifReasoningView;
+  contexts: ContextItem[];
+  validationStatus: ConceptValidationStatus;
+};
+
 function normalizeGraphConceptSchema(graph: CDG): CDG {
   const now = new Date().toISOString();
   const nodes = (graph.nodes || []).map((n) => {
@@ -116,7 +126,7 @@ function syncGraphConflictsWithMotifs(graph: CDG, motifs: ConceptMotif[]): CDG {
   };
 }
 
-export function buildCognitiveModel(params: {
+export function runMotifGenerationChain(params: {
   graph: CDG;
   prevConcepts?: any;
   baseConcepts?: any;
@@ -124,7 +134,7 @@ export function buildCognitiveModel(params: {
   baseMotifLinks?: any;
   baseContexts?: any;
   locale?: AppLocale;
-}): CognitiveModel {
+}): MotifGenerationChain {
   const normalizedGraph = normalizeGraphConceptSchema(params.graph);
 
   // PRD pipeline:
@@ -193,16 +203,37 @@ export function buildCognitiveModel(params: {
 
   return {
     graph: graphWithConceptState,
-    conceptGraph: graphWithConceptState,
-    motifGraph: {
-      motifs,
-      motifLinks,
-    },
     concepts,
     validationStatus,
     motifs,
     motifLinks,
     motifReasoningView,
     contexts,
+  };
+}
+
+export function buildCognitiveModel(params: {
+  graph: CDG;
+  prevConcepts?: any;
+  baseConcepts?: any;
+  baseMotifs?: any;
+  baseMotifLinks?: any;
+  baseContexts?: any;
+  locale?: AppLocale;
+}): CognitiveModel {
+  const chain = runMotifGenerationChain(params);
+  return {
+    graph: chain.graph,
+    conceptGraph: chain.graph,
+    motifGraph: {
+      motifs: chain.motifs,
+      motifLinks: chain.motifLinks,
+    },
+    concepts: chain.concepts,
+    validationStatus: chain.validationStatus,
+    motifs: chain.motifs,
+    motifLinks: chain.motifLinks,
+    motifReasoningView: chain.motifReasoningView,
+    contexts: chain.contexts,
   };
 }

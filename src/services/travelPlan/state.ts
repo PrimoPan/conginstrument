@@ -5,6 +5,8 @@ import {
   type BudgetEvent,
 } from "./budgetLedger.js";
 import { isEnglishLocale, type AppLocale } from "../../i18n/locale.js";
+import type { ConceptItem } from "../concepts.js";
+import type { ConceptMotif } from "../motif/conceptMotifs.js";
 
 export type TravelPlanDay = {
   day: number;
@@ -21,6 +23,43 @@ export type TravelPlanAssistantPlan = {
   narrative: string;
   parser: "day_header" | "date_header" | "mixed" | "fallback";
   dayPlans: TravelPlanDay[];
+};
+
+export type TravelPlanSourceLabel =
+  | "assistant_proposed"
+  | "user_confirmed"
+  | "co_authored"
+  | "transferred_pattern_based";
+
+export type TravelPlanSourceMap = Record<
+  string,
+  {
+    source_label: TravelPlanSourceLabel;
+    notes?: string;
+  }
+>;
+
+export type TravelPlanChangelogItem = {
+  plan_version: number;
+  changed_at: string;
+  action: "plan_initialized" | "plan_updated" | "plan_unchanged";
+  summary: string;
+  source_label: TravelPlanSourceLabel;
+};
+
+export type TravelPlanTaskHistorySegment = {
+  task_id: string;
+  trip_title: string;
+  destination_scope: string[];
+  travelers: string[];
+  duration?: string;
+  trip_goal_summary: string;
+  export_ready_text: string;
+  open_questions: string[];
+  rationale_refs: string[];
+  source_map: TravelPlanSourceMap;
+  status: "archived" | "active";
+  closed_at: string;
 };
 
 export type TravelPlanState = {
@@ -52,6 +91,27 @@ export type TravelPlanState = {
     source: "dialogue" | "budget" | "graph";
   }>;
   dayPlans: TravelPlanDay[];
+  task_id: string;
+  plan_version: number;
+  destination_scope: string[];
+  travel_dates_or_duration?: string;
+  travelers: string[];
+  trip_goal_summary: string;
+  candidate_options: string[];
+  itinerary_outline: string[];
+  day_by_day_plan: TravelPlanDay[];
+  transport_plan: string[];
+  stay_plan: string[];
+  food_plan: string[];
+  risk_notes: string[];
+  budget_notes: string[];
+  open_questions: string[];
+  rationale_refs: string[];
+  source_map: TravelPlanSourceMap;
+  export_ready_text: string;
+  changelog: TravelPlanChangelogItem[];
+  task_history?: TravelPlanTaskHistorySegment[];
+  last_updated: string;
   source: {
     turnCount: number;
     lastTurnAt?: string;
@@ -724,15 +784,446 @@ function buildExportNarrative(plan: {
   return dedupeParagraphs(plan.summary || "", 800);
 }
 
+function extractTravelers(graph: CDG, locale?: AppLocale): string[] {
+  const out: string[] = [];
+  const push = (raw: any) => {
+    const x = clean(raw, 48);
+    if (!x) return;
+    if (!out.includes(x)) out.push(x);
+  };
+
+  const peopleNode = nodeByKey(graph, "slot:people");
+  const peopleBody = statementBodyByPrefixes(String(peopleNode?.statement || ""), ["出行人数", "同行人", "Travelers", "Traveler"]);
+  if (peopleBody) push(peopleBody);
+
+  for (const n of graph.nodes || []) {
+    if (n.status === "rejected") continue;
+    const key = clean((n as any).key, 80).toLowerCase();
+    const statement = clean(n.statement, 140);
+    if (!statement) continue;
+    if (key.startsWith("slot:people")) {
+      push(statementBodyByPrefixes(statement, ["出行人数", "同行人", "Travelers", "Traveler"]) || statement);
+      continue;
+    }
+    const explicit = statement.match(/^(?:出行人数|同行人|Travelers?|Traveler)[:：]\s*(.+)$/i);
+    if (explicit?.[1]) push(explicit[1]);
+  }
+
+  if (out.length) return out.slice(0, 6);
+  return [t(locale, "待确认", "TBD")];
+}
+
+function buildTravelDatesOrDuration(totalDays: number | undefined, dateAnchor: { startMonth: number; startDay: number } | null, locale?: AppLocale): string | undefined {
+  if (dateAnchor && totalDays && totalDays > 0) {
+    const start = new Date(2026, dateAnchor.startMonth - 1, dateAnchor.startDay);
+    const end = new Date(start.getTime());
+    end.setDate(start.getDate() + Math.max(0, totalDays - 1));
+    return `${start.getMonth() + 1}/${start.getDate()} - ${end.getMonth() + 1}/${end.getDate()} (${totalDays}${isEnglishLocale(locale) ? "d" : "天"})`;
+  }
+  if (totalDays && totalDays > 0) {
+    return isEnglishLocale(locale) ? `${totalDays} days` : `${totalDays}天`;
+  }
+  return undefined;
+}
+
+function collectItineraryOutline(dayPlans: TravelPlanDay[], locale?: AppLocale): string[] {
+  return (dayPlans || [])
+    .slice(0, 20)
+    .map((day) => {
+      const datePart = day.dateLabel ? `${day.dateLabel}${day.city ? ` · ${day.city}` : ""}` : day.city || "";
+      const head = isEnglishLocale(locale) ? `Day ${day.day}` : `第${day.day}天`;
+      const body = clean(day.title, 80) || t(locale, "行程安排", "Plan");
+      return clean(`${head}${datePart ? ` (${datePart})` : ""}: ${body}`, 180);
+    })
+    .filter(Boolean);
+}
+
+function collectCandidateOptions(params: {
+  destinations: string[];
+  dayPlans: TravelPlanDay[];
+  cityDurations: Array<{ city: string; days: number }>;
+  locale?: AppLocale;
+}): string[] {
+  const out: string[] = [];
+  const push = (x: string) => {
+    const v = clean(x, 180);
+    if (!v || out.includes(v)) return;
+    out.push(v);
+  };
+
+  for (const city of params.destinations || []) {
+    push(isEnglishLocale(params.locale) ? `Destination option: ${city}` : `目的地选项：${city}`);
+  }
+  for (const seg of params.cityDurations || []) {
+    push(
+      isEnglishLocale(params.locale)
+        ? `Stay duration option: ${seg.city} ${seg.days} days`
+        : `停留时长选项：${seg.city} ${seg.days}天`
+    );
+  }
+  for (const day of params.dayPlans || []) {
+    const firstItem = clean(day.items?.[0], 80);
+    if (!firstItem) continue;
+    push(
+      isEnglishLocale(params.locale)
+        ? `Day ${day.day} option: ${firstItem}`
+        : `第${day.day}天候选：${firstItem}`
+    );
+    if (out.length >= 16) break;
+  }
+  return out.slice(0, 16);
+}
+
+function collectPlanLinesByKeyword(params: {
+  constraints: string[];
+  dayPlans: TravelPlanDay[];
+  locale?: AppLocale;
+  keywordType: "transport" | "stay" | "food" | "risk";
+}): string[] {
+  const out: string[] = [];
+  const patterns: Record<string, RegExp> = {
+    transport: /(交通|地铁|公交|高铁|火车|飞行|航班|接驳|打车|步行|transit|transport|flight|train|bus|metro|taxi|walk)/i,
+    stay: /(住宿|酒店|民宿|旅馆|酒店区|hotel|stay|accommodation|hostel)/i,
+    food: /(餐|美食|晚餐|午餐|早餐|小吃|餐厅|food|dinner|lunch|breakfast|restaurant)/i,
+    risk: /(风险|安全|天气|暴雨|高温|拥挤|夜间|诈骗|risk|safety|weather|storm|heat|crowd)/i,
+  };
+  const p = patterns[params.keywordType];
+  const push = (raw: string) => {
+    const v = clean(raw, 180);
+    if (!v || out.includes(v)) return;
+    out.push(v);
+  };
+  for (const c of params.constraints || []) {
+    if (p.test(c)) push(c);
+  }
+  for (const day of params.dayPlans || []) {
+    for (const item of day.items || []) {
+      if (!p.test(item)) continue;
+      const line = isEnglishLocale(params.locale)
+        ? `Day ${day.day}: ${clean(item, 120)}`
+        : `第${day.day}天：${clean(item, 120)}`;
+      push(line);
+      if (out.length >= 10) return out;
+    }
+  }
+  return out;
+}
+
+function extractOpenQuestions(turns: Array<{ assistantText: string }>, locale?: AppLocale): string[] {
+  const out: string[] = [];
+  const push = (raw: string) => {
+    const v = clean(raw, 180);
+    if (!v || out.includes(v)) return;
+    out.push(v);
+  };
+
+  const latestAssistant = clean(turns[turns.length - 1]?.assistantText || "", 1200);
+  if (latestAssistant) {
+    const qParts = latestAssistant
+      .split(/(?<=[？?。.!])/)
+      .map((x) => clean(x, 180))
+      .filter((x) => /[？?]$/.test(x) || /请确认|是否|请问|confirm|whether|do you|would you|could you/i.test(x));
+    for (const q of qParts) push(q);
+  }
+
+  if (!out.length) {
+    push(
+      t(
+        locale,
+        "请确认当前按天安排是否需要增减活动密度。",
+        "Please confirm whether the day-by-day pacing needs adjustment."
+      )
+    );
+  }
+  return out.slice(0, 8);
+}
+
+function buildBudgetNotes(params: {
+  locale?: AppLocale;
+  total?: number;
+  spent?: number;
+  remaining?: number;
+  pending?: number;
+}): string[] {
+  const out: string[] = [];
+  if (params.total != null) {
+    out.push(isEnglishLocale(params.locale) ? `Total budget: ${params.total} CNY` : `总预算：${params.total}元`);
+  }
+  if (params.spent != null) {
+    out.push(isEnglishLocale(params.locale) ? `Spent: ${params.spent} CNY` : `已花预算：${params.spent}元`);
+  }
+  if (params.remaining != null) {
+    out.push(isEnglishLocale(params.locale) ? `Remaining: ${params.remaining} CNY` : `剩余预算：${params.remaining}元`);
+  }
+  if (params.pending != null && params.pending > 0) {
+    out.push(isEnglishLocale(params.locale) ? `Pending: ${params.pending} CNY` : `待确认支出：${params.pending}元`);
+  }
+  return out.slice(0, 8);
+}
+
+function normalizeForMatch(input: any): string {
+  return clean(input, 260)
+    .toLowerCase()
+    .replace(/[\s,.;:!?，。；：！？/\\\-()（）\[\]{}"'`]+/g, "");
+}
+
+function conceptSourceTokens(concept: ConceptItem | undefined): string[] {
+  return dedupe((Array.isArray(concept?.sourceMsgIds) ? concept!.sourceMsgIds : []).map((x) => clean(x, 80).toLowerCase()));
+}
+
+function isAssistantToken(token: string): boolean {
+  const tkn = clean(token, 80).toLowerCase();
+  if (!tkn) return false;
+  return tkn.includes("assistant") || tkn.startsWith("msg_a") || tkn.startsWith("a_") || tkn === "latest_assistant";
+}
+
+function isUserToken(token: string): boolean {
+  const tkn = clean(token, 80).toLowerCase();
+  if (!tkn || isAssistantToken(tkn)) return false;
+  return (
+    tkn.includes("user") ||
+    tkn.startsWith("msg_u") ||
+    tkn.startsWith("u_") ||
+    tkn.startsWith("turn_u") ||
+    tkn.startsWith("turn_") ||
+    tkn === "latest_user" ||
+    tkn.startsWith("manual_")
+  );
+}
+
+function conceptIsUserConfirmed(concept: ConceptItem | undefined): boolean {
+  if (!concept) return false;
+  const validationStatus = clean((concept as any).validationStatus, 24).toLowerCase();
+  if (validationStatus !== "resolved") return false;
+  const tokens = conceptSourceTokens(concept);
+  if (!tokens.length) return false;
+  const hasUser = tokens.some((x) => isUserToken(x));
+  const hasAssistant = tokens.some((x) => isAssistantToken(x));
+  return hasUser && !(!hasUser && hasAssistant);
+}
+
+function userConfirmationLexicon(concepts: ConceptItem[]): string[] {
+  const out: string[] = [];
+  const push = (raw: string) => {
+    const value = normalizeForMatch(raw);
+    if (!value || value.length < 2 || out.includes(value)) return;
+    out.push(value);
+  };
+  for (const concept of concepts || []) {
+    if (!conceptIsUserConfirmed(concept)) continue;
+    push(clean(concept.title, 120));
+    push(clean(concept.description, 120));
+    for (const term of concept.evidenceTerms || []) push(clean(term, 80));
+  }
+  return out.slice(0, 120);
+}
+
+function isTextUserConfirmed(text: string, lexicon: string[]): boolean {
+  const normalized = normalizeForMatch(text);
+  if (!normalized || !lexicon.length) return false;
+  return lexicon.some((token) => token.length >= 2 && normalized.includes(token));
+}
+
+function buildRationaleRefs(params: {
+  concepts: ConceptItem[];
+  motifs: ConceptMotif[];
+  destinations: string[];
+  constraints: string[];
+}): string[] {
+  const out: string[] = [];
+  const push = (raw: string) => {
+    const x = clean(raw, 120);
+    if (!x || out.includes(x)) return;
+    out.push(x);
+  };
+
+  const activeMotifs = (params.motifs || [])
+    .filter((m) => clean((m as any)?.status, 24).toLowerCase() === "active")
+    .sort((a, b) => (Number(b.confidence) || 0) - (Number(a.confidence) || 0));
+  for (const motif of activeMotifs.slice(0, 10)) {
+    if (motif.id) push(`motif:${motif.id}`);
+    const patternId = clean((motif as any).motif_type_id, 120);
+    if (patternId) push(`motif_type:${patternId}`);
+  }
+
+  const topConcepts = (params.concepts || [])
+    .filter((c) => conceptIsUserConfirmed(c))
+    .sort((a, b) => (Number((b as any).score) || 0) - (Number((a as any).score) || 0));
+  for (const concept of topConcepts.slice(0, 10)) {
+    if (concept.id) push(`concept:${concept.id}`);
+  }
+
+  for (const d of params.destinations || []) push(`destination:${clean(d, 40)}`);
+  for (const c of params.constraints || []) push(`constraint:${clean(c, 80)}`);
+  return out.slice(0, 24);
+}
+
+function buildSourceMap(params: {
+  tripGoalSummary: string;
+  destinationScope: string[];
+  travelDatesOrDuration?: string;
+  travelers: string[];
+  dayPlans: TravelPlanDay[];
+  candidateOptions: string[];
+  itineraryOutline: string[];
+  transportPlan: string[];
+  stayPlan: string[];
+  foodPlan: string[];
+  riskNotes: string[];
+  budgetNotes: string[];
+  rationaleRefs: string[];
+  exportReadyText: string;
+  userConfirmedLexicon: string[];
+  openQuestions: string[];
+}): TravelPlanSourceMap {
+  const map: TravelPlanSourceMap = {};
+  const mark = (key: string, source: TravelPlanSourceLabel, text?: string) => {
+    const shouldUpgradeToUserConfirmed =
+      source === "assistant_proposed" && !!text && isTextUserConfirmed(text, params.userConfirmedLexicon);
+    map[key] = { source_label: source };
+    if (shouldUpgradeToUserConfirmed) {
+      map[key] = {
+        source_label: "user_confirmed",
+        notes: "matched_user_confirmation_evidence",
+      };
+    }
+  };
+  mark("trip_goal_summary", "assistant_proposed", params.tripGoalSummary);
+  mark("destination_scope", "assistant_proposed", params.destinationScope.join(" "));
+  mark("travel_dates_or_duration", "assistant_proposed", params.travelDatesOrDuration || "");
+  mark("travelers", "assistant_proposed", params.travelers.join(" "));
+  params.dayPlans.forEach((day, idx) =>
+    mark(`day_by_day_plan.${idx + 1}`, "assistant_proposed", `${day.title} ${(day.items || []).join(" ")}`)
+  );
+  params.candidateOptions.forEach((x, idx) => mark(`candidate_options.${idx + 1}`, "assistant_proposed", x));
+  params.itineraryOutline.forEach((x, idx) => mark(`itinerary_outline.${idx + 1}`, "assistant_proposed", x));
+  params.transportPlan.forEach((x, idx) => mark(`transport_plan.${idx + 1}`, "assistant_proposed", x));
+  params.stayPlan.forEach((x, idx) => mark(`stay_plan.${idx + 1}`, "assistant_proposed", x));
+  params.foodPlan.forEach((x, idx) => mark(`food_plan.${idx + 1}`, "assistant_proposed", x));
+  params.riskNotes.forEach((x, idx) => mark(`risk_notes.${idx + 1}`, "assistant_proposed", x));
+  params.budgetNotes.forEach((x, idx) => mark(`budget_notes.${idx + 1}`, "assistant_proposed", x));
+  params.rationaleRefs.forEach((x, idx) => mark(`rationale_refs.${idx + 1}`, "transferred_pattern_based", x));
+  params.openQuestions.forEach((x, idx) => mark(`open_questions.${idx + 1}`, "co_authored", x));
+  mark("export_ready_text", "assistant_proposed", params.exportReadyText);
+  return map;
+}
+
+function stablePlanSignature(params: {
+  summary: string;
+  destinations: string[];
+  totalDays?: number;
+  budget?: { totalCny?: number; spentCny?: number; remainingCny?: number; pendingCny?: number };
+  dayPlans: TravelPlanDay[];
+  exportNarrative: string;
+  constraints: string[];
+}): string {
+  return JSON.stringify({
+    summary: clean(params.summary, 260),
+    destinations: params.destinations.map((x) => clean(x, 48)),
+    totalDays: params.totalDays || 0,
+    budget: params.budget || {},
+    dayPlans: (params.dayPlans || []).map((d) => ({
+      day: d.day,
+      city: clean(d.city, 48),
+      dateLabel: clean(d.dateLabel, 32),
+      title: clean(d.title, 80),
+      items: (d.items || []).map((x) => clean(x, 100)),
+    })),
+    exportNarrative: clean(params.exportNarrative, 1800),
+    constraints: (params.constraints || []).map((x) => clean(x, 120)),
+  });
+}
+
+function buildPlanChangelog(params: {
+  locale?: AppLocale;
+  previous?: TravelPlanState | null;
+  planVersion: number;
+  changed: boolean;
+  resetTrack?: boolean;
+}): TravelPlanChangelogItem[] {
+  const prev = Array.isArray(params.previous?.changelog) ? params.previous?.changelog || [] : [];
+  if (!params.previous || params.resetTrack) {
+    return [
+      {
+        plan_version: params.planVersion,
+        changed_at: new Date().toISOString(),
+        action: "plan_initialized",
+        summary: t(params.locale, "初始化旅行计划文本快照。", "Initialized travel plan snapshot."),
+        source_label: "assistant_proposed",
+      },
+    ];
+  }
+  if (!params.changed) return prev.slice(-20);
+  return [
+    ...prev.slice(-19),
+    {
+      plan_version: params.planVersion,
+      changed_at: new Date().toISOString(),
+      action: "plan_updated",
+      summary: t(params.locale, "根据最新对话与图状态更新行程。", "Updated itinerary from latest dialogue and graph state."),
+      source_label: "co_authored",
+    },
+  ];
+}
+
+function detectDestinationTaskSwitch(current: string[], previous: string[]): boolean {
+  const cur = dedupe((current || []).map((x) => clean(x, 60).toLowerCase()).filter(Boolean));
+  const prev = dedupe((previous || []).map((x) => clean(x, 60).toLowerCase()).filter(Boolean));
+  if (!cur.length || !prev.length) return false;
+  const overlap = cur.some((x) => prev.includes(x));
+  return !overlap;
+}
+
+function historySegmentFromPlan(params: {
+  plan: TravelPlanState;
+  closedAt: string;
+  locale?: AppLocale;
+}): TravelPlanTaskHistorySegment | null {
+  const plan = params.plan;
+  const taskId = clean(plan.task_id, 80);
+  if (!taskId) return null;
+  const destinationScope = dedupe(
+    ((plan.destination_scope || plan.destinations || []) as string[]).map((x) => clean(x, 40)).filter(Boolean)
+  ).slice(0, 12);
+  const tripGoal = clean(plan.trip_goal_summary || plan.summary, 220);
+  const exportReady = clean(plan.export_ready_text || plan.exportNarrative || plan.summary, 12000);
+  if (!tripGoal && !exportReady && !destinationScope.length) return null;
+  return {
+    task_id: taskId,
+    trip_title: clean(destinationScope[0] || tripGoal || t(params.locale, "未命名行程", "Untitled trip"), 120),
+    destination_scope: destinationScope,
+    travelers: dedupe((plan.travelers || []).map((x) => clean(x, 40)).filter(Boolean)).slice(0, 8),
+    duration:
+      clean(plan.travel_dates_or_duration, 80) ||
+      (Number(plan.totalDays) > 0
+        ? isEnglishLocale(params.locale)
+          ? `${plan.totalDays} days`
+          : `${plan.totalDays}天`
+        : undefined),
+    trip_goal_summary: tripGoal,
+    export_ready_text: exportReady,
+    open_questions: dedupe((plan.open_questions || []).map((x) => clean(x, 180)).filter(Boolean)).slice(0, 10),
+    rationale_refs: dedupe((plan.rationale_refs || []).map((x) => clean(x, 120)).filter(Boolean)).slice(0, 24),
+    source_map: (plan.source_map || {}) as TravelPlanSourceMap,
+    status: "archived",
+    closed_at: params.closedAt,
+  };
+}
+
 export function buildTravelPlanState(params: {
   locale?: AppLocale;
   graph: CDG;
   turns: Array<{ createdAt?: Date | string; userText: string; assistantText: string }>;
+  concepts?: ConceptItem[];
+  motifs?: ConceptMotif[];
+  taskId?: string;
   previous?: TravelPlanState | null;
 }): TravelPlanState {
   const locale = params.locale;
   const graph = params.graph;
   const turns = params.turns || [];
+  const concepts = Array.isArray(params.concepts) ? params.concepts : [];
+  const motifs = Array.isArray(params.motifs) ? params.motifs : [];
 
   const goalNode = (graph.nodes || [])
     .filter(
@@ -943,13 +1434,173 @@ export function buildTravelPlanState(params: {
     dayPlans,
     assistantPlan,
   });
+  const baseTaskId = clean(params.taskId || graph.id || "task_default", 80) || "task_default";
+  const previousDestinations = dedupe(
+    ((params.previous?.destination_scope || params.previous?.destinations || []) as string[])
+      .map((x) => clean(x, 40))
+      .filter(Boolean)
+  );
+  const isTaskSwitch =
+    !!params.previous &&
+    Number(params.previous?.source?.turnCount || 0) > 0 &&
+    detectDestinationTaskSwitch(destinations, previousDestinations);
+  const taskId = isTaskSwitch
+    ? `${baseTaskId}:task_${Math.max(1, Number(params.previous?.plan_version || params.previous?.version || 0) + 1)}`
+    : clean(params.previous?.task_id, 80) || baseTaskId;
+  const travelDatesOrDuration = buildTravelDatesOrDuration(totalDays, dateAnchor, locale);
+  const travelers = extractTravelers(graph, locale);
+  const candidateOptions = collectCandidateOptions({
+    destinations,
+    dayPlans,
+    cityDurations,
+    locale,
+  });
+  const itineraryOutline = collectItineraryOutline(dayPlans, locale);
+  const transportPlan = collectPlanLinesByKeyword({
+    constraints: normalizedConstraints,
+    dayPlans,
+    locale,
+    keywordType: "transport",
+  });
+  const stayPlan = collectPlanLinesByKeyword({
+    constraints: normalizedConstraints,
+    dayPlans,
+    locale,
+    keywordType: "stay",
+  });
+  const foodPlan = collectPlanLinesByKeyword({
+    constraints: normalizedConstraints,
+    dayPlans,
+    locale,
+    keywordType: "food",
+  });
+  const riskNotes = collectPlanLinesByKeyword({
+    constraints: normalizedConstraints,
+    dayPlans,
+    locale,
+    keywordType: "risk",
+  });
+  const budgetNotes = buildBudgetNotes({
+    locale,
+    total: effectiveBudget.totalCny,
+    spent: effectiveBudget.spentCny,
+    remaining: effectiveBudget.remainingCny,
+    pending: effectiveBudget.pendingCny,
+  });
+  const openQuestions = extractOpenQuestions(turns, locale);
+  const rationaleRefs = buildRationaleRefs({
+    concepts,
+    motifs,
+    destinations,
+    constraints: normalizedConstraints,
+  });
+
+  const currentSignature = stablePlanSignature({
+    summary,
+    destinations,
+    totalDays,
+    budget: effectiveBudget,
+    dayPlans,
+    exportNarrative,
+    constraints: normalizedConstraints,
+  });
+  const previousSignature = params.previous
+    ? stablePlanSignature({
+        summary: params.previous.summary || "",
+        destinations: (params.previous.destination_scope || params.previous.destinations || []) as string[],
+        totalDays: params.previous.totalDays,
+        budget: params.previous.budget,
+        dayPlans: (params.previous.day_by_day_plan || params.previous.dayPlans || []) as TravelPlanDay[],
+        exportNarrative: params.previous.exportNarrative || "",
+        constraints: params.previous.constraints || [],
+      })
+    : "";
+  const changed = !params.previous || currentSignature !== previousSignature;
+  const previousPlanVersion = Number((params.previous as any)?.plan_version) || Number(params.previous?.version) || 1;
+  const planVersion = isTaskSwitch ? 1 : params.previous ? previousPlanVersion + (changed ? 1 : 0) : 1;
+  const changelog = buildPlanChangelog({
+    locale,
+    previous: params.previous || null,
+    planVersion,
+    changed,
+    resetTrack: isTaskSwitch,
+  });
+  const exportReadyText = clean(
+    [
+      summary,
+      travelDatesOrDuration ? `${isEnglishLocale(locale) ? "Duration" : "时长"}: ${travelDatesOrDuration}` : "",
+      destinations.length
+        ? isEnglishLocale(locale)
+          ? `Destinations: ${destinations.join(" / ")}`
+          : `目的地：${destinations.join("、")}`
+        : "",
+      exportNarrative,
+    ]
+      .filter(Boolean)
+      .join("\n\n"),
+    12000
+  );
+  const userLexicon = userConfirmationLexicon(concepts);
+  const sourceMap = buildSourceMap({
+    tripGoalSummary: summary,
+    destinationScope: destinations,
+    travelDatesOrDuration,
+    travelers,
+    dayPlans,
+    candidateOptions,
+    itineraryOutline,
+    transportPlan,
+    stayPlan,
+    foodPlan,
+    riskNotes,
+    budgetNotes,
+    rationaleRefs,
+    exportReadyText,
+    userConfirmedLexicon: userLexicon,
+    openQuestions,
+  });
+
+  const previousHistory = Array.isArray(params.previous?.task_history) ? params.previous?.task_history || [] : [];
+  const nextTaskHistory: TravelPlanTaskHistorySegment[] = previousHistory.slice(-15);
+  if (isTaskSwitch && params.previous) {
+    const archived = historySegmentFromPlan({
+      plan: params.previous,
+      closedAt: new Date().toISOString(),
+      locale,
+    });
+    if (archived) {
+      const exists = nextTaskHistory.some((x) => clean(x.task_id, 80) === clean(archived.task_id, 80));
+      if (!exists) nextTaskHistory.push(archived);
+    }
+  }
 
   return {
     version: Math.max(1, Number(graph.version) || 1),
+    task_id: taskId,
+    plan_version: planVersion,
     updatedAt: new Date().toISOString(),
+    last_updated: new Date().toISOString(),
     summary,
+    trip_goal_summary: summary,
     destinations,
+    destination_scope: destinations,
     constraints: normalizedConstraints,
+    travel_dates_or_duration: travelDatesOrDuration,
+    travelers,
+    candidate_options: candidateOptions,
+    itinerary_outline: itineraryOutline,
+    day_by_day_plan: dayPlans,
+    transport_plan: transportPlan,
+    stay_plan: stayPlan,
+    food_plan: foodPlan,
+    risk_notes: riskNotes,
+    budget_notes: budgetNotes,
+    open_questions: openQuestions,
+    rationale_refs: rationaleRefs,
+    source_map: sourceMap,
+    export_ready_text: exportReadyText,
+    changelog,
+    task_history: nextTaskHistory.length ? nextTaskHistory.slice(-16) : undefined,
     totalDays,
     budget:
       effectiveBudget.totalCny != null ||

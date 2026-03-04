@@ -435,8 +435,8 @@ run("user-resolved motif edits should persist relation/structure/status", () => 
     relation: "determine",
     dependencyClass: "determine",
     causalOperator: "intervention",
-    status: "disabled",
-    statusReason: "user_disabled",
+    status: "cancelled",
+    statusReason: "user_cancelled",
     resolved: true,
     resolvedBy: "user",
     resolvedAt: new Date().toISOString(),
@@ -458,7 +458,7 @@ run("user-resolved motif edits should persist relation/structure/status", () => 
   assert.ok(persisted);
   assert.equal(persisted?.title, "用户改写标题");
   assert.equal(persisted?.relation, "determine");
-  assert.equal(persisted?.status, "disabled");
+  assert.equal(persisted?.status, "cancelled");
   assert.equal(persisted?.resolvedBy, "user");
 });
 

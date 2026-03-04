@@ -3,7 +3,8 @@ import type { ConceptItem } from "../concepts.js";
 import { isEnglishLocale, type AppLocale } from "../../i18n/locale.js";
 
 export type ConceptMotifType = "pair" | "triad";
-export type MotifLifecycleStatus = "active" | "uncertain" | "deprecated" | "disabled" | "cancelled";
+export type MotifInstanceStatus = "active" | "uncertain" | "deprecated" | "cancelled";
+export type MotifLifecycleStatus = MotifInstanceStatus | "disabled";
 export type MotifChangeState = "new" | "updated" | "unchanged";
 export type MotifCausalOperator =
   | "direct_causation"
@@ -13,10 +14,27 @@ export type MotifCausalOperator =
   | "contradiction";
 
 export type SemanticMotifType = "enable" | "constraint" | "determine";
+export type MotifDependencyType = SemanticMotifType;
 
 export type MotifRoles = {
   sources: string[];
   target: string;
+};
+
+export type MotifTypeRoleSchema = {
+  drivers: string[];
+  target: string[];
+};
+
+export type MotifConceptBinding = {
+  drivers: string[];
+  target: string[];
+};
+
+export type MotifEvidenceItem = {
+  quote: string;
+  source?: string;
+  conceptId?: string;
 };
 
 export type ConceptMotif = {
@@ -57,6 +75,17 @@ export type ConceptMotif = {
   updatedAt: string;
   reuseClass?: "reusable" | "context_specific";
   reuseReason?: string;
+  motif_type_id?: string;
+  motif_type_title?: string;
+  motif_type_dependency?: MotifDependencyType[];
+  motif_type_role_schema?: MotifTypeRoleSchema;
+  motif_type_reusable_description?: string;
+  motif_instance_id?: string;
+  motif_instance_status?: MotifInstanceStatus;
+  context?: string;
+  bound_concepts?: MotifConceptBinding;
+  evidence?: MotifEvidenceItem[];
+  rationale?: string;
 };
 
 const MAX_ACTIVE_MOTIFS_PER_ANCHOR = 3;
@@ -87,6 +116,15 @@ function uniq(arr: string[], max = 80): string[] {
   return out;
 }
 
+function appendReason(base: string | undefined, extra: string): string {
+  const b = cleanText(base, 180);
+  const e = cleanText(extra, 120);
+  if (!e) return b;
+  if (!b) return e;
+  if (b.includes(e)) return b;
+  return cleanText(`${b};${e}`, 180);
+}
+
 function stableId(input: string): string {
   const safe = cleanText(input, 240)
     .toLowerCase()
@@ -94,6 +132,29 @@ function stableId(input: string): string {
     .replace(/_+/g, "_")
     .replace(/^_+|_+$/g, "");
   return `m_${safe.slice(0, 120) || "motif"}`;
+}
+
+function stableMotifTypeId(input: string): string {
+  const safe = cleanText(input, 240)
+    .toLowerCase()
+    .replace(/[^a-z0-9_\-:>+]/g, "_")
+    .replace(/_+/g, "_")
+    .replace(/^_+|_+$/g, "");
+  return `mt_${safe.slice(0, 120) || "motif_type"}`;
+}
+
+function normalizeMotifInstanceStatus(raw: any, fallback: MotifInstanceStatus = "active"): MotifInstanceStatus {
+  const s = cleanText(raw, 24).toLowerCase();
+  if (s === "active" || s === "uncertain" || s === "deprecated" || s === "cancelled") return s;
+  if (s === "disabled") return "cancelled";
+  return fallback;
+}
+
+function normalizeMotifLifecycleStatus(raw: any, fallback: MotifLifecycleStatus = "active"): MotifLifecycleStatus {
+  const s = cleanText(raw, 24).toLowerCase();
+  if (s === "disabled") return "cancelled";
+  if (s === "active" || s === "uncertain" || s === "deprecated" || s === "cancelled") return s;
+  return fallback;
 }
 
 function t(locale: AppLocale | undefined, zh: string, en: string): string {
@@ -223,6 +284,10 @@ function applyMotifReuseClassification(motif: ConceptMotif, conceptById: Map<str
       ...motif,
       reuseClass: "reusable",
       reuseReason: undefined,
+      motif_instance_status: normalizeMotifInstanceStatus(
+        motif.motif_instance_status || motif.status,
+        "active"
+      ),
     };
   }
   const reason = cleanText(info.reuseReason, 120) || "non_reusable";
@@ -238,6 +303,7 @@ function applyMotifReuseClassification(motif: ConceptMotif, conceptById: Map<str
     reuseClass: "context_specific",
     reuseReason: reason,
     status: "cancelled",
+    motif_instance_status: "cancelled",
     statusReason,
     resolved: true,
     resolvedBy: motif.resolvedBy || "system",
@@ -303,6 +369,59 @@ function canonicalConceptFamily(c: ConceptItem | undefined): string {
   if (key === "slot:people") return "people";
   if (key === "slot:goal") return "goal";
   return cleanText(c?.family, 40) || "other";
+}
+
+type ConceptGroundingClass = "user" | "assistant_only" | "unknown";
+
+function conceptSourceTokens(c: ConceptItem | undefined): string[] {
+  return uniq(
+    (Array.isArray(c?.sourceMsgIds) ? c!.sourceMsgIds : []).map((x: any) => cleanText(x, 80).toLowerCase()),
+    20
+  );
+}
+
+function isAssistantSourceToken(token: string): boolean {
+  const tkn = cleanText(token, 80).toLowerCase();
+  if (!tkn) return false;
+  return tkn.includes("assistant") || tkn.startsWith("a_") || tkn.startsWith("msg_a");
+}
+
+function isUserSourceToken(token: string): boolean {
+  const tkn = cleanText(token, 80).toLowerCase();
+  if (!tkn) return false;
+  if (isAssistantSourceToken(tkn)) return false;
+  return (
+    tkn.includes("user") ||
+    tkn.startsWith("u_") ||
+    tkn.startsWith("msg_u") ||
+    tkn.startsWith("turn_u") ||
+    tkn.startsWith("manual_") ||
+    tkn === "latest_user"
+  );
+}
+
+function conceptGroundingClass(c: ConceptItem | undefined): ConceptGroundingClass {
+  const tokens = conceptSourceTokens(c);
+  if (!tokens.length) return "unknown";
+  const hasAssistant = tokens.some((x) => isAssistantSourceToken(x));
+  const hasUser = tokens.some((x) => isUserSourceToken(x)) || tokens.some((x) => !isAssistantSourceToken(x));
+  if (hasAssistant && !hasUser) return "assistant_only";
+  return "user";
+}
+
+function motifGroundingClass(conceptIds: string[], conceptById: Map<string, ConceptItem>): "user_grounded" | "mixed" | "unknown" {
+  let userCount = 0;
+  let assistantOnlyCount = 0;
+  let unknownCount = 0;
+  for (const cid of conceptIds || []) {
+    const cls = conceptGroundingClass(conceptById.get(cid));
+    if (cls === "user") userCount += 1;
+    if (cls === "assistant_only") assistantOnlyCount += 1;
+    if (cls === "unknown") unknownCount += 1;
+  }
+  if (assistantOnlyCount > 0 && userCount <= 0) return "unknown";
+  if (assistantOnlyCount > 0 || unknownCount > 0) return "mixed";
+  return "user_grounded";
 }
 
 function sourceSignatureToken(c: ConceptItem | undefined): string {
@@ -387,6 +506,120 @@ function causalFormula(m: ConceptMotif, conceptById: Map<string, ConceptItem>): 
   return `${a} x ${target}`;
 }
 
+function motifDependencyTypes(dep: EdgeType): MotifDependencyType[] {
+  if (dep === "constraint" || dep === "determine" || dep === "enable") return [dep];
+  return ["constraint"];
+}
+
+function motifTypeRoleSchema(m: ConceptMotif, conceptById: Map<string, ConceptItem>): MotifTypeRoleSchema {
+  const driverFamilies = uniq(
+    motifSourceIds(m)
+      .map((id) => canonicalConceptFamily(conceptById.get(id)))
+      .filter(Boolean),
+    6
+  );
+  const targetFamilies = uniq([canonicalConceptFamily(conceptById.get(m.anchorConceptId))].filter(Boolean), 2);
+  return {
+    drivers: driverFamilies.length ? driverFamilies : ["driver"],
+    target: targetFamilies.length ? targetFamilies : ["target"],
+  };
+}
+
+function motifTypeTitle(m: ConceptMotif, conceptById: Map<string, ConceptItem>, locale?: AppLocale): string {
+  const dep = motifDependencyClass(m);
+  const schema = motifTypeRoleSchema(m, conceptById);
+  const drivers = schema.drivers.map((x) => familyLabel(x as any, locale)).join(" + ");
+  const target = schema.target.map((x) => familyLabel(x as any, locale)).join(" + ");
+  if (drivers && target) return cleanText(`${drivers} ${relationLabel(dep, locale)} ${target}`, 160);
+  return cleanText(m.title, 160) || cleanText(m.templateKey, 160) || "MotifType";
+}
+
+function motifTypeReusableDescription(
+  m: ConceptMotif,
+  conceptById: Map<string, ConceptItem>,
+  locale?: AppLocale
+): string {
+  const dep = motifDependencyClass(m);
+  const schema = motifTypeRoleSchema(m, conceptById);
+  const drivers = schema.drivers.map((x) => familyLabel(x as any, locale)).join(" + ") || t(locale, "驱动概念", "driver concepts");
+  const target = schema.target.map((x) => familyLabel(x as any, locale)).join(" + ") || t(locale, "目标概念", "target concept");
+  return cleanText(
+    t(
+      locale,
+      `可复用依赖模板：当 ${drivers} 发生变化时，通常会对 ${target} 形成 ${relationLabel(dep, locale)} 关系。`,
+      `Reusable dependency schema: when ${drivers} change, they tend to ${relationLabel(dep, locale)} ${target}.`
+    ),
+    220
+  );
+}
+
+function motifEvidenceFromConcepts(conceptIds: string[], conceptById: Map<string, ConceptItem>): MotifEvidenceItem[] {
+  const out: MotifEvidenceItem[] = [];
+  const seen = new Set<string>();
+  for (const cid of conceptIds || []) {
+    const c = conceptById.get(cid);
+    if (!c) continue;
+    const quote = cleanText((c.evidenceTerms || [])[0] || c.title, 90);
+    if (!quote || seen.has(quote)) continue;
+    seen.add(quote);
+    out.push({
+      quote,
+      source: cleanText((c.sourceMsgIds || [])[0], 80) || undefined,
+      conceptId: cid,
+    });
+    if (out.length >= 8) break;
+  }
+  return out;
+}
+
+function motifContext(
+  m: ConceptMotif,
+  conceptById: Map<string, ConceptItem>,
+  scope: string,
+  locale?: AppLocale
+): string {
+  const dep = motifDependencyClass(m);
+  const destinations = uniq(
+    (m.conceptIds || [])
+      .map((cid) => conceptById.get(cid))
+      .filter(Boolean)
+      .filter((c) => canonicalConceptFamily(c) === "destination")
+      .map((c) => cleanText(c!.title, 40).replace(/^目的地[:：]\s*/i, "")),
+    2
+  );
+  const stage =
+    dep === "constraint"
+      ? t(locale, "风险过滤阶段", "risk-filtering stage")
+      : dep === "determine"
+      ? t(locale, "决策锁定阶段", "decision-commitment stage")
+      : dep === "enable"
+      ? t(locale, "可行性展开阶段", "feasibility-enabling stage")
+      : t(locale, "冲突澄清阶段", "conflict-clarification stage");
+  if (destinations.length) return cleanText(`${destinations.join(" / ")} / ${stage}`, 120);
+  if (scope && scope !== "global") return cleanText(`${scope} / ${stage}`, 120);
+  return cleanText(t(locale, `当前任务 / ${stage}`, `current task / ${stage}`), 120);
+}
+
+function motifRationale(
+  m: ConceptMotif,
+  conceptById: Map<string, ConceptItem>,
+  dep: EdgeType,
+  locale?: AppLocale
+): string {
+  const sourceFamilies = sourceFamiliesForPattern(m, conceptById).map((x) => familyLabel(x as any, locale)).join(" + ");
+  const targetFamily = familyLabel(canonicalConceptFamily(conceptById.get(m.anchorConceptId)) as any, locale);
+  return cleanText(
+    t(
+      locale,
+      `该实例将 ${sourceFamilies || "驱动概念"} 与 ${targetFamily} 的 ${relationLabel(dep, locale)} 关系显式化，用于后续推理复用。`,
+      `This instance makes the ${relationLabel(dep, locale)} relation explicit from ${
+        sourceFamilies || "driver concepts"
+      } to ${targetFamily} for downstream reusable reasoning.`
+    ),
+    220
+  );
+}
+
 function withCausalSemantics(
   m: ConceptMotif,
   conceptById: Map<string, ConceptItem>,
@@ -411,10 +644,46 @@ function withCausalSemantics(
     (dep === "constraint" && providedOp === "confounding") ||
     (dep === "determine" && providedOp === "intervention") ||
     (dep === "conflicts_with" && providedOp === "contradiction");
-  const guardedStatus = opCompatible ? m.status : "uncertain";
-  const guardedReason = opCompatible
-    ? m.statusReason
-    : cleanText(`${m.statusReason || ""};semantic_mapping_guard`, 180).replace(/^;/, "");
+  let guardedStatus: MotifLifecycleStatus = normalizeMotifLifecycleStatus(opCompatible ? m.status : "uncertain");
+  let guardedReason = opCompatible
+    ? cleanText(m.statusReason, 180)
+    : appendReason(cleanText(m.statusReason, 180), "semantic_mapping_guard");
+
+  const grounding = motifGroundingClass(conceptIds, conceptById);
+  const hasAssistantOnly = conceptIds.some((cid) => conceptGroundingClass(conceptById.get(cid)) === "assistant_only");
+  if (hasAssistantOnly) {
+    guardedStatus = "cancelled";
+    guardedReason = appendReason(guardedReason, "assistant_only_concept_grounding");
+  } else if (grounding !== "user_grounded") {
+    guardedReason = appendReason(guardedReason, `grounding_${grounding}`);
+  }
+
+  const motifTypeSignature = motifPatternSignature(
+    {
+      ...m,
+      relation: dep,
+      dependencyClass: dep,
+      conceptIds,
+      anchorConceptId,
+    },
+    conceptById
+  );
+  const motifTypeId = cleanText((m as any)?.motif_type_id, 140) || stableMotifTypeId(`pattern:${motifTypeSignature}`);
+  const roleSchema = motifTypeRoleSchema(
+    {
+      ...m,
+      relation: dep,
+      dependencyClass: dep,
+      conceptIds,
+      anchorConceptId,
+    },
+    conceptById
+  );
+
+  const motifInstanceStatus = normalizeMotifInstanceStatus((m as any)?.motif_instance_status || guardedStatus);
+  const motifEvidence = motifEvidenceFromConcepts(conceptIds, conceptById);
+  const context = cleanText((m as any)?.context, 120) || motifContext(m, conceptById, scope, locale);
+
   return {
     ...m,
     motif_id: cleanText((m as any)?.motif_id, 120) || m.id,
@@ -438,6 +707,22 @@ function withCausalSemantics(
     description:
       cleanText(m.description, 220) ||
       cleanText(`${relationTheoryHint(dep, m.motifType, locale)} · ${causalFormula(m, conceptById)}`, 220),
+    motif_type_id: motifTypeId,
+    motif_type_title: cleanText((m as any)?.motif_type_title, 160) || motifTypeTitle(m, conceptById, locale),
+    motif_type_dependency: motifDependencyTypes(dep),
+    motif_type_role_schema: roleSchema,
+    motif_type_reusable_description:
+      cleanText((m as any)?.motif_type_reusable_description, 220) ||
+      motifTypeReusableDescription(m, conceptById, locale),
+    motif_instance_id: cleanText((m as any)?.motif_instance_id, 140) || cleanText((m as any)?.motif_id, 140) || m.id,
+    motif_instance_status: motifInstanceStatus,
+    context,
+    bound_concepts: {
+      drivers: sourceIds,
+      target: anchorConceptId ? [anchorConceptId] : [],
+    },
+    evidence: motifEvidence.length ? motifEvidence : undefined,
+    rationale: cleanText((m as any)?.rationale, 220) || motifRationale(m, conceptById, dep, locale),
   };
 }
 
@@ -617,6 +902,26 @@ function buildNodeToConcepts(concepts: ConceptItem[]): Map<string, string[]> {
   return out;
 }
 
+function shouldSkipPairByGrounding(fromConcept: ConceptItem, toConcept: ConceptItem): boolean {
+  const fromGrounding = conceptGroundingClass(fromConcept);
+  const toGrounding = conceptGroundingClass(toConcept);
+  return fromGrounding === "assistant_only" || toGrounding === "assistant_only";
+}
+
+function shouldSkipPairAsNonExplanatory(fromConcept: ConceptItem, toConcept: ConceptItem): boolean {
+  const fromKey = conceptSemanticKey(fromConcept);
+  const toKey = conceptSemanticKey(toConcept);
+  const fromTokens = semanticTokens(`${fromConcept.title} ${fromConcept.description}`);
+  const toTokens = semanticTokens(`${toConcept.title} ${toConcept.description}`);
+  const sim = tokenJaccard(fromTokens, toTokens);
+  if (!!fromKey && !!toKey && fromKey === toKey && sim >= 0.95) return true;
+
+  const fromFamily = canonicalConceptFamily(fromConcept);
+  const toFamily = canonicalConceptFamily(toConcept);
+  if (fromFamily !== toFamily) return false;
+  return sim >= 0.86;
+}
+
 function buildPairMotifs(graph: CDG, concepts: ConceptItem[], locale?: AppLocale): ConceptMotif[] {
   const byId = new Map((concepts || []).map((c) => [c.id, c]));
   const nodeToConcepts = buildNodeToConcepts(concepts);
@@ -636,6 +941,8 @@ function buildPairMotifs(graph: CDG, concepts: ConceptItem[], locale?: AppLocale
         const toConcept = byId.get(toId);
         if (!fromConcept || !toConcept) continue;
         if (isBudgetBookkeepingConcept(fromConcept) || isBudgetBookkeepingConcept(toConcept)) continue;
+        if (shouldSkipPairByGrounding(fromConcept, toConcept)) continue;
+        if (shouldSkipPairAsNonExplanatory(fromConcept, toConcept)) continue;
 
         const templateKey = `${e.type}:${fromConcept.family}->${toConcept.family}`;
         const key = `${templateKey}:${fromId}->${toId}`;
@@ -815,6 +1122,7 @@ function normalizeMotifs(input: any): ConceptMotif[] {
     const dependencyClass = normalizeDependencyClass((raw as any)?.dependencyClass, relation);
     const motifType = cleanText((raw as any)?.motifType, 20) as ConceptMotifType;
     const statusRaw = cleanText((raw as any)?.status, 24).toLowerCase();
+    const motifInstanceStatusRaw = cleanText((raw as any)?.motif_instance_status, 24).toLowerCase();
     const noveltyRaw = cleanText((raw as any)?.novelty, 24).toLowerCase();
     const causalRaw = cleanText((raw as any)?.causalOperator, 40).toLowerCase();
     const reuseClassRaw = cleanText((raw as any)?.reuseClass, 32).toLowerCase();
@@ -825,6 +1133,8 @@ function normalizeMotifs(input: any): ConceptMotif[] {
       8
     );
     const anchorConceptId = cleanText((raw as any)?.anchorConceptId, 100) || conceptIds[conceptIds.length - 1] || "";
+    const normalizedStatus = normalizeMotifLifecycleStatus(statusRaw || motifInstanceStatusRaw || "active", "active");
+    const motifInstanceStatus = normalizeMotifInstanceStatus(motifInstanceStatusRaw || normalizedStatus, "active");
     out.push({
       id,
       motif_id: cleanText((raw as any)?.motif_id, 140) || id,
@@ -868,14 +1178,8 @@ function normalizeMotifs(input: any): ConceptMotif[] {
         ),
         48
       ),
-      status:
-        statusRaw === "uncertain" ||
-        statusRaw === "deprecated" ||
-        statusRaw === "disabled" ||
-        statusRaw === "cancelled"
-          ? (statusRaw as MotifLifecycleStatus)
-          : "active",
-      statusReason: cleanText((raw as any)?.statusReason, 180),
+      status: normalizedStatus,
+      statusReason: statusRaw === "disabled" ? appendReason(cleanText((raw as any)?.statusReason, 180), "legacy_disabled") : cleanText((raw as any)?.statusReason, 180),
       resolved,
       resolvedAt: resolved ? cleanText((raw as any)?.resolvedAt, 40) || undefined : undefined,
       resolvedBy: resolved ? (resolvedByRaw === "user" ? "user" : "system") : undefined,
@@ -901,23 +1205,9 @@ function normalizeMotifs(input: any): ConceptMotif[] {
                   ? "edited"
                   : "status_changed",
               from:
-                cleanText(h?.from, 24) === "uncertain" ||
-                cleanText(h?.from, 24) === "deprecated" ||
-                cleanText(h?.from, 24) === "disabled" ||
-                cleanText(h?.from, 24) === "cancelled"
-                  ? (cleanText(h?.from, 24) as MotifLifecycleStatus)
-                  : cleanText(h?.from, 24) === "active"
-                  ? "active"
-                  : undefined,
+                normalizeMotifLifecycleStatus(cleanText(h?.from, 24), "active"),
               to:
-                cleanText(h?.to, 24) === "uncertain" ||
-                cleanText(h?.to, 24) === "deprecated" ||
-                cleanText(h?.to, 24) === "disabled" ||
-                cleanText(h?.to, 24) === "cancelled"
-                  ? (cleanText(h?.to, 24) as MotifLifecycleStatus)
-                  : cleanText(h?.to, 24) === "active"
-                  ? "active"
-                  : undefined,
+                normalizeMotifLifecycleStatus(cleanText(h?.to, 24), "active"),
               reason: cleanText(h?.reason, 120) || undefined,
             }))
             .slice(0, 20)
@@ -926,6 +1216,64 @@ function normalizeMotifs(input: any): ConceptMotif[] {
       updatedAt: cleanText((raw as any)?.updatedAt, 40) || new Date().toISOString(),
       reuseClass: reuseClassRaw === "context_specific" ? "context_specific" : "reusable",
       reuseReason: cleanText((raw as any)?.reuseReason, 120) || undefined,
+      motif_type_id: cleanText((raw as any)?.motif_type_id, 140) || undefined,
+      motif_type_title: cleanText((raw as any)?.motif_type_title, 160) || undefined,
+      motif_type_dependency: Array.isArray((raw as any)?.motif_type_dependency)
+        ? (raw as any).motif_type_dependency
+            .map((x: any) => cleanText(x, 24))
+            .filter((x: string) => x === "enable" || x === "constraint" || x === "determine")
+        : undefined,
+      motif_type_role_schema:
+        (raw as any)?.motif_type_role_schema && typeof (raw as any).motif_type_role_schema === "object"
+          ? {
+              drivers: uniq(
+                (Array.isArray((raw as any).motif_type_role_schema?.drivers)
+                  ? (raw as any).motif_type_role_schema.drivers
+                  : []
+                ).map((x: any) => cleanText(x, 80)),
+                12
+              ),
+              target: uniq(
+                (Array.isArray((raw as any).motif_type_role_schema?.target)
+                  ? (raw as any).motif_type_role_schema.target
+                  : []
+                ).map((x: any) => cleanText(x, 80)),
+                4
+              ),
+            }
+          : undefined,
+      motif_type_reusable_description: cleanText((raw as any)?.motif_type_reusable_description, 220) || undefined,
+      motif_instance_id: cleanText((raw as any)?.motif_instance_id, 140) || id,
+      motif_instance_status: motifInstanceStatus,
+      context: cleanText((raw as any)?.context, 120) || undefined,
+      bound_concepts:
+        (raw as any)?.bound_concepts && typeof (raw as any).bound_concepts === "object"
+          ? {
+              drivers: uniq(
+                (Array.isArray((raw as any).bound_concepts?.drivers) ? (raw as any).bound_concepts.drivers : []).map((x: any) =>
+                  cleanText(x, 100)
+                ),
+                12
+              ),
+              target: uniq(
+                (Array.isArray((raw as any).bound_concepts?.target) ? (raw as any).bound_concepts.target : []).map((x: any) =>
+                  cleanText(x, 100)
+                ),
+                4
+              ),
+            }
+          : undefined,
+      evidence: Array.isArray((raw as any)?.evidence)
+        ? (raw as any).evidence
+            .map((ev: any) => ({
+              quote: cleanText(ev?.quote, 90),
+              source: cleanText(ev?.source, 80) || undefined,
+              conceptId: cleanText(ev?.conceptId, 100) || undefined,
+            }))
+            .filter((ev: MotifEvidenceItem) => !!ev.quote)
+            .slice(0, 8)
+        : undefined,
+      rationale: cleanText((raw as any)?.rationale, 220) || undefined,
     });
   }
   return out;
@@ -953,13 +1301,16 @@ function statusRank(s: MotifLifecycleStatus): number {
   if (s === "deprecated") return 5;
   if (s === "uncertain") return 4;
   if (s === "active") return 3;
-  if (s === "disabled") return 2;
+  if (s === "disabled") return 1;
   return 1;
 }
 
 function inferBaseStatus(m: ConceptMotif, prev: ConceptMotif | undefined, conceptById: Map<string, ConceptItem>) {
-  if (prev?.resolved && (prev.status === "active" || prev.status === "disabled" || prev.status === "cancelled")) {
-    return { status: prev.status as MotifLifecycleStatus, reason: prev.statusReason || "user_resolved" };
+  if (prev?.resolved && (prev.status === "active" || prev.status === "cancelled" || prev.status === "disabled")) {
+    return {
+      status: normalizeMotifLifecycleStatus(prev.status, "cancelled"),
+      reason: prev.statusReason || "user_resolved",
+    };
   }
   if (m.relation === "conflicts_with") return { status: "deprecated" as MotifLifecycleStatus, reason: "relation_conflicts_with" };
 
@@ -970,10 +1321,10 @@ function inferBaseStatus(m: ConceptMotif, prev: ConceptMotif | undefined, concep
       const c = conceptById.get(cid);
       return !!c?.paused;
     });
-  if (allPaused) return { status: "disabled" as MotifLifecycleStatus, reason: "all_related_concepts_paused" };
+  if (allPaused) return { status: "cancelled" as MotifLifecycleStatus, reason: "all_related_concepts_paused" };
 
   if (prev?.status === "disabled" && !!prev.resolved && !allPaused) {
-    return { status: "disabled" as MotifLifecycleStatus, reason: prev.statusReason || "user_disabled" };
+    return { status: "cancelled" as MotifLifecycleStatus, reason: prev.statusReason || "legacy_user_disabled" };
   }
   const dep = motifDependencyClass(m);
   const threshold = motifLowConfidenceThreshold(dep);
@@ -986,8 +1337,9 @@ function inferBaseStatus(m: ConceptMotif, prev: ConceptMotif | undefined, concep
   return { status: "active" as MotifLifecycleStatus, reason: "" };
 }
 
-function isUserEditableStatus(status: MotifLifecycleStatus | undefined): status is "active" | "disabled" {
-  return status === "active" || status === "disabled";
+function isUserEditableStatus(status: MotifLifecycleStatus | undefined): status is "active" | "cancelled" {
+  const s = normalizeMotifLifecycleStatus(status, "active");
+  return s === "active" || s === "cancelled";
 }
 
 function sanitizeMotifStructure(params: {
@@ -1042,7 +1394,10 @@ function applyUserEditableOverlay(params: {
   if (!structure) return current;
 
   const relation = normalizeDependencyClass(prev.dependencyClass || prev.relation, current.relation);
-  const nextStatus: MotifLifecycleStatus = isUserEditableStatus(prev.status) ? prev.status : current.status;
+  const prevStatus = normalizeMotifLifecycleStatus(prev.status, normalizeMotifLifecycleStatus(current.status, "active"));
+  const nextStatus: MotifLifecycleStatus = isUserEditableStatus(prevStatus)
+    ? prevStatus
+    : normalizeMotifLifecycleStatus(current.status, "active");
   const nextStatusReason =
     nextStatus === current.status
       ? current.statusReason
@@ -1339,7 +1694,7 @@ function applyRedundancyDeprecation(motifs: ConceptMotif[], conceptById: Map<str
   const groups = new Map<string, ConceptMotif[]>();
   for (const m of motifs) {
     if (m.resolved) continue;
-    if (m.status === "cancelled" || m.status === "disabled") continue;
+    if (normalizeMotifLifecycleStatus(m.status, "active") === "cancelled") continue;
     if (!m.anchorConceptId) continue;
     const signature = `${motifDependencyClass(m)}|${m.anchorConceptId}|${sourceFamilySignature(m, conceptById)}`;
     if (!groups.has(signature)) groups.set(signature, []);
@@ -1410,8 +1765,7 @@ function applyRelationConflictDeprecation(motifs: ConceptMotif[], conceptById: M
   const candidates = motifs.filter(
     (m) =>
       !m.resolved &&
-      m.status !== "cancelled" &&
-      m.status !== "disabled" &&
+      normalizeMotifLifecycleStatus(m.status, "active") !== "cancelled" &&
       m.status !== "deprecated" &&
       !!m.anchorConceptId
   );
@@ -1878,8 +2232,8 @@ function appendStatusHistory(next: ConceptMotif, prev?: ConceptMotif): ConceptMo
     at: next.updatedAt || new Date().toISOString(),
     by: (next.resolvedBy === "user" ? "user" : "system") as "system" | "user",
     action: "status_changed" as const,
-    from: prev?.status,
-    to: next.status,
+    from: prev ? normalizeMotifLifecycleStatus(prev.status, "active") : undefined,
+    to: normalizeMotifLifecycleStatus(next.status, "active"),
     reason: cleanText(next.statusReason, 120) || undefined,
   };
   return {
@@ -1987,7 +2341,8 @@ export function reconcileMotifsWithGraph(params: {
     });
     if (!structure) continue;
     const relation = normalizeDependencyClass(old.dependencyClass || old.relation, "enable");
-    const keptStatus: MotifLifecycleStatus = isUserEditableStatus(old.status) ? old.status : "active";
+    const normalizedOldStatus = normalizeMotifLifecycleStatus(old.status, "active");
+    const keptStatus: MotifLifecycleStatus = isUserEditableStatus(normalizedOldStatus) ? normalizedOldStatus : "active";
     manualPersistedFromHistory.push({
       ...old,
       relation,

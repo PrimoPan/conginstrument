@@ -7,11 +7,9 @@ import {
   enforceTargetedQuestion,
   planUncertaintyQuestion,
 } from "./uncertainty/questionPlanner.js";
-import { reconcileConceptsWithGraph } from "./concepts.js";
-import { reconcileMotifsWithGraph } from "./motif/conceptMotifs.js";
-import { reconcileContextsWithGraph } from "./contexts.js";
 import { isEnglishLocale, type AppLocale } from "../i18n/locale.js";
 import { planMotifQuestion } from "./motif/questionPlanner.js";
+import { buildCognitiveModel } from "./cognitiveModel.js";
 
 const STREAM_MODE = (process.env.CI_STREAM_MODE || "pseudo") as "upstream" | "pseudo";
 const DEBUG = process.env.CI_DEBUG_LLM === "1";
@@ -119,13 +117,23 @@ Domain preference (when relevant):
   )}\n${String(extraSystemPrompt).trim()}`.trim();
 }
 
-function graphSummaryForChat(graph: CDG): string {
+function graphSummaryForChat(params: {
+  graph: CDG;
+  model: ReturnType<typeof buildCognitiveModel>;
+}): string {
+  const graph = params.graph;
+  const model = params.model;
   const nodes = (graph.nodes || []).slice(-60);
   const edges = (graph.edges || []).slice(-40);
-  const concepts = reconcileConceptsWithGraph({ graph, baseConcepts: [] });
-  const motifs = reconcileMotifsWithGraph({ graph, concepts, baseMotifs: [] })
+  const motifs = (model.motifs || [])
     .slice(0, 5)
     .map((m) => `${m.templateKey}:${m.title}(c=${m.confidence.toFixed(2)})`);
+  const motifLinks = (model.motifLinks || [])
+    .slice(0, 5)
+    .map((l) => `- ${l.type}:${l.fromMotifId} -> ${l.toMotifId}(c=${Number(l.confidence || 0).toFixed(2)})`);
+  const reasoningSteps = (model.motifReasoningView?.steps || [])
+    .slice(0, 5)
+    .map((s) => `- ${s.step_id}:${s.summary}`);
 
   const pick = (type: string, k = 6) =>
     nodes
@@ -176,6 +184,10 @@ function graphSummaryForChat(graph: CDG): string {
     edgeBrief.length ? edgeBrief.join("\n") : "- none",
     "motifs:",
     motifs.length ? motifs.map((x) => `- ${x}`).join("\n") : "- none",
+    "motif_links:",
+    motifLinks.length ? motifLinks.join("\n") : "- none",
+    "reasoning_chain:",
+    reasoningSteps.length ? reasoningSteps.join("\n") : "- none",
   ].join("\n");
 }
 
@@ -192,25 +204,16 @@ function chooseQuestionWithPriority(params: {
 }
 
 function motifPriorityQuestion(params: {
-  graph: CDG;
-  concepts: ReturnType<typeof reconcileConceptsWithGraph>;
+  model: ReturnType<typeof buildCognitiveModel>;
   recentTurns: Array<{ role: "user" | "assistant"; content: string }>;
   locale?: AppLocale;
 }) {
-  const motifs = reconcileMotifsWithGraph({
-    graph: params.graph,
-    concepts: params.concepts,
-    baseMotifs: [],
-  });
-  const contexts = reconcileContextsWithGraph({
-    graph: params.graph,
-    concepts: params.concepts,
-    motifs,
-    baseContexts: [],
-  });
+  const motifs = params.model.motifs || [];
+  const contexts = params.model.contexts || [];
+  const concepts = params.model.concepts || [];
   const motifPlan = planMotifQuestion({
     motifs,
-    concepts: params.concepts,
+    concepts,
     recentTurns: params.recentTurns,
     locale: params.locale,
   });
@@ -222,7 +225,7 @@ function motifPriorityQuestion(params: {
   };
 }
 
-function contextSummaryForPrompt(contexts: ReturnType<typeof reconcileContextsWithGraph>): string {
+function contextSummaryForPrompt(contexts: ReturnType<typeof buildCognitiveModel>["contexts"]): string {
   if (!contexts.length) return "contexts: none";
   return contexts
     .slice(0, 5)
@@ -260,11 +263,17 @@ export async function generateAssistantTextNonStreaming(params: {
   locale?: AppLocale;
 }): Promise<string> {
   const safeRecent = normalizeRecentTurns(params.recentTurns);
-  const gsum = graphSummaryForChat(params.graph);
-  const concepts = reconcileConceptsWithGraph({ graph: params.graph, baseConcepts: [] });
-  const motifCtx = motifPriorityQuestion({
+  const model = buildCognitiveModel({
     graph: params.graph,
-    concepts,
+    baseConcepts: [],
+    baseMotifs: [],
+    baseMotifLinks: [],
+    baseContexts: [],
+    locale: params.locale,
+  });
+  const gsum = graphSummaryForChat({ graph: params.graph, model });
+  const motifCtx = motifPriorityQuestion({
+    model,
     recentTurns: safeRecent,
     locale: params.locale,
   });
@@ -350,11 +359,17 @@ export async function streamAssistantText(params: {
   }
 
   const safeRecent = normalizeRecentTurns(params.recentTurns);
-  const gsum = graphSummaryForChat(params.graph);
-  const concepts = reconcileConceptsWithGraph({ graph: params.graph, baseConcepts: [] });
-  const motifCtx = motifPriorityQuestion({
+  const model = buildCognitiveModel({
     graph: params.graph,
-    concepts,
+    baseConcepts: [],
+    baseMotifs: [],
+    baseMotifLinks: [],
+    baseContexts: [],
+    locale: params.locale,
+  });
+  const gsum = graphSummaryForChat({ graph: params.graph, model });
+  const motifCtx = motifPriorityQuestion({
+    model,
     recentTurns: safeRecent,
     locale: params.locale,
   });

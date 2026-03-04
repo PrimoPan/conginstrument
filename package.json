@@ -8,6 +8,8 @@
     "test:graph-regression": "tsx src/services/graphUpdater/__tests__/intentSignals.regression.ts",
     "test:prd-realignment": "tsx src/services/__tests__/prdRealignment.regression.ts",
     "test:motif-compression": "tsx src/services/__tests__/motifCompression.regression.ts",
+    "test:motif-pipeline": "tsx src/services/__tests__/motifPipeline.regression.ts",
+    "test:planning-alignment": "tsx src/services/__tests__/planningAlignment.regression.ts",
     "test:travel-plan-pdf": "tsx src/services/__tests__/travelPlanPdf.regression.ts"
   },
   "dependencies": {

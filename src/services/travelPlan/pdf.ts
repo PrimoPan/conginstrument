@@ -3,6 +3,7 @@ import { fileURLToPath } from "node:url";
 import PDFDocument from "pdfkit";
 
 import { config } from "../../server/config.js";
+import type { PortfolioDocumentState } from "../planningState.js";
 import { type TravelPlanState } from "./state.js";
 import { isEnglishLocale, type AppLocale } from "../../i18n/locale.js";
 
@@ -84,6 +85,17 @@ function hasDayStructuredText(text: string): boolean {
   return /第\s*[一二三四五六七八九十两0-9]{1,3}\s*天|day\s*[0-9]{1,2}|[0-9]{1,2}\s*月\s*[0-9]{1,2}\s*日/i.test(
     String(text || "")
   );
+}
+
+function clean(input: any, max = 600): string {
+  return String(input ?? "")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, max);
+}
+
+function pendingMark(input: string): boolean {
+  return /(待确认|待补充|tbd|pending|to be confirmed|unknown)/i.test(String(input || ""));
 }
 
 export async function renderTravelPlanPdf(params: {
@@ -279,6 +291,208 @@ export async function renderTravelPlanPdf(params: {
             : `• [${e.source}] ${e.title}：${e.content}`,
           { lineGap: 2 }
         );
+    }
+  }
+
+  doc.end();
+  return done;
+}
+
+export async function renderPortfolioTravelPlanPdf(params: {
+  portfolio: PortfolioDocumentState;
+  conversationId: string;
+  locale?: AppLocale;
+  fallbackPlan?: TravelPlanState;
+}): Promise<Buffer> {
+  const locale = params.locale;
+  const portfolio = params.portfolio;
+  const orderedTrips =
+    (portfolio?.export_order || [])
+      .map((id) => (portfolio?.trips || []).find((x) => x.task_id === id))
+      .filter(Boolean) || [];
+  const trips = orderedTrips.length ? orderedTrips : (portfolio?.trips || []);
+
+  if (!trips.length && params.fallbackPlan) {
+    return renderTravelPlanPdf({
+      plan: params.fallbackPlan,
+      conversationId: params.conversationId,
+      locale,
+    });
+  }
+
+  const doc = new PDFDocument({
+    size: "A4",
+    margin: 48,
+    info: {
+      Title: `Travel Portfolio ${params.conversationId}`,
+      Author: "CogInstrument",
+      Subject: t(locale, "多行程组合导出", "Portfolio Travel Plan Export"),
+      Keywords: "travel,portfolio,plan,conginstrument",
+      Creator: "CogInstrument",
+      Producer: "CogInstrument",
+    },
+  });
+
+  const fontPath = applyPreferredFont(doc, locale);
+  if (!fontPath && !isEnglishLocale(locale)) {
+    throw new Error(
+      "No usable CJK font found for PDF export. Set CI_PDF_FONT_PATH or keep bundled font file."
+    );
+  }
+
+  const chunks: Buffer[] = [];
+  const done = new Promise<Buffer>((resolve, reject) => {
+    doc.on("data", (c: Buffer) => chunks.push(Buffer.from(c)));
+    doc.on("end", () => resolve(Buffer.concat(chunks)));
+    doc.on("error", reject);
+  });
+
+  const exportedAt = new Date().toLocaleString(isEnglishLocale(locale) ? "en-US" : "zh-CN", {
+    hour12: false,
+    timeZone: config.timezone || "Asia/Shanghai",
+  });
+
+  doc
+    .fillColor("#0b1220")
+    .fontSize(18)
+    .text(t(locale, "旅行 Portfolio 导出", "Travel Portfolio Export"), { align: "left" });
+  doc.moveDown(0.2);
+  doc
+    .fontSize(10)
+    .fillColor("#475569")
+    .text(`${t(locale, "会话", "Conversation")}: ${params.conversationId}`);
+  doc
+    .fontSize(10)
+    .fillColor("#475569")
+    .text(`${t(locale, "行程数量", "Trip count")}: ${trips.length}`);
+  doc
+    .fontSize(10)
+    .fillColor("#475569")
+    .text(`${t(locale, "导出时间", "Exported at")}: ${exportedAt}`);
+
+  sectionTitle(doc, t(locale, "目录", "Table of Contents"));
+  for (let i = 0; i < trips.length; i += 1) {
+    const trip = trips[i]!;
+    const dst = (trip.destination_scope || []).length
+      ? (trip.destination_scope || []).join(isEnglishLocale(locale) ? " / " : "、")
+      : t(locale, "目的地待补充", "Destination TBD");
+    const dur = clean(trip.duration, 60) || t(locale, "时长待确认", "Duration TBD");
+    doc
+      .fontSize(10.6)
+      .fillColor("#111827")
+      .text(`${i + 1}. ${clean(trip.trip_title, 120)} · ${dst} · ${dur}`, { lineGap: 2 });
+  }
+
+  const pendingItems: string[] = [];
+  for (let i = 0; i < trips.length; i += 1) {
+    const trip = trips[i]!;
+    doc.addPage();
+    doc
+      .fontSize(16)
+      .fillColor("#0b1220")
+      .text(
+        t(
+          locale,
+          `行程 ${i + 1}: ${clean(trip.trip_title, 120)}`,
+          `Trip ${i + 1}: ${clean(trip.trip_title, 120)}`
+        )
+      );
+    doc.moveDown(0.2);
+
+    const statusText =
+      trip.status === "archived"
+        ? t(locale, "已归档", "archived")
+        : trip.status === "draft"
+        ? t(locale, "草稿", "draft")
+        : t(locale, "进行中", "active");
+    const destinationText = (trip.destination_scope || []).length
+      ? (trip.destination_scope || []).join(isEnglishLocale(locale) ? " / " : "、")
+      : t(locale, "待补充", "TBD");
+    const travelerText = (trip.travelers || []).length
+      ? (trip.travelers || []).join(isEnglishLocale(locale) ? ", " : "、")
+      : t(locale, "待确认", "TBD");
+    const durationText = clean(trip.duration, 80) || t(locale, "待确认", "TBD");
+
+    doc
+      .fontSize(10.5)
+      .fillColor("#334155")
+      .text(`${t(locale, "状态", "Status")}: ${statusText}`);
+    doc
+      .fontSize(10.5)
+      .fillColor("#334155")
+      .text(`${t(locale, "目的地", "Destinations")}: ${destinationText}`);
+    doc
+      .fontSize(10.5)
+      .fillColor("#334155")
+      .text(`${t(locale, "出行人", "Travelers")}: ${travelerText}`);
+    doc
+      .fontSize(10.5)
+      .fillColor("#334155")
+      .text(`${t(locale, "时长", "Duration")}: ${durationText}`);
+    doc
+      .fontSize(10.5)
+      .fillColor("#334155")
+      .text(`${t(locale, "最近更新", "Last updated")}: ${clean(trip.last_updated, 40)}`);
+
+    sectionTitle(doc, t(locale, "计划摘要", "Plan Snapshot"));
+    doc
+      .fontSize(10.8)
+      .fillColor("#111827")
+      .text(clean(trip.plan_snapshot?.summary, 1000) || t(locale, "暂无摘要", "No summary"), { lineGap: 3 });
+
+    if (Array.isArray(trip.plan_snapshot?.constraints) && trip.plan_snapshot.constraints.length) {
+      doc.moveDown(0.2);
+      for (const c of trip.plan_snapshot.constraints.slice(0, 10)) {
+        doc.fontSize(10.3).fillColor("#111827").text(`• ${clean(c, 180)}`, { lineGap: 2 });
+      }
+    }
+
+    sectionTitle(doc, t(locale, "可导出计划文本", "Export-ready Plan Text"));
+    const exportText = clean(trip.export_ready_text, 12000);
+    if (exportText) {
+      doc.fontSize(10.5).fillColor("#111827").text(exportText, { lineGap: 3 });
+    } else {
+      doc
+        .fontSize(10.5)
+        .fillColor("#111827")
+        .text(t(locale, "暂无可导出计划文本。", "No export-ready content yet."), { lineGap: 3 });
+    }
+
+    if (trip.status === "draft") {
+      pendingItems.push(
+        t(
+          locale,
+          `行程 ${i + 1}（${clean(trip.trip_title, 80)}）仍是草稿状态。`,
+          `Trip ${i + 1} (${clean(trip.trip_title, 80)}) is still in draft status.`
+        )
+      );
+    }
+    if (pendingMark(durationText)) {
+      pendingItems.push(
+        t(
+          locale,
+          `行程 ${i + 1}（${clean(trip.trip_title, 80)}）时长待确认。`,
+          `Trip ${i + 1} (${clean(trip.trip_title, 80)}) duration remains unconfirmed.`
+        )
+      );
+    }
+    if (pendingMark(exportText)) {
+      pendingItems.push(
+        t(
+          locale,
+          `行程 ${i + 1}（${clean(trip.trip_title, 80)}）包含待确认项。`,
+          `Trip ${i + 1} (${clean(trip.trip_title, 80)}) still contains pending items.`
+        )
+      );
+    }
+  }
+
+  const dedupPending = Array.from(new Set(pendingItems.map((x) => clean(x, 220)).filter(Boolean))).slice(0, 20);
+  if (dedupPending.length) {
+    doc.addPage();
+    sectionTitle(doc, t(locale, "待确认事项", "Pending Confirmations"));
+    for (const item of dedupPending) {
+      doc.fontSize(10.5).fillColor("#111827").text(`• ${item}`, { lineGap: 2 });
     }
   }
 
