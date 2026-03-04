@@ -1379,11 +1379,12 @@ const cases: Case[] = [
       const concepts = reconcileConceptsWithGraph({ graph, baseConcepts: [] });
       const motifs = reconcileMotifsWithGraph({ graph, concepts, baseMotifs: [] });
       assert.equal(
-        motifs.some((m) => {
-          if (m.status !== "cancelled") return false;
-          const reason = String(m.statusReason || "");
-          return reason.startsWith("high_similarity_with:") || reason.startsWith("non_reusable_context_specific:");
-        }),
+        motifs.length,
+        1,
+        "highly similar motifs should collapse to one exposed motif"
+      );
+      assert.equal(
+        motifs.every((m) => m.status === "active"),
         true
       );
     },
@@ -1425,7 +1426,12 @@ const cases: Case[] = [
       const concepts = reconcileConceptsWithGraph({ graph, baseConcepts: [] });
       const motifs = reconcileMotifsWithGraph({ graph, concepts, baseMotifs: [] });
       assert.equal(
-        motifs.some((m) => m.status === "cancelled" && String(m.statusReason || "").startsWith("relation_shadowed_by:")),
+        motifs.length,
+        1,
+        "relation-shadow duplicate should be folded out of output"
+      );
+      assert.equal(
+        motifs[0]?.relation === "constraint" || motifs[0]?.dependencyClass === "constraint",
         true
       );
       assert.equal(
@@ -1607,12 +1613,10 @@ const cases: Case[] = [
         });
         return includesDestinationConcept;
       });
-      assert.equal(destinationMotifs.length > 0, true);
-      assert.equal(destinationMotifs.every((m) => m.reuseClass === "context_specific"), true);
-      assert.equal(destinationMotifs.every((m) => m.status === "cancelled"), true);
       assert.equal(
-        destinationMotifs.every((m) => String(m.statusReason || "").startsWith("non_reusable_context_specific:")),
-        true
+        destinationMotifs.length,
+        0,
+        "context-specific cancelled destination motifs should not be exposed"
       );
     },
   },

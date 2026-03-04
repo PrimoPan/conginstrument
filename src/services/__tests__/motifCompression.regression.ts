@@ -101,8 +101,11 @@ run("relay chain compression should merge A->B->C into composite motif", () => {
   );
 
   const compressedPairs = motifs.filter((m) => (m.statusReason || "").startsWith("chain_compressed_by:"));
-  assert.equal(compressedPairs.length, 2);
-  assert.ok(compressedPairs.every((m) => m.status === "cancelled" && !!m.resolved));
+  assert.equal(
+    compressedPairs.length,
+    0,
+    "system-compressed cancelled pairs should not be exposed in output list"
+  );
 });
 
 run("aggregated constraint motifs with sibling lodging anchors should be downgraded as non-reusable", () => {
@@ -165,10 +168,11 @@ run("aggregated constraint motifs with sibling lodging anchors should be downgra
     baseMotifs: [],
   });
 
-  assert.equal(motifs.length, 1);
-  assert.equal(motifs[0].reuseClass, "context_specific");
-  assert.equal(motifs[0].status, "cancelled");
-  assert.ok((motifs[0].statusReason || "").includes("non_reusable_context_specific:source_not_allowed:constraint:lodging"));
+  assert.equal(
+    motifs.length,
+    0,
+    "context-specific cancelled motifs should be pruned from exposed motif list"
+  );
 });
 
 run("aggregated enable motifs with sibling lodging anchors should stay reusable", () => {

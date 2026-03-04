@@ -1377,7 +1377,11 @@ function statusRank(s: MotifLifecycleStatus): number {
 }
 
 function inferBaseStatus(m: ConceptMotif, prev: ConceptMotif | undefined, conceptById: Map<string, ConceptItem>) {
-  if (prev?.resolved && (prev.status === "active" || prev.status === "cancelled" || prev.status === "disabled")) {
+  if (
+    prev?.resolved &&
+    prev?.resolvedBy === "user" &&
+    (prev.status === "active" || prev.status === "cancelled" || prev.status === "disabled")
+  ) {
     return {
       status: normalizeMotifLifecycleStatus(prev.status, "cancelled"),
       reason: prev.statusReason || "user_resolved",
@@ -2274,6 +2278,29 @@ function isSoftPruneReason(reason: string): boolean {
   );
 }
 
+function isSystemRedundantCancelledReason(reason: string): boolean {
+  const r = cleanText(reason, 220).toLowerCase();
+  return (
+    isSoftPruneReason(r) ||
+    r.startsWith("cross_anchor_duplicate_of:") ||
+    r.startsWith("high_similarity_with:") ||
+    r.startsWith("chain_compressed_by:") ||
+    r.startsWith("non_reusable_context_specific:") ||
+    r.startsWith("not_supported_by_current_graph")
+  );
+}
+
+function shouldExposeMotifInOutput(motif: ConceptMotif): boolean {
+  const status = normalizeMotifLifecycleStatus(motif.status, "active");
+  if (status !== "cancelled") return true;
+  const reason = cleanText(motif.statusReason, 220).toLowerCase();
+  if (!reason) return motif.resolvedBy === "user";
+  if (motif.resolvedBy === "user") return true;
+  if (reason.startsWith("user_")) return true;
+  if (reason === "all_related_concepts_paused" || reason === "legacy_user_disabled") return true;
+  return !isSystemRedundantCancelledReason(reason);
+}
+
 function convertSoftDeprecationsToCancelled(motifs: ConceptMotif[]): ConceptMotif[] {
   return motifs.map((m) => {
     if (m.status !== "deprecated") return m;
@@ -2742,6 +2769,7 @@ export function reconcileMotifsWithGraph(params: {
     .map((m) => applyMotifReuseClassification(m, conceptById))
     .map((m) => appendStatusHistory(m, baseById.get(m.id)));
   return all
+    .filter((m) => shouldExposeMotifInOutput(m))
     .slice()
     .sort((a, b) => statusRank(b.status) - statusRank(a.status) || b.confidence - a.confidence || a.id.localeCompare(b.id))
     .slice(0, 320);

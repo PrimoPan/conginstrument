@@ -4,6 +4,7 @@ import { reconcileMotifLinks, type MotifLink } from "../motif/motifLinks.js";
 import { buildMotifReasoningView } from "../motif/reasoningView.js";
 import type { CDG } from "../../core/graph.js";
 import type { ConceptItem } from "../concepts.js";
+import { buildCognitiveModel } from "../cognitiveModel.js";
 import {
   enforceCausalEdgeCoverage,
   reconcileMotifsWithGraph,
@@ -355,13 +356,16 @@ run("milan limiting constraints should stay visible in motif titles", () => {
     }),
   ];
 
-  const motifs = reconcileMotifsWithGraph({
+  const model = buildCognitiveModel({
     graph,
-    concepts,
+    prevConcepts: concepts,
+    baseConcepts: concepts,
     baseMotifs: [],
+    baseMotifLinks: [],
+    baseContexts: [],
     locale: "zh-CN",
   });
-  const titles = motifs.map((m) => m.title).join(" | ");
+  const titles = (model.motifs || []).map((m) => m.title).join(" | ");
 
   assert.equal(/恐高/.test(titles), true);
   assert.equal(/冠心病/.test(titles), true);
