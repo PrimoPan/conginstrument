@@ -334,6 +334,8 @@ run("coverage repair should skip destination-to-duration metadata edges", () => 
   assert.equal(covered.report.coveredCausalEdges, 0);
   assert.equal(covered.report.uncoveredCausalEdges, 0);
   assert.equal(covered.report.repairedMotifCount, 0);
+  assert.equal((covered.report.excludedNonReasoningEdges || 0) >= 1, true);
+  assert.equal((covered.report.excludedByReason?.metadata_destination_duration || 0) >= 1, true);
   assert.equal(covered.motifs.length, 0);
 });
 

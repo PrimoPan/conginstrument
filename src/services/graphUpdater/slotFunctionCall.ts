@@ -5,8 +5,20 @@ import {
   isLikelyDestinationCandidate,
   normalizeDestination,
 } from "./intentSignals.js";
-import { LANGUAGE_CONSTRAINT_RE, MEDICAL_HEALTH_RE } from "./constants.js";
-import { classifyConstraintText, dedupeClassifiedConstraints } from "./constraintClassifier.js";
+import {
+  LOW_HASSLE_TRAVEL_RE,
+  SAFETY_STRATEGY_RE,
+  TRANSPORT_CONVENIENCE_RE,
+  HEALTH_STRATEGY_ACTIVITY_RE,
+  HEALTH_STRATEGY_DIET_RE,
+  LANGUAGE_CONSTRAINT_RE,
+  MEDICAL_HEALTH_RE,
+} from "./constants.js";
+import {
+  classifyConstraintText,
+  dedupeClassifiedConstraints,
+  type GenericConstraintKind,
+} from "./constraintClassifier.js";
 import { isEnglishLocale, type AppLocale } from "../../i18n/locale.js";
 
 type SlotExtractionResult = {
@@ -83,6 +95,7 @@ type SlotExtractionResult = {
   constraints?: Array<{
     text?: string;
     evidence?: string;
+    kind?: "legal" | "safety" | "mobility" | "logistics" | "diet" | "religion" | "other";
     hard?: boolean;
     importance?: number;
     confidence?: number;
@@ -387,6 +400,7 @@ function slotsToSignals(slots: SlotExtractionResult): IntentSignals {
   const rawConstraints: Array<{
     text: string;
     evidence: string;
+    kindHint?: GenericConstraintKind;
     hard?: boolean;
     importance?: number;
     score: number;
@@ -398,6 +412,7 @@ function slotsToSignals(slots: SlotExtractionResult): IntentSignals {
     importance?: number;
     confidence?: number;
     severity?: "medium" | "high" | "critical";
+    kindHint?: GenericConstraintKind;
   }) => {
     const text = cleanStatement(params.text || "", 96);
     if (!text) return;
@@ -411,6 +426,7 @@ function slotsToSignals(slots: SlotExtractionResult): IntentSignals {
     rawConstraints.push({
       text,
       evidence,
+      kindHint: params.kindHint,
       hard: !!params.hard,
       importance: imp,
       score,
@@ -441,6 +457,7 @@ function slotsToSignals(slots: SlotExtractionResult): IntentSignals {
     pushRawConstraint({
       text: x?.text,
       evidence: x?.evidence,
+      kindHint: x?.kind as GenericConstraintKind | undefined,
       hard: !!x?.hard,
       importance: x?.importance,
       confidence: x?.confidence,
@@ -455,6 +472,7 @@ function slotsToSignals(slots: SlotExtractionResult): IntentSignals {
         evidence: x.evidence,
         hardHint: x.hard,
         importance: x.importance,
+        kindHint: x.kindHint,
       });
       if (!c) return null;
       return { raw: x, c };
@@ -494,6 +512,80 @@ function slotsToSignals(slots: SlotExtractionResult): IntentSignals {
   );
   if (genericClassified.length) {
     out.genericConstraints = genericClassified.slice(0, 6);
+  }
+
+  const hasHealthConstraint = !!cleanStatement(out.healthConstraint || "", 120);
+  if (hasHealthConstraint) {
+    const activityFromGeneric = genericClassified.find((x) =>
+      HEALTH_STRATEGY_ACTIVITY_RE.test(String(x.text || ""))
+    );
+    if (!out.activityPreference && activityFromGeneric) {
+      out.activityPreference = cleanStatement(activityFromGeneric.text, 64);
+      out.activityPreferenceEvidence = cleanStatement(
+        activityFromGeneric.evidence || activityFromGeneric.text,
+        60
+      );
+      out.activityPreferenceHard = !!activityFromGeneric.hard;
+      out.activityPreferenceImportance = clampImportance(
+        activityFromGeneric.importance,
+        activityFromGeneric.hard ? 0.84 : 0.72
+      );
+    }
+
+    const hasDietConstraint = genericClassified.some(
+      (x) => x.kind === "diet" || HEALTH_STRATEGY_DIET_RE.test(String(x.text || ""))
+    );
+    if (!hasDietConstraint && HEALTH_STRATEGY_DIET_RE.test(String(out.healthConstraint || ""))) {
+      const next = dedupeClassifiedConstraints([
+        ...(out.genericConstraints || []),
+        {
+          text: cleanStatement(out.healthConstraint || "", 96),
+          evidence: cleanStatement(out.healthEvidence || out.healthConstraint || "", 60),
+          kind: "diet",
+          hard: true,
+          severity: "high",
+          importance: clampImportance(out.healthImportance, 0.84),
+        },
+      ]);
+      if (next.length) out.genericConstraints = next.slice(0, 6);
+    }
+  }
+
+  const mobilityBest = genericClassified.find(
+    (x) => x.kind === "mobility" || LOW_HASSLE_TRAVEL_RE.test(String(x.text || ""))
+  );
+  if (!out.activityPreference && mobilityBest) {
+    out.activityPreference = cleanStatement(mobilityBest.text, 64);
+    out.activityPreferenceEvidence = cleanStatement(
+      mobilityBest.evidence || mobilityBest.text,
+      60
+    );
+    out.activityPreferenceHard = !!mobilityBest.hard;
+    out.activityPreferenceImportance = clampImportance(
+      mobilityBest.importance,
+      mobilityBest.hard ? 0.82 : 0.7
+    );
+  }
+
+  const lodgingStrategyFromGeneric = genericClassified.find(
+    (x) =>
+      x.kind === "safety" ||
+      x.kind === "logistics" ||
+      x.kind === "mobility" ||
+      SAFETY_STRATEGY_RE.test(String(x.text || "")) ||
+      TRANSPORT_CONVENIENCE_RE.test(String(x.text || ""))
+  );
+  if (!out.lodgingPreference && lodgingStrategyFromGeneric) {
+    out.lodgingPreference = cleanStatement(lodgingStrategyFromGeneric.text, 72);
+    out.lodgingPreferenceEvidence = cleanStatement(
+      lodgingStrategyFromGeneric.evidence || lodgingStrategyFromGeneric.text,
+      60
+    );
+    out.lodgingPreferenceHard = !!lodgingStrategyFromGeneric.hard;
+    out.lodgingPreferenceImportance = clampImportance(
+      lodgingStrategyFromGeneric.importance,
+      lodgingStrategyFromGeneric.hard ? 0.8 : 0.66
+    );
   }
 
   // Backward-compatible safety net for older model outputs.
@@ -571,7 +663,12 @@ const SLOT_SYSTEM_PROMPT_ZH = `你是结构化槽位抽取器。只调用给定�
 4) destinations 仅放地名；场馆/景点/街区尽量放入 sub_locations，并附 parent_city。
 5) 约束可放 health_constraints / language_constraints / constraints（通用约束）。
 6) “球迷/看球/演唱会/看展”等兴趣诉求优先放 activity_preference（以及必要的 sub_locations），不要误放到 constraints。
-7) 不确定就留空，不要编造。`;
+7) 与健康相关的执行策略（例如“低强度、减少体力负担”）优先放 activity_preference；饮食策略（如“低盐低脂高纤维”）放 constraints(kind=diet)。
+8) 对 constraints 尽量补 kind（legal/safety/mobility/logistics/diet/religion/other）。
+9) “不想太累/不太折腾/中老年友好”优先抽为 constraints(kind=mobility)，必要时同时给 activity_preference。
+10) “酒店离地铁近/交通方便/步行可达”优先抽为 lodging_preference，且可补 constraints(kind=logistics)。
+11) “不想被坑/治安更好/夜间安全”优先抽为 constraints(kind=safety)。
+12) 不确定就留空，不要编造。`;
 
 const SLOT_SYSTEM_PROMPT_EN = `You are a structured slot extractor. Only call the provided function and return JSON arguments.
 
@@ -582,7 +679,12 @@ Rules:
 4) destinations must contain only places (city/region/country). Venues/POIs should go to sub_locations with parent_city when possible.
 5) Put constraints into health_constraints / language_constraints / constraints.
 6) Preference signals like football/game/concert/exhibition should go to activity_preference (+ sub_locations if needed), not generic constraints.
-7) If uncertain, leave fields empty. Do not hallucinate values.`;
+7) Health-derived execution strategy (e.g., low-intensity / reduced exertion) should go to activity_preference; diet strategy (low-salt/low-fat/high-fiber) should go to constraints(kind=diet).
+8) Fill constraints.kind whenever possible using: legal/safety/mobility/logistics/diet/religion/other.
+9) "not too tiring / low hassle / senior-friendly" should be extracted as constraints(kind=mobility), and may also populate activity_preference.
+10) "near metro / convenient transport / walkable" should populate lodging_preference and may also add constraints(kind=logistics).
+11) "avoid scam / safer area / safer at night" should be extracted as constraints(kind=safety).
+12) If uncertain, leave fields empty. Do not hallucinate values.`;
 
 const SLOT_PARAMETERS = {
   type: "object",
@@ -720,6 +822,10 @@ const SLOT_PARAMETERS = {
         properties: {
           text: { type: "string" },
           evidence: { type: "string" },
+          kind: {
+            type: "string",
+            enum: ["legal", "safety", "mobility", "logistics", "diet", "religion", "other"],
+          },
           hard: { type: "boolean" },
           importance: { type: "number" },
           confidence: { type: "number" },

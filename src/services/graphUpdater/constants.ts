@@ -2,7 +2,22 @@ export const RISK_HEALTH_RE =
   /心脏|心肺|冠心|心血管|高血压|糖尿病|哮喘|慢性病|手术|过敏|孕|老人|老年|儿童|行动不便|不能爬山|不能久走|危险|安全|急救|摔倒|health|medical|heart|cardiac|safety|risk/i;
 
 export const MEDICAL_HEALTH_RE =
-  /心脏|心肺|冠心|心血管|高血压|糖尿病|哮喘|慢性病|手术|过敏|孕|行动不便|不能爬山|不能久走|health|medical|heart|cardiac/i;
+  /心脏|心肺|冠心|冠脉|冠状动脉|心血管|支架|心梗|高血压|糖尿病|哮喘|慢性病|手术|过敏|孕|行动不便|不能爬山|不能久走|health|medical|heart|cardiac|stent/i;
+
+export const HEALTH_STRATEGY_ACTIVITY_RE =
+  /低强度|慢节奏|轻松|少走路|少步行|减少体力|不要太累|不想太累|不太折腾|不要太折腾|少折腾|不宜剧烈|避免剧烈|low[-\s]?intensity|light[-\s]?activity|low[-\s]?exertion|avoid overexertion|low[-\s]?hassle/i;
+
+export const HEALTH_STRATEGY_DIET_RE =
+  /低盐|低脂|高纤维|清淡|少油|少糖|地中海饮食|low[-\s]?salt|low[-\s]?fat|high[-\s]?fiber|diet/i;
+
+export const LOW_HASSLE_TRAVEL_RE =
+  /不想太累|不要太累|不太折腾|不要太折腾|少折腾|轻松一点|慢节奏|低强度|减少体力|少走路|少步行|中老年|老人|老年|带爸妈|父母同行|family[-\s]?friendly|senior[-\s]?friendly|low[-\s]?hassle|easy[-\s]?pace/i;
+
+export const TRANSPORT_CONVENIENCE_RE =
+  /交通方便|交通便利|地铁近|离地铁近|靠近地铁|近地铁|地铁站附近|步行可达|少换乘|换乘少|直达|出行方便|near metro|near subway|easy transit|well[-\s]?connected|walkable/i;
+
+export const SAFETY_STRATEGY_RE =
+  /治安|安全|安全感|不被坑|防坑|防骗|诈骗|抢劫|夜间|夜里|夜晚|security|safety|safe|scam|fraud|danger|risk/i;
 
 export const LANGUAGE_CONSTRAINT_RE =
   /不会英语|不会英文|英语不好|英文不好|语言不通|语言障碍|翻译|口译|同传|不懂西语|不懂法语|不会当地语言|沟通困难|speak english|english poor|language barrier|translation/i;

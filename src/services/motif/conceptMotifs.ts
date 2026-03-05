@@ -1,6 +1,7 @@
 import type { CDG, EdgeType } from "../../core/graph.js";
 import type { ConceptItem } from "../concepts.js";
 import { isEnglishLocale, type AppLocale } from "../../i18n/locale.js";
+import { validateBoundaryReasoningEdge } from "./relationValidator.js";
 
 export type ConceptMotifType = "pair" | "triad";
 export type MotifInstanceStatus = "active" | "uncertain" | "deprecated" | "cancelled";
@@ -45,6 +46,10 @@ export type MotifCoverageInvariantReport = {
   uncoveredCausalEdges: number;
   repairedMotifCount: number;
   componentCount: number;
+  excludedNonReasoningEdges?: number;
+  excludedByReason?: Record<string, number>;
+  llmValidatedEdges?: number;
+  llmRejectedEdges?: number;
 };
 
 export type ConceptMotif = {
@@ -98,6 +103,8 @@ export type ConceptMotif = {
   rationale?: string;
   coverage_origin?: MotifCoverageOrigin;
   subgraph_verified?: boolean;
+  reasoning_eligible?: boolean;
+  coverage_skip_reason?: string;
 };
 
 const MAX_ACTIVE_MOTIFS_PER_ANCHOR = 3;
@@ -291,6 +298,20 @@ function motifReuseInfo(m: ConceptMotif, conceptById: Map<string, ConceptItem>):
 
 function applyMotifReuseClassification(motif: ConceptMotif, conceptById: Map<string, ConceptItem>): ConceptMotif {
   const info = motifReuseInfo(motif, conceptById);
+  const normalizedUserStatus = normalizeMotifLifecycleStatus(motif.status, "active");
+  if (motif.resolvedBy === "user" && motif.resolved && isUserEditableStatus(normalizedUserStatus)) {
+    return {
+      ...motif,
+      reuseClass: info.reuseClass,
+      reuseReason: info.reuseClass === "context_specific" ? cleanText(info.reuseReason, 120) || motif.reuseReason : undefined,
+      status: normalizedUserStatus,
+      motif_instance_status: normalizeMotifInstanceStatus(
+        motif.motif_instance_status || normalizedUserStatus,
+        "active"
+      ),
+      statusReason: motif.statusReason || `user_override:${normalizedUserStatus}`,
+    };
+  }
   if (info.reuseClass === "reusable") {
     return {
       ...motif,
@@ -2348,6 +2369,7 @@ type RequiredCausalCoverageEdge = {
   edgeConfidence: number;
   fromConceptIds: string[];
   toConceptIds: string[];
+  reasoningScore: number;
 };
 
 const COVERAGE_CAUSAL_RELATIONS: EdgeType[] = ["enable", "constraint", "determine"];
@@ -2360,54 +2382,313 @@ function isDurationFamily(family: string): boolean {
   return family === "duration_total" || family === "duration_city";
 }
 
+function isMetadataFamily(family: string): boolean {
+  return family === "destination" || family === "duration_city" || family === "sub_location" || family === "other";
+}
+
+function shouldForceSkipCoveragePair(params: {
+  relation: EdgeType;
+  sourceFamily: string;
+  targetFamily: string;
+}): string | null {
+  const sourceFamily = params.sourceFamily;
+  const targetFamily = params.targetFamily;
+  if (!sourceFamily || !targetFamily) return "pair_family_missing";
+
+  // Known itinerary metadata bindings, not reusable reasoning.
+  if ((sourceFamily === "destination" || sourceFamily === "sub_location") && isDurationFamily(targetFamily)) {
+    return "metadata_destination_duration";
+  }
+
+  if (sourceFamily === "duration_city" && (targetFamily === "destination" || targetFamily === "duration_total")) {
+    return "metadata_city_duration_binding";
+  }
+
+  if (sourceFamily === "meeting_critical" && targetFamily === "destination") {
+    return "metadata_critical_day_binding";
+  }
+
+  if (isMetadataFamily(sourceFamily) && isMetadataFamily(targetFamily)) {
+    return "metadata_pair";
+  }
+
+  if (sourceFamily === "goal" && targetFamily === "goal") {
+    return "goal_self_binding";
+  }
+
+  return null;
+}
+
+function familyCompatibilityScore(params: {
+  relation: EdgeType;
+  sourceFamily: string;
+  targetFamily: string;
+}): number {
+  const sourceFamily = params.sourceFamily;
+  const targetFamily = params.targetFamily;
+  if (!sourceFamily || !targetFamily) return 0;
+  const reuseMatrix = REUSE_MATRIX[params.relation as "constraint" | "determine" | "enable"];
+  if (
+    reuseMatrix &&
+    reuseMatrix.sources.has(sourceFamily) &&
+    reuseMatrix.targets.has(targetFamily) &&
+    REUSABLE_FAMILIES.has(sourceFamily) &&
+    REUSABLE_FAMILIES.has(targetFamily)
+  ) {
+    return 1;
+  }
+
+  if (sourceFamily === "limiting_factor" && ["activity_preference", "lodging", "goal", "generic_constraint"].includes(targetFamily)) {
+    return 0.95;
+  }
+  if (sourceFamily === "generic_constraint" && ["goal", "lodging", "activity_preference"].includes(targetFamily)) {
+    return 0.82;
+  }
+  if (sourceFamily === "budget" && ["goal", "lodging", "duration_total"].includes(targetFamily)) {
+    return 0.86;
+  }
+  if (sourceFamily === "people" && ["goal", "lodging", "activity_preference"].includes(targetFamily)) {
+    return 0.8;
+  }
+  if (sourceFamily === "duration_total" && ["goal", "activity_preference", "lodging"].includes(targetFamily)) {
+    return 0.8;
+  }
+  if (sourceFamily === "scenic_preference" && targetFamily === "goal") return 0.72;
+  if (sourceFamily === "activity_preference" && targetFamily === "goal") return 0.72;
+  if (sourceFamily === "lodging" && targetFamily === "goal") return 0.72;
+  if (sourceFamily === "destination" && targetFamily === "goal") return 0.55;
+  if (targetFamily === "goal" && !isMetadataFamily(sourceFamily)) return 0.62;
+  if (isMetadataFamily(sourceFamily) || isMetadataFamily(targetFamily)) return 0.28;
+  return 0.46;
+}
+
+function lexicalTokens(input: string): string[] {
+  const text = cleanText(input, 220).toLowerCase();
+  if (!text) return [];
+  const raw = text.match(/[\u4e00-\u9fff]{1,4}|[a-z0-9]{2,24}/g) || [];
+  return Array.from(new Set(raw)).slice(0, 16);
+}
+
+function tokenOverlapScore(a: string[], b: string[]): number {
+  if (!a.length || !b.length) return 0;
+  const sa = new Set(a);
+  const sb = new Set(b);
+  let inter = 0;
+  for (const x of sa) if (sb.has(x)) inter += 1;
+  const union = new Set([...sa, ...sb]).size;
+  return union ? inter / union : 0;
+}
+
+function lexicalEntailmentScore(fromConcept: ConceptItem | undefined, toConcept: ConceptItem | undefined): number {
+  const sourceTokens = lexicalTokens(`${fromConcept?.title || ""} ${fromConcept?.description || ""}`);
+  const targetTokens = lexicalTokens(`${toConcept?.title || ""} ${toConcept?.description || ""}`);
+  const overlap = tokenOverlapScore(sourceTokens, targetTokens);
+  if (!sourceTokens.length || !targetTokens.length) return 0.42;
+  return clamp01(0.32 + overlap * 0.9, 0.42);
+}
+
+function groundingStrengthScore(fromConcept: ConceptItem | undefined, toConcept: ConceptItem | undefined): number {
+  const clsToScore = (x: ConceptGroundingClass): number => {
+    if (x === "user") return 1;
+    if (x === "unknown") return 0.56;
+    return 0.18;
+  };
+  const source = clsToScore(conceptGroundingClass(fromConcept));
+  const target = clsToScore(conceptGroundingClass(toConcept));
+  return clamp01((source + target) / 2, 0.5);
+}
+
+function topologySupportScore(params: {
+  edgeConfidence: number;
+  fromConceptIds: string[];
+  toConceptIds: string[];
+}): number {
+  const conf = clamp01(params.edgeConfidence, 0.74);
+  const multiplicityPenalty =
+    params.fromConceptIds.length > 2 || params.toConceptIds.length > 2
+      ? 0.1
+      : params.fromConceptIds.length > 1 || params.toConceptIds.length > 1
+      ? 0.05
+      : 0;
+  return clamp01(conf - multiplicityPenalty, 0.72);
+}
+
+function edgeReasoningScore(params: {
+  relation: EdgeType;
+  edgeConfidence: number;
+  fromConceptIds: string[];
+  toConceptIds: string[];
+  fromConcept: ConceptItem | undefined;
+  toConcept: ConceptItem | undefined;
+}): number {
+  const sourceFamily = canonicalConceptFamily(params.fromConcept);
+  const targetFamily = canonicalConceptFamily(params.toConcept);
+  const family = familyCompatibilityScore({
+    relation: params.relation,
+    sourceFamily,
+    targetFamily,
+  });
+  const grounding = groundingStrengthScore(params.fromConcept, params.toConcept);
+  const lexical = lexicalEntailmentScore(params.fromConcept, params.toConcept);
+  const topology = topologySupportScore({
+    edgeConfidence: params.edgeConfidence,
+    fromConceptIds: params.fromConceptIds,
+    toConceptIds: params.toConceptIds,
+  });
+  return clamp01(family * 0.42 + grounding * 0.24 + lexical * 0.14 + topology * 0.2, 0.62);
+}
+
+function reasoningScoreThreshold(relation: EdgeType): number {
+  if (relation === "determine") return 0.68;
+  if (relation === "constraint") return 0.64;
+  return 0.62;
+}
+
+function shouldRunBoundaryValidation(score: number, relation: EdgeType): boolean {
+  const thr = reasoningScoreThreshold(relation);
+  return score >= thr - 0.08 && score <= thr + 0.07;
+}
+
+type CoverageEligibilityDecision = {
+  eligible: boolean;
+  reason: string;
+  score: number;
+  llmValidated: boolean;
+  llmRejected: boolean;
+};
+
 function isCoverageEligiblePair(params: {
   relation: EdgeType;
   fromConcept: ConceptItem | undefined;
   toConcept: ConceptItem | undefined;
-}): boolean {
+  edgeConfidence: number;
+  fromConceptIds: string[];
+  toConceptIds: string[];
+}): CoverageEligibilityDecision {
   const sourceFamily = canonicalConceptFamily(params.fromConcept);
   const targetFamily = canonicalConceptFamily(params.toConcept);
-  if (!sourceFamily || !targetFamily) return false;
-
-  // These are itinerary metadata bindings, not reusable cognitive reasoning motifs.
-  if ((sourceFamily === "destination" || sourceFamily === "sub_location") && isDurationFamily(targetFamily)) {
-    return false;
+  const forceSkipReason = shouldForceSkipCoveragePair({
+    relation: params.relation,
+    sourceFamily,
+    targetFamily,
+  });
+  if (forceSkipReason) {
+    return {
+      eligible: false,
+      reason: forceSkipReason,
+      score: 0,
+      llmValidated: false,
+      llmRejected: false,
+    };
   }
-  return true;
+
+  const score = edgeReasoningScore({
+    relation: params.relation,
+    edgeConfidence: params.edgeConfidence,
+    fromConceptIds: params.fromConceptIds,
+    toConceptIds: params.toConceptIds,
+    fromConcept: params.fromConcept,
+    toConcept: params.toConcept,
+  });
+  const threshold = reasoningScoreThreshold(params.relation);
+  if (score >= threshold) {
+    return {
+      eligible: true,
+      reason: "reasoning_score_pass",
+      score,
+      llmValidated: false,
+      llmRejected: false,
+    };
+  }
+
+  if (shouldRunBoundaryValidation(score, params.relation)) {
+    const boundary = validateBoundaryReasoningEdge({
+      relation: params.relation,
+      sourceFamily,
+      targetFamily,
+      sourceText: cleanText(params.fromConcept?.title || "", 220),
+      targetText: cleanText(params.toConcept?.title || "", 220),
+      score,
+      edgeConfidence: params.edgeConfidence,
+    });
+    return {
+      eligible: boundary.accepted,
+      reason: boundary.reason,
+      score,
+      llmValidated: boundary.validator === "llm" && boundary.accepted,
+      llmRejected: boundary.validator === "llm" && !boundary.accepted,
+    };
+  }
+
+  return {
+    eligible: false,
+    reason: "reasoning_score_low",
+    score,
+    llmValidated: false,
+    llmRejected: false,
+  };
 }
 
 function collectRequiredCausalCoverageEdges(params: {
   graph: CDG;
   concepts: ConceptItem[];
-}): RequiredCausalCoverageEdge[] {
+}): {
+  required: RequiredCausalCoverageEdge[];
+  excludedByReason: Record<string, number>;
+  excludedNonReasoningEdges: number;
+  llmValidatedEdges: number;
+  llmRejectedEdges: number;
+} {
   const conceptById = new Map((params.concepts || []).map((c) => [c.id, c]));
   const nodeToConcepts = buildNodeToConcepts(params.concepts);
-  const out: RequiredCausalCoverageEdge[] = [];
+  const required: RequiredCausalCoverageEdge[] = [];
+  const excludedByReason: Record<string, number> = {};
+  let excludedNonReasoningEdges = 0;
+  let llmValidatedEdges = 0;
+  let llmRejectedEdges = 0;
+  const bumpReason = (reason: string) => {
+    const key = cleanText(reason || "unknown", 60) || "unknown";
+    excludedByReason[key] = (excludedByReason[key] || 0) + 1;
+  };
   for (const edge of params.graph.edges || []) {
     if (!isCoverageRelation(edge.type)) continue;
     const fromConceptIds = uniq(nodeToConcepts.get(edge.from) || [], 24);
     const toConceptIds = uniq(nodeToConcepts.get(edge.to) || [], 24);
-    if (!fromConceptIds.length || !toConceptIds.length) continue;
+    if (!fromConceptIds.length || !toConceptIds.length) {
+      excludedNonReasoningEdges += 1;
+      bumpReason("edge_concept_unmapped");
+      continue;
+    }
 
-    const eligiblePairs: Array<{ fromId: string; toId: string }> = [];
+    const eligiblePairs: Array<{ fromId: string; toId: string; score: number }> = [];
     for (const fromId of fromConceptIds) {
       for (const toId of toConceptIds) {
-        if (
-          isCoverageEligiblePair({
-            relation: edge.type,
-            fromConcept: conceptById.get(fromId),
-            toConcept: conceptById.get(toId),
-          })
-        ) {
-          eligiblePairs.push({ fromId, toId });
+        const decision = isCoverageEligiblePair({
+          relation: edge.type,
+          fromConcept: conceptById.get(fromId),
+          toConcept: conceptById.get(toId),
+          edgeConfidence: clamp01(edge.confidence, 0.78),
+          fromConceptIds,
+          toConceptIds,
+        });
+        if (decision.llmValidated) llmValidatedEdges += 1;
+        if (decision.llmRejected) llmRejectedEdges += 1;
+        if (decision.eligible) {
+          eligiblePairs.push({ fromId, toId, score: decision.score });
+        } else {
+          bumpReason(decision.reason);
         }
       }
     }
-    if (!eligiblePairs.length) continue;
+    if (!eligiblePairs.length) {
+      excludedNonReasoningEdges += 1;
+      continue;
+    }
 
     const eligibleFromIds = uniq(eligiblePairs.map((x) => x.fromId), 24);
     const eligibleToIds = uniq(eligiblePairs.map((x) => x.toId), 24);
-    out.push({
+    const bestScore = eligiblePairs.reduce((acc, x) => Math.max(acc, x.score), 0);
+    required.push({
       edgeId: cleanText(edge.id, 120) || stableId(`edge:${edge.from}->${edge.to}:${edge.type}`),
       fromNodeId: cleanText(edge.from, 120),
       toNodeId: cleanText(edge.to, 120),
@@ -2415,9 +2696,16 @@ function collectRequiredCausalCoverageEdges(params: {
       edgeConfidence: clamp01(edge.confidence, 0.78),
       fromConceptIds: eligibleFromIds,
       toConceptIds: eligibleToIds,
+      reasoningScore: clamp01(bestScore, 0.7),
     });
   }
-  return out;
+  return {
+    required,
+    excludedByReason,
+    excludedNonReasoningEdges,
+    llmValidatedEdges,
+    llmRejectedEdges,
+  };
 }
 
 function motifSourceIdsForCoverage(motif: ConceptMotif): string[] {
@@ -2453,20 +2741,23 @@ function buildConceptPairRelationIndex(params: {
   const pairs = new Set<string>();
   for (const edge of params.graph.edges || []) {
     if (!isCoverageRelation(edge.type)) continue;
-    const fromConceptIds = nodeToConcepts.get(edge.from) || [];
-    const toConceptIds = nodeToConcepts.get(edge.to) || [];
+    const fromConceptIds = uniq(nodeToConcepts.get(edge.from) || [], 24);
+    const toConceptIds = uniq(nodeToConcepts.get(edge.to) || [], 24);
+    const edgeConfidence = clamp01(edge.confidence, 0.78);
     for (const fromId of fromConceptIds) {
       for (const toId of toConceptIds) {
         const fid = cleanText(fromId, 120);
         const tid = cleanText(toId, 120);
         if (!fid || !tid || fid === tid) continue;
-        if (
-          !isCoverageEligiblePair({
-            relation: edge.type,
-            fromConcept: conceptById.get(fid),
-            toConcept: conceptById.get(tid),
-          })
-        ) {
+        const decision = isCoverageEligiblePair({
+          relation: edge.type,
+          fromConcept: conceptById.get(fid),
+          toConcept: conceptById.get(tid),
+          edgeConfidence,
+          fromConceptIds,
+          toConceptIds,
+        });
+        if (!decision.eligible) {
           continue;
         }
         pairs.add(`${edge.type}:${fid}->${tid}`);
@@ -2627,10 +2918,11 @@ export function enforceCausalEdgeCoverage(params: {
   maxRounds?: number;
 }): { motifs: ConceptMotif[]; report: MotifCoverageInvariantReport } {
   const conceptById = new Map((params.concepts || []).map((c) => [c.id, c]));
-  const required = collectRequiredCausalCoverageEdges({
+  const coverage = collectRequiredCausalCoverageEdges({
     graph: params.graph,
     concepts: params.concepts,
   });
+  const required = coverage.required;
   const maxRounds = Math.max(0, Math.min(6, Number(params.maxRounds) || 2));
   let motifs = (params.motifs || []).slice();
   let repairedMotifCount = 0;
@@ -2661,9 +2953,22 @@ export function enforceCausalEdgeCoverage(params: {
   });
   motifs = motifs.map((motif) => {
     const coverageOrigin: MotifCoverageOrigin = motif.coverage_origin === "edge_repair" ? "edge_repair" : "native";
+    const relation = normalizeDependencyClass(motif.dependencyClass || motif.relation, motif.relation);
+    const target = cleanText(motif.anchorConceptId, 120);
+    const sources = motifSourceIdsForCoverage(motif);
+    const reasoningEligible =
+      isCoverageRelation(relation) &&
+      !!target &&
+      !!sources.length &&
+      sources.every((source) => pairIndex.has(`${relation}:${source}->${target}`));
     return {
       ...motif,
       coverage_origin: coverageOrigin,
+      reasoning_eligible: reasoningEligible,
+      coverage_skip_reason:
+        reasoningEligible || !isCoverageRelation(relation)
+          ? undefined
+          : "no_reasoning_pair_support",
       subgraph_verified:
         coverageOrigin === "edge_repair"
           ? true
@@ -2687,6 +2992,10 @@ export function enforceCausalEdgeCoverage(params: {
       uncoveredCausalEdges: Math.max(0, required.length - coveredCausalEdges),
       repairedMotifCount,
       componentCount: motifComponentCount(motifs),
+      excludedNonReasoningEdges: coverage.excludedNonReasoningEdges,
+      excludedByReason: coverage.excludedByReason,
+      llmValidatedEdges: coverage.llmValidatedEdges,
+      llmRejectedEdges: coverage.llmRejectedEdges,
     },
   };
 }

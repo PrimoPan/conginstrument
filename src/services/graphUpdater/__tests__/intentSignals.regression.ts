@@ -1188,6 +1188,179 @@ const cases: Case[] = [
     },
   },
   {
+    name: "health constraint should drive low-intensity and diet subtree",
+    run: () => {
+      const latestText = "我有冠心病，旅游选择低强度，饮食上选择低盐低脂高纤维";
+      const signals = extractIntentSignalsWithRecency(
+        "我4月10日到4月12日去米兰，预算10000元",
+        latestText
+      );
+      assert.equal(/冠心病|心脏|cardiac/i.test(String(signals.healthConstraint || "")), true);
+      assert.equal(/低强度|low[-\\s]?intensity/i.test(String(signals.activityPreference || "")), true);
+      assert.equal(
+        (signals.genericConstraints || []).some((x) => {
+          const text = String(x?.text || "");
+          return x?.kind === "diet" || /低盐|低脂|高纤维|low[-\\s]?salt|low[-\\s]?fat|high[-\\s]?fiber/i.test(text);
+        }),
+        true
+      );
+
+      const state = buildSlotStateMachine({
+        userText: latestText,
+        recentTurns: [
+          { role: "user", content: "我4月10日到4月12日去米兰，预算10000元" },
+          { role: "assistant", content: "好的" },
+          { role: "user", content: latestText },
+        ],
+        signals,
+      });
+
+      const healthNode = state.nodes.find((n: any) =>
+        String(n?.slotKey || "").startsWith("slot:constraint:limiting:health")
+      );
+      const activityNode = state.nodes.find(
+        (n: any) => String(n?.slotKey || "") === "slot:activity_preference"
+      );
+      const dietNode = state.nodes.find((n: any) =>
+        String(n?.slotKey || "").startsWith("slot:constraint:limiting:diet")
+      );
+      assert.ok(healthNode, "missing health limiting factor node");
+      assert.ok(activityNode, "missing low-intensity activity preference node");
+      assert.ok(dietNode, "missing diet limiting factor node");
+      assert.equal(
+        state.edges.some(
+          (e: any) =>
+            e.fromSlot === String(healthNode?.slotKey || "") &&
+            e.toSlot === "slot:activity_preference" &&
+            e.type === "determine"
+        ),
+        true
+      );
+      assert.equal(
+        state.edges.some(
+          (e: any) =>
+            e.fromSlot === String(healthNode?.slotKey || "") &&
+            e.toSlot === String(dietNode?.slotKey || "") &&
+            e.type === "constraint"
+        ),
+        true
+      );
+    },
+  },
+  {
+    name: "family low-hassle pattern should form mobility to lodging subtree",
+    run: () => {
+      const latestText = "带爸妈去巴黎，不要太折腾，酒店最好离地铁近";
+      const signals = extractIntentSignalsWithRecency(
+        "同行人数2人，去巴黎玩4天",
+        latestText
+      );
+      const state = buildSlotStateMachine({
+        userText: latestText,
+        recentTurns: [
+          { role: "user", content: "同行人数2人，去巴黎玩4天" },
+          { role: "assistant", content: "收到" },
+          { role: "user", content: latestText },
+        ],
+        signals,
+      });
+
+      const mobilityNode = state.nodes.find((n: any) =>
+        String(n?.slotKey || "").startsWith("slot:constraint:limiting:mobility")
+      );
+      const lodgingNode = state.nodes.find((n: any) => String(n?.slotKey || "") === "slot:lodging");
+      assert.ok(mobilityNode, "missing mobility limiting node");
+      assert.ok(lodgingNode, "missing lodging preference node");
+      assert.equal(
+        state.edges.some(
+          (e: any) =>
+            e.fromSlot === String(mobilityNode?.slotKey || "") &&
+            e.toSlot === "slot:lodging"
+        ),
+        true
+      );
+      assert.equal(
+        state.edges.some(
+          (e: any) =>
+            e.fromSlot === "slot:people" &&
+            e.toSlot === "slot:lodging" &&
+            e.type === "determine"
+        ),
+        true
+      );
+    },
+  },
+  {
+    name: "safety factor should constrain lodging strategy subtree",
+    run: () => {
+      const latestText = "我不想被坑，我想住在市中心安全一些的酒店";
+      const signals = extractIntentSignalsWithRecency(
+        "我去米兰旅游3天",
+        latestText
+      );
+      const state = buildSlotStateMachine({
+        userText: latestText,
+        recentTurns: [
+          { role: "user", content: "我去米兰旅游3天" },
+          { role: "assistant", content: "收到" },
+          { role: "user", content: latestText },
+        ],
+        signals,
+      });
+
+      const safetyNode = state.nodes.find((n: any) =>
+        String(n?.slotKey || "").startsWith("slot:constraint:limiting:safety")
+      );
+      assert.ok(safetyNode, "missing safety limiting node");
+      assert.equal(
+        state.edges.some(
+          (e: any) =>
+            e.fromSlot === String(safetyNode?.slotKey || "") &&
+            e.toSlot === "slot:lodging" &&
+            e.type === "constraint"
+        ),
+        true
+      );
+    },
+  },
+  {
+    name: "language barrier should drive logistics subtree",
+    run: () => {
+      const latestText = "我不会英语，尽量少换乘，酒店靠近地铁";
+      const signals = extractIntentSignalsWithRecency(
+        "我4月去伦敦旅游",
+        latestText
+      );
+      const state = buildSlotStateMachine({
+        userText: latestText,
+        recentTurns: [
+          { role: "user", content: "我4月去伦敦旅游" },
+          { role: "assistant", content: "收到" },
+          { role: "user", content: latestText },
+        ],
+        signals,
+      });
+
+      const languageNode = state.nodes.find((n: any) =>
+        String(n?.slotKey || "").startsWith("slot:constraint:limiting:language")
+      );
+      const logisticsNode = state.nodes.find((n: any) =>
+        String(n?.slotKey || "").startsWith("slot:constraint:limiting:logistics")
+      );
+      assert.ok(languageNode, "missing language limiting node");
+      assert.ok(logisticsNode, "missing logistics limiting node");
+      assert.equal(
+        state.edges.some(
+          (e: any) =>
+            e.fromSlot === String(languageNode?.slotKey || "") &&
+            e.toSlot === String(logisticsNode?.slotKey || "") &&
+            e.type === "determine"
+        ),
+        true
+      );
+    },
+  },
+  {
     name: "highly similar freeform concepts should be deduplicated",
     run: () => {
       const graph = {

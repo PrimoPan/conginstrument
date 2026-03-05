@@ -28,13 +28,13 @@ export type ConstraintClassified = {
 const LEGAL_RE =
   /签证|申根|护照|入境|出入境|海关|居留|许可|visa|passport|immigration|permit|consulate|embassy/i;
 const SAFETY_RE =
-  /危险|高风险|不安全|治安|诈骗|抢劫|急救|夜间不宜|安全一点|更安全|治安好|security|safety|danger|emergency|risk/i;
+  /危险|高风险|不安全|治安|诈骗|抢劫|急救|夜间不宜|安全一点|更安全|治安好|不想被坑|不被坑|防坑|防骗|宰客|骗局|security|safety|danger|emergency|risk|scam|fraud/i;
 const MOBILITY_RE =
-  /行动不便|轮椅|无障碍|不能久走|不能爬|台阶|体力|走不动|搬运行李|mobility|wheelchair|accessibility/i;
+  /行动不便|轮椅|无障碍|不能久走|不能爬|台阶|体力|走不动|搬运行李|不想太累|不要太累|不太折腾|不要太折腾|少折腾|低强度|慢节奏|减少体力|少走路|中老年|老人|老年|mobility|wheelchair|accessibility|low[-\s]?intensity|low[-\s]?hassle/i;
 const LOGISTICS_RE =
-  /转机|换乘|赶路|托运|交通衔接|时差|航班|火车|机场接送|中转|connection|layover|flight|train|logistics/i;
+  /转机|换乘|赶路|托运|交通衔接|时差|航班|火车|机场接送|中转|交通方便|交通便利|离地铁近|靠近地铁|地铁站附近|步行可达|connection|layover|flight|train|logistics|near metro|easy transit|well[-\s]?connected/i;
 const DIET_RE =
-  /饮食|忌口|素食|清真|清真餐|过敏原|海鲜过敏|乳糖不耐|麸质|不吃辣|halal|kosher|vegetarian|vegan|allergy/i;
+  /饮食|忌口|素食|清真|清真餐|过敏原|海鲜过敏|乳糖不耐|麸质|不吃辣|低盐|低脂|高纤维|清淡|少油|少糖|地中海饮食|halal|kosher|vegetarian|vegan|allergy|low[-\s]?salt|low[-\s]?fat|high[-\s]?fiber|diet/i;
 const RELIGION_RE =
   /宗教|礼拜|祷告|清真寺|教堂|寺庙|斋月|安息日|宗教活动|religion|prayer|mosque|church|temple|ramadan|sabbath/i;
 
@@ -105,7 +105,47 @@ function inferHardness(text: string): boolean {
   return HARD_REQUIRE_RE.test(text) || HARD_CONSTRAINT_RE.test(text);
 }
 
-function inferGenericKind(text: string): { kind: GenericConstraintKind; severity?: "medium" | "high" | "critical" } {
+function normalizeGenericKindHint(raw: any): GenericConstraintKind | "" {
+  const s = cleanStatement(raw || "", 40).toLowerCase();
+  const mapped =
+    s === "security" || s === "travel_safety" || s === "safety_risk"
+      ? "safety"
+      : s === "medical"
+        ? "other"
+        : s === "lang"
+          ? "other"
+          : s;
+  if (
+    mapped === "legal" ||
+    mapped === "safety" ||
+    mapped === "mobility" ||
+    mapped === "logistics" ||
+    mapped === "diet" ||
+    mapped === "religion" ||
+    mapped === "other"
+  ) {
+    return mapped;
+  }
+  return "";
+}
+
+function defaultSeverityForKind(kind: GenericConstraintKind): "medium" | "high" | "critical" {
+  if (kind === "safety") return "high";
+  if (kind === "legal") return "high";
+  if (kind === "mobility") return "high";
+  if (kind === "diet") return "high";
+  if (kind === "religion") return "high";
+  if (kind === "logistics") return "medium";
+  return "medium";
+}
+
+function inferGenericKind(
+  text: string,
+  kindHint?: GenericConstraintKind
+): { kind: GenericConstraintKind; severity?: "medium" | "high" | "critical" } {
+  if (kindHint && kindHint !== "other") {
+    return { kind: kindHint, severity: defaultSeverityForKind(kindHint) };
+  }
   if (LEGAL_RE.test(text)) return { kind: "legal", severity: "high" };
   if (SAFETY_RE.test(text)) {
     const critical = /急救|人身|危及|critical|urgent/i.test(text);
@@ -123,6 +163,7 @@ export function classifyConstraintText(params: {
   evidence?: string;
   importance?: number;
   hardHint?: boolean;
+  kindHint?: GenericConstraintKind | string;
 }): ConstraintClassified | null {
   const text = normalizeConstraintText(params.text || "");
   if (!text) return null;
@@ -151,7 +192,7 @@ export function classifyConstraintText(params: {
     };
   }
 
-  const generic = inferGenericKind(text);
+  const generic = inferGenericKind(text, normalizeGenericKindHint(params.kindHint));
   const baseImportanceByKind: Record<GenericConstraintKind, number> = {
     legal: 0.88,
     safety: 0.9,

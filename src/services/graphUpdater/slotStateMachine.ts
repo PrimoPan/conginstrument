@@ -1,5 +1,12 @@
 import type { IntentSignals } from "./intentSignals.js";
 import { buildTravelIntentStatement, isLikelyDestinationCandidate, normalizeDestination } from "./intentSignals.js";
+import {
+  HEALTH_STRATEGY_ACTIVITY_RE,
+  HEALTH_STRATEGY_DIET_RE,
+  LOW_HASSLE_TRAVEL_RE,
+  SAFETY_STRATEGY_RE,
+  TRANSPORT_CONVENIENCE_RE,
+} from "./constants.js";
 import { cleanStatement } from "./text.js";
 import type { SlotEdgeSpec, SlotGraphState, SlotNodeSpec } from "./slotTypes.js";
 import { isEnglishLocale, type AppLocale } from "../../i18n/locale.js";
@@ -371,6 +378,49 @@ function pushEdge(edges: SlotEdgeSpec[], fromSlot: string, toSlot: string, type:
   edges.push({ fromSlot, toSlot, type, confidence: clamp01(confidence, 0.78) });
 }
 
+function matchesHealthActivityStrategy(text: string): boolean {
+  return HEALTH_STRATEGY_ACTIVITY_RE.test(cleanStatement(text || "", 160));
+}
+
+function matchesHealthDietStrategy(text: string): boolean {
+  return HEALTH_STRATEGY_DIET_RE.test(cleanStatement(text || "", 160));
+}
+
+function matchesLowBurdenStrategy(text: string): boolean {
+  const s = cleanStatement(text || "", 180);
+  return LOW_HASSLE_TRAVEL_RE.test(s);
+}
+
+function matchesTransportConvenienceStrategy(text: string): boolean {
+  const s = cleanStatement(text || "", 180);
+  return TRANSPORT_CONVENIENCE_RE.test(s);
+}
+
+function matchesSafetyStrategy(text: string): boolean {
+  const s = cleanStatement(text || "", 180);
+  return SAFETY_STRATEGY_RE.test(s);
+}
+
+function matchesLanguageExecutionStrategy(text: string): boolean {
+  const s = cleanStatement(text || "", 180);
+  return /语言|英语|外语|沟通|翻译|language|english|communication|translate/i.test(s);
+}
+
+function matchesReligionStrategy(text: string): boolean {
+  const s = cleanStatement(text || "", 180);
+  return /宗教|礼拜|祷告|清真|斋月|安息日|religion|prayer|halal|kosher|ramadan|sabbath/i.test(s);
+}
+
+function matchesLegalStrategy(text: string): boolean {
+  const s = cleanStatement(text || "", 180);
+  return /签证|护照|入境|海关|居留|visa|passport|immigration|permit|legal/i.test(s);
+}
+
+function hasFamilyComfortCue(text: string): boolean {
+  const s = cleanStatement(text || "", 180);
+  return /父母|爸妈|家人|中老年|老人|老年|年纪|family|parents|senior/i.test(s);
+}
+
 type LimitingFactor = {
   text: string;
   evidence: string;
@@ -430,9 +480,27 @@ function inferLimitingKind(rawKind: string | undefined, text: string): string {
   if (/饮食|忌口|清真|素食|过敏原|halal|kosher|vegetarian|vegan|diet/i.test(s)) return "diet";
   if (/宗教|礼拜|祷告|斋月|安息日|religion|prayer|ramadan|sabbath/i.test(s)) return "religion";
   if (/签证|护照|入境|海关|法律|visa|passport|immigration|permit|legal/i.test(s)) return "legal";
-  if (/轮椅|无障碍|体力|行动不便|不能久走|mobility|wheelchair|accessibility/i.test(s)) return "mobility";
-  if (/治安|安全|安全感|危险|夜间|夜里|夜晚|抢劫|诈骗|security|safety|danger|risk|night/i.test(s)) return "safety";
-  if (/转机|换乘|托运|航班|火车|机场|时差|logistics|layover|flight|train/i.test(s)) return "logistics";
+  if (
+    /轮椅|无障碍|体力|行动不便|不能久走|不想太累|不要太累|不太折腾|不要太折腾|少折腾|低强度|慢节奏|中老年|老人|老年|mobility|wheelchair|accessibility|low[-\s]?hassle|low[-\s]?intensity/i.test(
+      s
+    )
+  ) {
+    return "mobility";
+  }
+  if (
+    /治安|安全|安全感|危险|夜间|夜里|夜晚|抢劫|诈骗|不想被坑|不被坑|防坑|防骗|宰客|security|safety|danger|risk|night|scam|fraud/i.test(
+      s
+    )
+  ) {
+    return "safety";
+  }
+  if (
+    /转机|换乘|托运|航班|火车|机场|时差|交通方便|交通便利|离地铁近|靠近地铁|地铁站附近|步行可达|出行方便|logistics|layover|flight|train|near metro|easy transit|well[-\s]?connected/i.test(
+      s
+    )
+  ) {
+    return "logistics";
+  }
   return "other";
 }
 
@@ -462,6 +530,30 @@ function semanticTokens(kind: string, text: string): string[] {
     if (/慢性病|chronic|糖尿病|高血压|哮喘/i.test(s)) push("chronic");
     if (/过敏|allergy/i.test(s)) push("allergy");
     if (/体力|强度|不能久走|爬山|intensity|exertion/i.test(s)) push("intensity");
+  } else if (kind === "mobility") {
+    if (/不想太累|不要太累|低强度|慢节奏|少折腾|low[-\s]?intensity|low[-\s]?hassle/i.test(s)) push("pace");
+    if (/少走路|少步行|不能久走|走不动|体力|exertion|walking/i.test(s)) push("walking");
+    if (/老人|老年|中老年|父母|爸妈|senior|parents/i.test(s)) push("senior");
+    if (/轮椅|无障碍|wheelchair|accessibility/i.test(s)) push("accessibility");
+  } else if (kind === "logistics") {
+    if (/交通方便|交通便利|离地铁近|靠近地铁|地铁站附近|near metro|easy transit|well[-\s]?connected/i.test(s)) push("transit");
+    if (/少换乘|换乘少|直达|transfer|layover/i.test(s)) push("transfer");
+    if (/机场|航班|火车|flight|train|airport/i.test(s)) push("airport");
+  } else if (kind === "diet") {
+    if (/低盐|low[-\s]?salt/i.test(s)) push("low_salt");
+    if (/低脂|low[-\s]?fat/i.test(s)) push("low_fat");
+    if (/高纤维|high[-\s]?fiber/i.test(s)) push("fiber");
+    if (/清淡|少油|少糖|地中海|diet/i.test(s)) push("light_diet");
+  } else if (kind === "religion") {
+    if (/清真|halal/i.test(s)) push("halal");
+    if (/kosher|犹太/i.test(s)) push("kosher");
+    if (/礼拜|祷告|prayer/i.test(s)) push("prayer");
+    if (/斋月|安息日|ramadan|sabbath/i.test(s)) push("calendar");
+  } else if (kind === "legal") {
+    if (/签证|visa/i.test(s)) push("visa");
+    if (/护照|passport/i.test(s)) push("passport");
+    if (/入境|immigration|海关|customs/i.test(s)) push("entry");
+    if (/许可|permit|居留|residence/i.test(s)) push("permit");
   } else {
     const normalized = normalizeLimitingText(s);
     if (normalized) push(normalized.slice(0, 32));
@@ -484,6 +576,36 @@ function canonicalLimitingText(kind: string, tokens: string[], raw: string): str
     }
     if (hasSecurity) {
       return cjk ? "需优先考虑安全性" : "Safety needs to be prioritized";
+    }
+  }
+  if (kind === "mobility") {
+    const hasPace = tokens.includes("pace");
+    const hasWalking = tokens.includes("walking");
+    const hasSenior = tokens.includes("senior");
+    if ((hasPace || hasWalking) && hasSenior) {
+      return cjk ? "中老年同行，行程需低强度少折腾" : "Senior-friendly travel should keep low intensity and low hassle";
+    }
+    if (hasPace || hasWalking) {
+      return cjk ? "行程需低强度、减少体力负担" : "Trip should be low-intensity with reduced physical burden";
+    }
+  }
+  if (kind === "logistics") {
+    if (tokens.includes("transit") || tokens.includes("transfer")) {
+      return cjk ? "交通衔接需便利、少换乘" : "Transit should be convenient with minimal transfers";
+    }
+  }
+  if (kind === "diet") {
+    if (tokens.includes("low_salt") || tokens.includes("low_fat") || tokens.includes("fiber")) {
+      return cjk ? "饮食需低盐低脂高纤维" : "Diet should be low-salt, low-fat, high-fiber";
+    }
+  }
+  if (kind === "religion") {
+    if (tokens.includes("halal")) return cjk ? "饮食需满足清真要求" : "Meals should satisfy halal requirements";
+    if (tokens.includes("prayer")) return cjk ? "行程需预留礼拜时间" : "Itinerary should reserve prayer windows";
+  }
+  if (kind === "legal") {
+    if (tokens.includes("visa") || tokens.includes("entry")) {
+      return cjk ? "需满足签证与入境要求" : "Visa and entry requirements must be satisfied";
     }
   }
   return cleanStatement(raw || "", 120);
@@ -760,6 +882,8 @@ export function buildSlotStateMachine(params: {
 
   const destinationSlotKeys: string[] = [];
   const limitingFactorSlotKeys: string[] = [];
+  const limitingFactorSlotsByKind = new Map<string, string[]>();
+  const limitingFactorBySlot = new Map<string, LimitingFactor>();
   let peopleSlotKey: string | null = null;
   let budgetSlotKey: string | null = null;
   let budgetSpentSlotKey: string | null = null;
@@ -1232,6 +1356,9 @@ export function buildSlotStateMachine(params: {
       rebuttalPoints,
     });
     limitingFactorSlotKeys.push(slotKey);
+    if (!limitingFactorSlotsByKind.has(kind)) limitingFactorSlotsByKind.set(kind, []);
+    limitingFactorSlotsByKind.get(kind)!.push(slotKey);
+    limitingFactorBySlot.set(slotKey, factor);
     pushEdge(edges, slotKey, "slot:goal", factor.hard ? "constraint" : "determine", factor.hard ? 0.92 : 0.82);
   }
 
@@ -1334,11 +1461,146 @@ export function buildSlotStateMachine(params: {
     pushEdge(edges, "slot:lodging", "slot:goal", params.signals.lodgingPreferenceHard ? "constraint" : "enable", 0.76);
   }
 
+  const nodeBySlot = new Map(nodes.map((x) => [x.slotKey, x]));
+  const strategyTargetsByKind = new Map<string, Set<string>>();
+  const addStrategyTarget = (kind: string, slotKey: string) => {
+    const key = cleanStatement(kind, 24).toLowerCase();
+    const slot = cleanStatement(slotKey, 120);
+    if (!key || !slot) return;
+    if (!strategyTargetsByKind.has(key)) strategyTargetsByKind.set(key, new Set<string>());
+    strategyTargetsByKind.get(key)!.add(slot);
+  };
+
+  const activityStatement = cleanStatement(
+    nodeBySlot.get(activitySlotKey || "")?.statement || nodeBySlot.get(activitySlotKey || "")?.claim || "",
+    180
+  );
+  const lodgingStatement = cleanStatement(
+    nodeBySlot.get(lodgingSlotKey || "")?.statement || nodeBySlot.get(lodgingSlotKey || "")?.claim || "",
+    180
+  );
+
+  if (activitySlotKey && activityStatement) {
+    if (matchesHealthActivityStrategy(activityStatement)) addStrategyTarget("health", activitySlotKey);
+    if (matchesLowBurdenStrategy(activityStatement)) {
+      addStrategyTarget("health", activitySlotKey);
+      addStrategyTarget("mobility", activitySlotKey);
+    }
+  }
+  if (lodgingSlotKey && lodgingStatement) {
+    if (matchesSafetyStrategy(lodgingStatement)) addStrategyTarget("safety", lodgingSlotKey);
+    if (matchesTransportConvenienceStrategy(lodgingStatement)) {
+      addStrategyTarget("mobility", lodgingSlotKey);
+      addStrategyTarget("logistics", lodgingSlotKey);
+    }
+    if (matchesLowBurdenStrategy(lodgingStatement)) addStrategyTarget("mobility", lodgingSlotKey);
+  }
+
+  for (const slotKey of limitingFactorSlotKeys) {
+    const node = nodeBySlot.get(slotKey);
+    const factor = limitingFactorBySlot.get(slotKey);
+    if (!node || !factor) continue;
+    const statement = cleanStatement(node.statement || node.claim || factor.text || "", 180);
+    if (factor.kind === "diet" || matchesHealthDietStrategy(statement)) {
+      addStrategyTarget("health", slotKey);
+      addStrategyTarget("diet", slotKey);
+    }
+    if (factor.kind === "mobility" || matchesLowBurdenStrategy(statement)) {
+      addStrategyTarget("mobility", slotKey);
+      addStrategyTarget("health", slotKey);
+    }
+    if (factor.kind === "safety" || matchesSafetyStrategy(statement)) {
+      addStrategyTarget("safety", slotKey);
+    }
+    if (factor.kind === "language" || matchesLanguageExecutionStrategy(statement)) {
+      addStrategyTarget("language", slotKey);
+      addStrategyTarget("logistics", slotKey);
+    }
+    if (factor.kind === "logistics" || matchesTransportConvenienceStrategy(statement)) {
+      addStrategyTarget("logistics", slotKey);
+      addStrategyTarget("mobility", slotKey);
+      addStrategyTarget("language", slotKey);
+    }
+    if (factor.kind === "religion" || matchesReligionStrategy(statement)) {
+      addStrategyTarget("religion", slotKey);
+      addStrategyTarget("diet", slotKey);
+    }
+    if (factor.kind === "legal" || matchesLegalStrategy(statement)) {
+      addStrategyTarget("legal", slotKey);
+    }
+  }
+
+  const linkKindToStrategies = (kind: string, roots: string[]) => {
+    if (!roots.length) return;
+    const targets = Array.from(strategyTargetsByKind.get(kind) || []);
+    for (const root of roots) {
+      for (const target of targets) {
+        if (!target || target === root) continue;
+        const targetFactorKind = cleanStatement(limitingFactorBySlot.get(target)?.kind || "", 24).toLowerCase();
+        if (kind === "logistics" && targetFactorKind === "language") continue;
+        let edgeType: SlotEdgeSpec["type"] = "constraint";
+        let confidence = 0.82;
+
+        if (target === activitySlotKey) {
+          edgeType = kind === "health" || kind === "mobility" ? "determine" : "constraint";
+          confidence = kind === "health" ? 0.88 : kind === "mobility" ? 0.86 : 0.8;
+        } else if (target === lodgingSlotKey) {
+          edgeType =
+            kind === "logistics" || kind === "language" ? "determine" : "constraint";
+          confidence = kind === "safety" ? 0.9 : kind === "mobility" ? 0.84 : 0.82;
+        } else if (/^slot:constraint:limiting:diet/.test(target)) {
+          edgeType = "constraint";
+          confidence = kind === "health" ? 0.9 : kind === "religion" ? 0.84 : 0.8;
+        } else if (/^slot:constraint:limiting:logistics/.test(target)) {
+          edgeType = kind === "language" ? "determine" : "constraint";
+          confidence = kind === "language" ? 0.84 : 0.8;
+        } else if (/^slot:constraint:limiting:safety/.test(target)) {
+          edgeType = "constraint";
+          confidence = 0.86;
+        } else if (/^slot:constraint:limiting:mobility/.test(target)) {
+          edgeType = kind === "health" ? "determine" : "constraint";
+          confidence = kind === "health" ? 0.84 : 0.8;
+        }
+
+        pushEdge(edges, root, target, edgeType, confidence);
+      }
+    }
+  };
+
+  linkKindToStrategies("health", Array.from(new Set(limitingFactorSlotsByKind.get("health") || [])).slice(0, 12));
+  linkKindToStrategies("safety", Array.from(new Set(limitingFactorSlotsByKind.get("safety") || [])).slice(0, 12));
+  linkKindToStrategies("mobility", Array.from(new Set(limitingFactorSlotsByKind.get("mobility") || [])).slice(0, 12));
+  linkKindToStrategies("language", Array.from(new Set(limitingFactorSlotsByKind.get("language") || [])).slice(0, 12));
+  linkKindToStrategies("logistics", Array.from(new Set(limitingFactorSlotsByKind.get("logistics") || [])).slice(0, 12));
+  linkKindToStrategies("diet", Array.from(new Set(limitingFactorSlotsByKind.get("diet") || [])).slice(0, 12));
+  linkKindToStrategies("religion", Array.from(new Set(limitingFactorSlotsByKind.get("religion") || [])).slice(0, 12));
+  linkKindToStrategies("legal", Array.from(new Set(limitingFactorSlotsByKind.get("legal") || [])).slice(0, 12));
+
+  if (durationTotalSlotKey && activitySlotKey && matchesLowBurdenStrategy(activityStatement)) {
+    pushEdge(edges, durationTotalSlotKey, activitySlotKey, "constraint", 0.82);
+  }
+  if (budgetSlotKey && lodgingSlotKey) {
+    pushEdge(edges, budgetSlotKey, lodgingSlotKey, "constraint", 0.82);
+  }
+  const hasFamilyComfortFactor = limitingFactorSlotKeys.some((slotKey) => {
+    const text = cleanStatement(
+      nodeBySlot.get(slotKey)?.statement || nodeBySlot.get(slotKey)?.claim || limitingFactorBySlot.get(slotKey)?.text || "",
+      180
+    );
+    return hasFamilyComfortCue(text) || matchesLowBurdenStrategy(text);
+  });
+  if (peopleSlotKey && lodgingSlotKey && hasFamilyComfortFactor) {
+    pushEdge(edges, peopleSlotKey, lodgingSlotKey, "determine", 0.8);
+  }
+  if (peopleSlotKey && activitySlotKey && hasFamilyComfortFactor && matchesLowBurdenStrategy(activityStatement)) {
+    pushEdge(edges, peopleSlotKey, activitySlotKey, "determine", 0.8);
+  }
+
   return {
     nodes,
     edges,
     notes: [
-      "slot_state_machine_v4_single_conflict_engine",
+      "slot_state_machine_v5_reasoning_subtree_families",
       "conflicts_are_derived_from_motif_only",
     ],
   };

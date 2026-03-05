@@ -7,12 +7,17 @@ import {
   HARD_DAY_ACTION_RE,
   HARD_DAY_FORCE_RE,
   HARD_REQUIRE_RE,
+  HEALTH_STRATEGY_ACTIVITY_RE,
+  HEALTH_STRATEGY_DIET_RE,
   LANGUAGE_CONSTRAINT_RE,
+  LOW_HASSLE_TRAVEL_RE,
   MEDICAL_HEALTH_RE,
   NATURE_TOPIC_RE,
   NON_PLACE_TOKEN_RE,
   PLACE_STOPWORD_RE,
   PREFERENCE_MARKER_RE,
+  SAFETY_STRATEGY_RE,
+  TRANSPORT_CONVENIENCE_RE,
 } from "./constants.js";
 import {
   classifyConstraintText,
@@ -1907,6 +1912,14 @@ export function normalizeLodgingPreferenceStatement(raw: string, locale?: AppLoc
   if (isExpenseOnly) return null;
   const hard = HARD_REQUIRE_RE.test(s) || HARD_CONSTRAINT_RE.test(s);
   const en = isEnglishLocale(locale);
+  const safetyOrArea =
+    SAFETY_STRATEGY_RE.test(s) ||
+    /住市中心|市中心|中心区域|核心区|区域安全|安全区域|治安更好|更安全/i.test(s);
+  const transportConvenience =
+    TRANSPORT_CONVENIENCE_RE.test(s) ||
+    /交通方便|交通便利|离地铁近|靠近地铁|地铁站附近|步行可达|少换乘|换乘少|出行方便/i.test(s);
+  const quietBalance =
+    /安静|清净|不吵|宁静/i.test(s) && /不要太封闭|别太封闭|不要封闭|不封闭|别太偏|不要太偏/i.test(s);
 
   if (/(五星|5星|豪华|高端)/i.test(s)) {
     return {
@@ -1918,6 +1931,42 @@ export function normalizeLodgingPreferenceStatement(raw: string, locale?: AppLoc
   if (/(经济型|省钱|便宜|青年旅舍|青旅)/i.test(s)) {
     return {
       statement: en ? "Lodging preference: prioritize budget accommodation" : "住宿偏好：优先经济型住宿",
+      hard,
+      evidence: s,
+    };
+  }
+  if (safetyOrArea && transportConvenience) {
+    return {
+      statement: en
+        ? "Lodging preference: prioritize safer central areas with convenient transit access"
+        : "住宿偏好：优先安全且交通便利的市中心区域",
+      hard,
+      evidence: s,
+    };
+  }
+  if (safetyOrArea) {
+    return {
+      statement: en
+        ? "Lodging preference: prioritize safer areas"
+        : "住宿偏好：优先治安更好的区域",
+      hard,
+      evidence: s,
+    };
+  }
+  if (transportConvenience) {
+    return {
+      statement: en
+        ? "Lodging preference: prioritize transport-convenient locations near metro/walkable hubs"
+        : "住宿偏好：优先交通便利、靠近地铁或步行可达",
+      hard,
+      evidence: s,
+    };
+  }
+  if (quietBalance) {
+    return {
+      statement: en
+        ? "Lodging preference: quiet environment without being too isolated"
+        : "住宿偏好：安静但不要太封闭",
       hard,
       evidence: s,
     };
@@ -1934,15 +1983,21 @@ function normalizeActivityPreferenceStatement(raw: string, locale?: AppLocale) {
   if (!s) return null;
   const hasSports = /球迷|看球|观赛|比赛|球赛|主场|客场|德比|门票|球票|足球|篮球|赛事/i.test(s);
   const hasEvent = /演唱会|音乐会|演出|展览|看展|live\s*show|concert|match|game/i.test(s);
-  if (!hasSports && !hasEvent) return null;
+  const hasLowIntensity = HEALTH_STRATEGY_ACTIVITY_RE.test(s);
+  if (!hasSports && !hasEvent && !hasLowIntensity) return null;
   if (
     !HARD_REQUIRE_RE.test(s) &&
     !HARD_CONSTRAINT_RE.test(s) &&
-    !/喜欢|偏好|热爱|粉丝|球迷|想看|一定要|必须|务必|绝对/i.test(s)
+    !/喜欢|偏好|热爱|粉丝|球迷|想看|一定要|必须|务必|绝对|希望|尽量|减少|选择|采用|低强度|轻松|避免|不要|不能|不宜/i.test(
+      s
+    )
   ) {
     return null;
   }
-  const hard = HARD_REQUIRE_RE.test(s) || HARD_CONSTRAINT_RE.test(s);
+  const hard =
+    HARD_REQUIRE_RE.test(s) ||
+    HARD_CONSTRAINT_RE.test(s) ||
+    (hasLowIntensity && /必须|务必|避免|不要|不能|不宜|只/i.test(s));
   const normalizeTeamName = (x: string) =>
     cleanStatement(x || "", 24)
       .replace(/^(?:我是|我|一个|一名|个|位)+\s*/i, "")
@@ -1955,7 +2010,11 @@ function normalizeActivityPreferenceStatement(raw: string, locale?: AppLocale) {
     "";
   const team = normalizeTeamName(teamRaw);
   const en = isEnglishLocale(locale);
-  const statement = hasSports
+  const statement = hasLowIntensity
+    ? en
+      ? "Activity preference: low-intensity itinerary with reduced exertion"
+      : "活动偏好：低强度行程，减少体力负担"
+    : hasSports
     ? team
       ? en
         ? `Activity preference: prioritize ${cleanStatement(team, 20)} related matches`
@@ -2665,6 +2724,27 @@ export function extractIntentSignals(userText: string, opts?: { historyMode?: bo
   }
 
   const genericConstraints: NonNullable<IntentSignals["genericConstraints"]> = [];
+  const pushDerivedGenericConstraint = (params: {
+    text: string;
+    kind: GenericConstraintKind;
+    evidence?: string;
+    hard?: boolean;
+    importance?: number;
+  }) => {
+    const text = cleanStatement(params.text, 120);
+    if (!text) return;
+    genericConstraints.push({
+      text,
+      evidence: cleanStatement(params.evidence || params.text, 80),
+      kind: params.kind,
+      hard: !!params.hard,
+      severity:
+        params.kind === "safety" || params.kind === "mobility" || params.kind === "diet" || params.kind === "religion" || params.kind === "legal"
+          ? "high"
+          : "medium",
+      importance: clampImportance(params.importance, params.hard ? 0.84 : 0.76),
+    });
+  };
   for (const part of sentenceParts(text)) {
     const s = cleanStatement(part, 120);
     if (!s) continue;
@@ -2675,7 +2755,11 @@ export function extractIntentSignals(userText: string, opts?: { historyMode?: bo
       HARD_REQUIRE_RE.test(s) ||
       hasConstraintDeclarationCue(s) ||
       hasExplicitConstraintNegationCue(s) ||
-      /签证|护照|入境|治安|安全|轮椅|无障碍|转机|换乘|托运|语言障碍|不会英语|翻译|饮食|忌口|素食|清真|宗教|礼拜|祷告|斋月|安息日|halal|kosher|vegetarian|vegan|religion|prayer|visa|passport|safety|logistics/i.test(
+      LOW_HASSLE_TRAVEL_RE.test(s) ||
+      SAFETY_STRATEGY_RE.test(s) ||
+      TRANSPORT_CONVENIENCE_RE.test(s) ||
+      HEALTH_STRATEGY_DIET_RE.test(s) ||
+      /签证|护照|入境|治安|安全|被坑|防骗|轮椅|无障碍|转机|换乘|托运|语言障碍|不会英语|翻译|饮食|忌口|素食|清真|宗教|礼拜|祷告|斋月|安息日|低盐|低脂|高纤维|清淡|少油|少糖|不想太累|不太折腾|中老年|老人|地铁近|交通方便|halal|kosher|vegetarian|vegan|religion|prayer|visa|passport|safety|logistics|low[-\s]?salt|low[-\s]?fat|high[-\s]?fiber|diet/i.test(
         s
       );
     if (!likelyConstraintCue) continue;
@@ -2684,16 +2768,38 @@ export function extractIntentSignals(userText: string, opts?: { historyMode?: bo
       evidence: s,
     });
     if (!c) continue;
-    if (c.family === "health" && !out.healthConstraint) {
-      out.healthConstraint = c.text;
-      out.healthEvidence = c.evidence;
-      out.healthImportance = c.importance;
+    if (c.family === "health") {
+      if (!out.healthConstraint) {
+        out.healthConstraint = c.text;
+        out.healthEvidence = c.evidence;
+        out.healthImportance = c.importance;
+      }
       continue;
     }
-    if (c.family === "language" && !out.languageConstraint) {
-      out.languageConstraint = c.text;
-      out.languageEvidence = c.evidence;
-      out.languageImportance = c.importance;
+    if (c.family === "language") {
+      if (!out.languageConstraint) {
+        out.languageConstraint = c.text;
+        out.languageEvidence = c.evidence;
+        out.languageImportance = c.importance;
+      }
+      if (TRANSPORT_CONVENIENCE_RE.test(s) || /换乘|转机|地铁|公交|交通|出行方便|transfer|transit|metro/i.test(s)) {
+        pushDerivedGenericConstraint({
+          text: "交通衔接需便利、少换乘",
+          kind: "logistics",
+          evidence: c.evidence,
+          hard: c.hard,
+          importance: c.importance,
+        });
+      }
+      if (LOW_HASSLE_TRAVEL_RE.test(s)) {
+        pushDerivedGenericConstraint({
+          text: "行程需低强度、减少体力负担",
+          kind: "mobility",
+          evidence: c.evidence,
+          hard: c.hard,
+          importance: c.importance,
+        });
+      }
       continue;
     }
     if (c.family === "generic") {
@@ -2716,6 +2822,24 @@ export function extractIntentSignals(userText: string, opts?: { historyMode?: bo
         severity: c.severity,
         importance: c.importance,
       });
+      if (c.kind === "logistics" && LOW_HASSLE_TRAVEL_RE.test(s)) {
+        pushDerivedGenericConstraint({
+          text: "行程需低强度、减少体力负担",
+          kind: "mobility",
+          evidence: c.evidence,
+          hard: c.hard,
+          importance: c.importance,
+        });
+      }
+      if (c.kind === "mobility" && TRANSPORT_CONVENIENCE_RE.test(s)) {
+        pushDerivedGenericConstraint({
+          text: "交通衔接需便利、少换乘",
+          kind: "logistics",
+          evidence: c.evidence,
+          hard: c.hard,
+          importance: c.importance,
+        });
+      }
     }
   }
   out.genericConstraints = mergeGenericConstraints(undefined, genericConstraints);
