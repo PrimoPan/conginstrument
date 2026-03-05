@@ -24,6 +24,7 @@ import {
   type PortfolioDocumentState,
 } from "../services/planningState.js";
 import { normalizeLocale, isEnglishLocale, type AppLocale } from "../i18n/locale.js";
+import type { ConceptItem } from "../services/concepts.js";
 
 export const convRouter = Router();
 convRouter.use(authMiddleware);
@@ -88,6 +89,427 @@ function parseBoolFlag(v: any): boolean {
     return s === "1" || s === "true" || s === "yes" || s === "on";
   }
   return false;
+}
+
+type ConversationPlanningBootstrap = {
+  sourceConversationId?: string;
+  destination?: string;
+  keepConsistentText?: string;
+  carryHealthReligion?: boolean;
+};
+
+function slugToken(input: string, max = 48): string {
+  return String(input || "")
+    .toLowerCase()
+    .replace(/[^\p{L}\p{N}]+/gu, "_")
+    .replace(/_+/g, "_")
+    .replace(/^_+|_+$/g, "")
+    .slice(0, max);
+}
+
+function cleanInput(input: any, max = 220): string {
+  return String(input || "")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, max);
+}
+
+function uniqValues(arr: any[], max = 24): string[] {
+  const out: string[] = [];
+  const seen = new Set<string>();
+  for (const raw of arr || []) {
+    const value = cleanInput(raw, 120);
+    if (!value || seen.has(value)) continue;
+    seen.add(value);
+    out.push(value);
+    if (out.length >= max) break;
+  }
+  return out;
+}
+
+function stableGraphItemId(prefix: string, raw: string): string {
+  const safe = slugToken(raw, 80) || "item";
+  return `${prefix}_${safe}`;
+}
+
+function defaultTravelPlanState(params: {
+  locale: AppLocale;
+  taskId: string;
+  nowIso: string;
+  destinationScope?: string[];
+  constraints?: string[];
+  summary?: string;
+}): TravelPlanState {
+  const en = isEnglishLocale(params.locale);
+  const destinationScope = Array.isArray(params.destinationScope)
+    ? params.destinationScope.map((x) => cleanInput(x, 80)).filter(Boolean)
+    : [];
+  const constraints = Array.isArray(params.constraints)
+    ? params.constraints.map((x) => cleanInput(x, 180)).filter(Boolean)
+    : [];
+  const defaultSummary = en
+    ? "No travel plan yet. Start chatting to build one."
+    : "暂无旅行计划，请先开始对话。";
+  const summary = cleanInput(params.summary, 220) || defaultSummary;
+  const sourceMap: Record<string, string> = {};
+  constraints.forEach((_, idx) => {
+    sourceMap[`constraints.${idx}`] = "transferred_pattern_based";
+  });
+
+  return {
+    version: 1,
+    task_id: params.taskId,
+    plan_version: 1,
+    updatedAt: params.nowIso,
+    last_updated: params.nowIso,
+    summary,
+    trip_goal_summary: summary,
+    destinations: destinationScope,
+    destination_scope: destinationScope,
+    constraints,
+    travelers: [en ? "TBD" : "待确认"],
+    candidate_options: [],
+    itinerary_outline: [],
+    day_by_day_plan: [],
+    transport_plan: [],
+    stay_plan: [],
+    food_plan: [],
+    risk_notes: [],
+    budget_notes: [],
+    open_questions: [],
+    rationale_refs: [],
+    source_map: sourceMap,
+    export_ready_text: "",
+    changelog: [],
+    dayPlans: [],
+    source: { turnCount: 0 },
+  } as any;
+}
+
+function parsePlanningBootstrap(raw: any): ConversationPlanningBootstrap | null {
+  if (!raw || typeof raw !== "object") return null;
+  const sourceConversationId = cleanInput((raw as any).sourceConversationId, 80);
+  const destination = cleanInput((raw as any).destination, 80);
+  const keepConsistentText = cleanInput((raw as any).keepConsistentText, 400);
+  const carryHealthReligionRaw = (raw as any).carryHealthReligion;
+  const carryHealthReligion =
+    carryHealthReligionRaw == null ? true : parseBoolFlag(carryHealthReligionRaw);
+
+  if (!sourceConversationId && !destination && !keepConsistentText) return null;
+  return {
+    sourceConversationId: sourceConversationId || undefined,
+    destination: destination || undefined,
+    keepConsistentText: keepConsistentText || undefined,
+    carryHealthReligion,
+  };
+}
+
+function conceptFamily(raw: any): string {
+  return cleanInput(raw?.family, 40).toLowerCase();
+}
+
+function conceptSemanticKey(raw: any): string {
+  return cleanInput(raw?.semanticKey, 180).toLowerCase();
+}
+
+function conceptText(raw: any): string {
+  const bits = [
+    cleanInput(raw?.title, 160),
+    cleanInput(raw?.description, 180),
+    cleanInput(raw?.semanticKey, 180),
+    Array.isArray(raw?.evidenceTerms) ? raw.evidenceTerms.join(" ") : "",
+  ]
+    .map((x) => cleanInput(x, 220))
+    .filter(Boolean);
+  return bits.join(" ").toLowerCase();
+}
+
+function tokenize(input: string): Set<string> {
+  const text = cleanInput(input, 420).toLowerCase();
+  const parts = text.match(/[\u4e00-\u9fff]{1,4}|[a-z0-9]{2,24}/g) || [];
+  return new Set(parts);
+}
+
+function hasTokenOverlap(a: Set<string>, b: Set<string>): boolean {
+  if (!a.size || !b.size) return false;
+  for (const x of a) {
+    if (b.has(x)) return true;
+  }
+  return false;
+}
+
+function limitingKindFromSemantic(semanticKey: string): string {
+  if (!semanticKey.startsWith("slot:constraint:limiting:")) return "";
+  return semanticKey.slice("slot:constraint:limiting:".length).split(":")[0] || "";
+}
+
+function isCarryHealthReligionConcept(concept: any): boolean {
+  const semantic = conceptSemanticKey(concept);
+  const family = conceptFamily(concept);
+  const text = conceptText(concept);
+  const kind = limitingKindFromSemantic(semantic);
+  if (kind === "health" || kind === "religion") return true;
+  if (family !== "limiting_factor") return false;
+  return /冠心病|心脏|心肺|慢性病|健康|医疗|health|cardiac|medical|宗教|信仰|礼拜|祷告|religion|faith|prayer|halal|kosher/i.test(
+    text
+  );
+}
+
+function carriesByKeepText(concept: any, keepTokens: Set<string>, keepTextRaw: string): boolean {
+  if (!keepTextRaw || !keepTokens.size) return false;
+  const family = conceptFamily(concept);
+  const semantic = conceptSemanticKey(concept);
+  const text = conceptText(concept);
+  if (/保留全部|延续全部|沿用全部|keep all|keep everything|same as last trip/i.test(keepTextRaw)) {
+    return [
+      "limiting_factor",
+      "people",
+      "budget",
+      "lodging",
+      "activity_preference",
+      "scenic_preference",
+      "generic_constraint",
+      "duration_total",
+    ].includes(family);
+  }
+  const conceptTokens = tokenize(text);
+  if (hasTokenOverlap(keepTokens, conceptTokens)) return true;
+
+  if (
+    /饮食|低盐|低脂|高纤维|diet|low salt|low fat|fiber/i.test(keepTextRaw) &&
+    (limitingKindFromSemantic(semantic) === "diet" || /饮食|diet/i.test(text))
+  ) {
+    return true;
+  }
+  if (
+    /预算|budget/i.test(keepTextRaw) &&
+    (family === "budget" || semantic.startsWith("slot:budget"))
+  ) {
+    return true;
+  }
+  if (
+    /节奏|低强度|轻松|慢一点|pace|low intensity|easy/i.test(keepTextRaw) &&
+    (family === "activity_preference" || /低强度|轻松|节奏|slow|low intensity/i.test(text))
+  ) {
+    return true;
+  }
+  if (
+    /人数|同行|家人|父亲|母亲|parents|family|travelers|party size/i.test(keepTextRaw) &&
+    (family === "people" || semantic === "slot:people")
+  ) {
+    return true;
+  }
+  return false;
+}
+
+function mapConceptKind(rawKind: any): "belief" | "constraint" | "preference" | "factual_assertion" {
+  const kind = cleanInput(rawKind, 32).toLowerCase();
+  if (kind === "belief" || kind === "constraint" || kind === "preference") return kind;
+  return "factual_assertion";
+}
+
+function defaultLayerForType(type: "belief" | "constraint" | "preference" | "factual_assertion") {
+  if (type === "belief") return "intent";
+  if (type === "preference") return "preference";
+  return "requirement";
+}
+
+function defaultStrengthForType(type: "belief" | "constraint" | "preference" | "factual_assertion") {
+  return type === "constraint" ? "hard" : "soft";
+}
+
+async function buildBootstrapGraphAndPlan(params: {
+  userId: ObjectId;
+  locale: AppLocale;
+  conversationId: string;
+  bootstrap: ConversationPlanningBootstrap | null;
+}): Promise<{ graph: CDG; travelPlanState: TravelPlanState; autoTitle?: string }> {
+  const nowIso = new Date().toISOString();
+  const fallbackPlan = defaultTravelPlanState({
+    locale: params.locale,
+    taskId: params.conversationId,
+    nowIso,
+  });
+  if (!params.bootstrap) {
+    return {
+      graph: emptyGraph(params.conversationId),
+      travelPlanState: fallbackPlan,
+    };
+  }
+
+  const destination = cleanInput(params.bootstrap.destination, 80);
+  const keepConsistentText = cleanInput(params.bootstrap.keepConsistentText, 420);
+  const keepTextLower = keepConsistentText.toLowerCase();
+  const keepTokens = tokenize(keepConsistentText);
+
+  let sourceConcepts: ConceptItem[] = [];
+  if (params.bootstrap.sourceConversationId) {
+    const sourceOid = parseObjectId(params.bootstrap.sourceConversationId);
+    if (sourceOid) {
+      const sourceConv = await collections.conversations.findOne({
+        _id: sourceOid,
+        userId: params.userId,
+      });
+      if (sourceConv && Array.isArray((sourceConv as any)?.concepts)) {
+        sourceConcepts = ((sourceConv as any).concepts || []) as ConceptItem[];
+      }
+    }
+  }
+
+  const selectedCarryConcepts: ConceptItem[] = [];
+  const seenCarry = new Set<string>();
+  const tryPush = (concept: ConceptItem) => {
+    const semantic = conceptSemanticKey(concept);
+    const id = cleanInput(concept?.id, 120);
+    const key = semantic || id || cleanInput(concept?.title, 120);
+    if (!key || seenCarry.has(key)) return;
+    seenCarry.add(key);
+    selectedCarryConcepts.push(concept);
+  };
+
+  if (params.bootstrap.carryHealthReligion !== false) {
+    for (const concept of sourceConcepts) {
+      if (isCarryHealthReligionConcept(concept)) tryPush(concept);
+    }
+  }
+  if (keepConsistentText) {
+    for (const concept of sourceConcepts) {
+      if (carriesByKeepText(concept, keepTokens, keepTextLower)) tryPush(concept);
+    }
+  }
+
+  const nodes: CDG["nodes"] = [];
+  const edges: CDG["edges"] = [];
+  let destinationNodeId = "";
+  if (destination) {
+    destinationNodeId = stableGraphItemId("n_dest", destination);
+    nodes.push({
+      id: destinationNodeId,
+      type: "factual_assertion",
+      layer: "requirement",
+      strength: "hard",
+      statement: isEnglishLocale(params.locale) ? `Destination: ${destination}` : `目的地:${destination}`,
+      status: "confirmed",
+      confidence: 0.92,
+      importance: 0.9,
+      key: `slot:destination:${slugToken(destination, 56) || "unknown"}`,
+      sourceMsgIds: ["planning_bootstrap"],
+      value: {
+        provenance: "planning_bootstrap",
+      },
+    } as any);
+  }
+
+  selectedCarryConcepts.slice(0, 10).forEach((concept, idx) => {
+    const semantic = cleanInput((concept as any)?.semanticKey, 180);
+    const title = cleanInput((concept as any)?.title, 120);
+    const nodeId = stableGraphItemId("n_carry", `${semantic || title || "constraint"}_${idx}`);
+    const type = mapConceptKind((concept as any)?.kind);
+    nodes.push({
+      id: nodeId,
+      type,
+      layer: defaultLayerForType(type) as any,
+      strength: defaultStrengthForType(type) as any,
+      statement: title || cleanInput((concept as any)?.description, 120) || `Carry ${idx + 1}`,
+      status: "confirmed",
+      confidence: Math.max(0.56, Math.min(0.98, Number((concept as any)?.score) || 0.82)),
+      importance: Math.max(0.56, Math.min(0.98, Number((concept as any)?.score) || 0.82)),
+      key: semantic || `slot:freeform:${type}:${slugToken(title || `carry_${idx + 1}`)}`,
+      sourceMsgIds: uniqValues(
+        [
+          "planning_bootstrap",
+          `transfer_from:${cleanInput(params.bootstrap?.sourceConversationId, 24) || "history"}`,
+          ...(((concept as any)?.sourceMsgIds || []) as string[]),
+        ],
+        8
+      ),
+      value: {
+        provenance: "planning_bootstrap",
+        transfer_from: cleanInput(params.bootstrap?.sourceConversationId, 80) || undefined,
+        transfer_reason: "carry_over_from_previous_trip",
+      },
+    } as any);
+    if (destinationNodeId) {
+      edges.push({
+        id: stableGraphItemId("e_boot", `${nodeId}->${destinationNodeId}:constraint`),
+        from: nodeId,
+        to: destinationNodeId,
+        type: "constraint",
+        confidence: 0.84,
+      });
+    }
+  });
+
+  if (keepConsistentText && !selectedCarryConcepts.length) {
+    const nodeId = stableGraphItemId("n_keep", keepConsistentText);
+    nodes.push({
+      id: nodeId,
+      type: "constraint",
+      layer: "requirement",
+      strength: "soft",
+      statement: isEnglishLocale(params.locale)
+        ? `Keep consistent: ${keepConsistentText}`
+        : `保持一致:${keepConsistentText}`,
+      status: "confirmed",
+      confidence: 0.8,
+      importance: 0.78,
+      key: `slot:constraint:limiting:other:${slugToken(keepConsistentText, 40) || "carry"}`,
+      sourceMsgIds: ["planning_bootstrap"],
+      value: {
+        provenance: "planning_bootstrap",
+      },
+    } as any);
+    if (destinationNodeId) {
+      edges.push({
+        id: stableGraphItemId("e_boot", `${nodeId}->${destinationNodeId}:constraint`),
+        from: nodeId,
+        to: destinationNodeId,
+        type: "constraint",
+        confidence: 0.78,
+      });
+    }
+  }
+
+  const graph: CDG = {
+    id: params.conversationId,
+    version: 0,
+    nodes: nodes.slice(0, 32),
+    edges: edges.slice(0, 48),
+  };
+
+  const carryTitles = selectedCarryConcepts
+    .map((c) => cleanInput((c as any)?.title, 120))
+    .filter(Boolean)
+    .slice(0, 6);
+  const constraints = carryTitles;
+  if (keepConsistentText && !carryTitles.length) constraints.push(keepConsistentText);
+
+  const summary = destination
+    ? isEnglishLocale(params.locale)
+      ? `New trip to ${destination}. Baseline constraints are preloaded and can be refined in chat.`
+      : `已创建前往${destination}的新旅行规划，并预置可复用约束，可继续补充。`
+    : isEnglishLocale(params.locale)
+    ? "A new trip planning session is created with reusable constraints preloaded."
+    : "已创建新的旅行规划会话，并预置可复用约束。";
+  const autoTitle = destination
+    ? isEnglishLocale(params.locale)
+      ? `Trip Plan · ${destination}`
+      : `旅行规划·${destination}`
+    : undefined;
+  const travelPlanState = defaultTravelPlanState({
+    locale: params.locale,
+    taskId: params.conversationId,
+    nowIso,
+    destinationScope: destination ? [destination] : [],
+    constraints,
+    summary,
+  });
+
+  return {
+    graph,
+    travelPlanState,
+    autoTitle,
+  };
 }
 
 async function loadRecentTurnsForPlan(params: {
@@ -362,14 +784,16 @@ convRouter.get("/", async (req: AuthedRequest, res) => {
 convRouter.post("/", async (req: AuthedRequest, res) => {
   const userId = req.userId!;
   const locale = normalizeLocale(req.body?.locale);
+  const planningBootstrap = parsePlanningBootstrap(req.body?.planningBootstrap);
   const defaultTitle = isEnglishLocale(locale) ? "New Conversation" : "新对话";
-  const title = String(req.body?.title || defaultTitle).slice(0, 80);
+  const requestedTitle = cleanInput(req.body?.title || defaultTitle, 80) || defaultTitle;
   const now = new Date();
   const systemPrompt = defaultSystemPrompt(locale);
+  const nowIso = now.toISOString();
 
   const inserted = await collections.conversations.insertOne({
     userId,
-    title,
+    title: requestedTitle,
     locale,
     systemPrompt,
     model: config.model,
@@ -382,85 +806,38 @@ convRouter.post("/", async (req: AuthedRequest, res) => {
     motifReasoningView: { nodes: [], edges: [] },
     contexts: [],
     validationStatus: "unasked",
-    travelPlanState: {
-      version: 1,
-      task_id: "temp",
-      plan_version: 1,
-      updatedAt: now.toISOString(),
-      last_updated: now.toISOString(),
-      summary: isEnglishLocale(locale)
-        ? "No travel plan yet. Start chatting to build one."
-        : "暂无旅行计划，请先开始对话。",
-      trip_goal_summary: isEnglishLocale(locale)
-        ? "No travel plan yet. Start chatting to build one."
-        : "暂无旅行计划，请先开始对话。",
-      destinations: [],
-      destination_scope: [],
-      constraints: [],
-      travelers: [isEnglishLocale(locale) ? "TBD" : "待确认"],
-      candidate_options: [],
-      itinerary_outline: [],
-      day_by_day_plan: [],
-      transport_plan: [],
-      stay_plan: [],
-      food_plan: [],
-      risk_notes: [],
-      budget_notes: [],
-      open_questions: [],
-      rationale_refs: [],
-      source_map: {},
-      export_ready_text: "",
-      changelog: [],
-      dayPlans: [],
-      source: { turnCount: 0 },
-    },
+    travelPlanState: defaultTravelPlanState({
+      locale,
+      taskId: "temp",
+      nowIso,
+    }),
   } as any);
 
   const conversationId = String(inserted.insertedId);
+  const bootstrap = await buildBootstrapGraphAndPlan({
+    userId,
+    locale,
+    conversationId,
+    bootstrap: planningBootstrap,
+  });
+  const finalTitle =
+    requestedTitle === defaultTitle && bootstrap.autoTitle
+      ? bootstrap.autoTitle.slice(0, 80)
+      : requestedTitle;
 
   await collections.conversations.updateOne(
     { _id: inserted.insertedId, userId },
     {
       $set: {
-        graph: emptyGraph(conversationId),
+        title: finalTitle,
+        graph: bootstrap.graph,
         concepts: [],
         motifs: [],
         motifLinks: [],
         motifReasoningView: { nodes: [], edges: [] },
         contexts: [],
         validationStatus: "unasked",
-        travelPlanState: {
-          version: 1,
-          task_id: conversationId,
-          plan_version: 1,
-          updatedAt: now.toISOString(),
-          last_updated: now.toISOString(),
-          summary: isEnglishLocale(locale)
-            ? "No travel plan yet. Start chatting to build one."
-            : "暂无旅行计划，请先开始对话。",
-          trip_goal_summary: isEnglishLocale(locale)
-            ? "No travel plan yet. Start chatting to build one."
-            : "暂无旅行计划，请先开始对话。",
-          destinations: [],
-          destination_scope: [],
-          constraints: [],
-          travelers: [isEnglishLocale(locale) ? "TBD" : "待确认"],
-          candidate_options: [],
-          itinerary_outline: [],
-          day_by_day_plan: [],
-          transport_plan: [],
-          stay_plan: [],
-          food_plan: [],
-          risk_notes: [],
-          budget_notes: [],
-          open_questions: [],
-          rationale_refs: [],
-          source_map: {},
-          export_ready_text: "",
-          changelog: [],
-          dayPlans: [],
-          source: { turnCount: 0 },
-        },
+        travelPlanState: bootstrap.travelPlanState,
       },
     }
   );
@@ -477,7 +854,15 @@ convRouter.post("/", async (req: AuthedRequest, res) => {
     baseContexts: (conv as any).contexts || [],
     locale,
   });
-  const travelPlanState = (conv as any).travelPlanState as TravelPlanState;
+  const travelPlanState = await computeTravelPlanState({
+    conversationId: inserted.insertedId,
+    userId,
+    graph: model.graph,
+    concepts: model.concepts,
+    motifs: model.motifs,
+    previous: null,
+    locale,
+  });
   const planning = await buildPlanningStateBundle({
     conversationId: inserted.insertedId,
     userId,
@@ -490,16 +875,26 @@ convRouter.post("/", async (req: AuthedRequest, res) => {
     { _id: inserted.insertedId, userId },
     {
       $set: {
+        title: finalTitle,
+        graph: model.graph,
+        concepts: model.concepts,
+        motifs: model.motifs,
+        motifLinks: model.motifLinks,
+        motifReasoningView: model.motifReasoningView,
+        contexts: model.contexts,
+        validationStatus: model.validationStatus,
+        travelPlanState,
         taskDetection: planning.taskDetection,
         cognitiveState: planning.cognitiveState,
         portfolioDocumentState: planning.portfolioDocumentState,
+        updatedAt: now,
       },
     }
   );
 
   res.json({
     conversationId,
-    title: conv.title,
+    title: finalTitle,
     locale: normalizeLocale((conv as any).locale),
     systemPrompt: conv.systemPrompt,
     ...modelPayload(model),

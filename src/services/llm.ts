@@ -25,6 +25,16 @@ function normalizeRecentTurns(
     .map((m) => ({ role: m.role, content: m.content.slice(0, maxEach) }));
 }
 
+function appendCurrentUserTurn(
+  recentTurns: Array<{ role: "user" | "assistant"; content: string }>,
+  userText: string
+): Array<{ role: "user" | "assistant"; content: string }> {
+  const text = String(userText || "").trim();
+  if (!text) return recentTurns;
+  const out = [...(recentTurns || []), { role: "user" as const, content: text }];
+  return normalizeRecentTurns(out);
+}
+
 function appendWeatherAdvisory(baseText: string, advisory: string | null): string {
   const text = String(baseText || "");
   const adv = String(advisory || "").trim();
@@ -54,11 +64,12 @@ export async function generateTurn(params: {
   locale?: AppLocale;
 }): Promise<{ assistant_text: string; graph_patch: GraphPatch }> {
   const safeRecent = normalizeRecentTurns(params.recentTurns);
+  const recentWithCurrentUser = appendCurrentUserTurn(safeRecent, params.userText);
 
   let assistant_text = await generateAssistantTextNonStreaming({
     graph: params.graph,
     userText: params.userText,
-    recentTurns: safeRecent,
+    recentTurns: recentWithCurrentUser,
     systemPrompt: params.systemPrompt,
     locale: params.locale,
   });
@@ -66,7 +77,7 @@ export async function generateTurn(params: {
   const fxAdvisory = await buildFxRateAdvisory({
     graph: params.graph,
     userText: params.userText,
-    recentTurns: safeRecent,
+    recentTurns: recentWithCurrentUser,
     locale: params.locale,
   }).catch(() => null);
   assistant_text = appendFxAdvisory(assistant_text, fxAdvisory);
@@ -74,7 +85,7 @@ export async function generateTurn(params: {
   const weatherAdvisory = await buildExtremeWeatherAdvisory({
     graph: params.graph,
     userText: params.userText,
-    recentTurns: safeRecent,
+    recentTurns: recentWithCurrentUser,
     locale: params.locale,
   }).catch(() => null);
   assistant_text = appendWeatherAdvisory(assistant_text, weatherAdvisory);
@@ -110,11 +121,12 @@ export async function generateTurnStreaming(params: {
   signal?: AbortSignal;
 }): Promise<{ assistant_text: string; graph_patch: GraphPatch }> {
   const safeRecent = normalizeRecentTurns(params.recentTurns);
+  const recentWithCurrentUser = appendCurrentUserTurn(safeRecent, params.userText);
 
   let assistant_text = await streamAssistantText({
     graph: params.graph,
     userText: params.userText,
-    recentTurns: safeRecent,
+    recentTurns: recentWithCurrentUser,
     systemPrompt: params.systemPrompt,
     locale: params.locale,
     onToken: params.onToken,
@@ -124,7 +136,7 @@ export async function generateTurnStreaming(params: {
   const fxAdvisory = await buildFxRateAdvisory({
     graph: params.graph,
     userText: params.userText,
-    recentTurns: safeRecent,
+    recentTurns: recentWithCurrentUser,
     locale: params.locale,
   }).catch(() => null);
   const fxAppended = appendFxAdvisory(assistant_text, fxAdvisory);
@@ -137,7 +149,7 @@ export async function generateTurnStreaming(params: {
   const weatherAdvisory = await buildExtremeWeatherAdvisory({
     graph: params.graph,
     userText: params.userText,
-    recentTurns: safeRecent,
+    recentTurns: recentWithCurrentUser,
     locale: params.locale,
   }).catch(() => null);
   const appended = appendWeatherAdvisory(assistant_text, weatherAdvisory);

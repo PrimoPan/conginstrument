@@ -90,6 +90,16 @@ function intersectCount(a: string[], b: string[]): number {
   return cnt;
 }
 
+function sharedConceptIds(a: string[], b: string[]): string[] {
+  if (!a.length || !b.length) return [];
+  const setB = new Set(b);
+  const out: string[] = [];
+  for (const x of a) {
+    if (setB.has(x) && !out.includes(x)) out.push(x);
+  }
+  return out;
+}
+
 function autoType(a: ConceptMotif, b: ConceptMotif): MotifLinkType {
   if (a.status === "deprecated" || b.status === "deprecated") return "conflicts_with";
   if (a.status === "cancelled" || b.status === "cancelled") return "conflicts_with";
@@ -131,9 +141,29 @@ function buildAutoLinks(motifs: ConceptMotif[]): MotifLink[] {
       const b = candidates[j];
       const overlap = intersectCount(a.conceptIds || [], b.conceptIds || []);
       if (overlap <= 0) continue;
+      const sharedIds = sharedConceptIds(a.conceptIds || [], b.conceptIds || []);
       const type = autoType(a, b);
       const aDependsOnB = !!b.anchorConceptId && (a.conceptIds || []).includes(b.anchorConceptId);
       const bDependsOnA = !!a.anchorConceptId && (b.conceptIds || []).includes(a.anchorConceptId);
+      const sameAnchor = !!a.anchorConceptId && a.anchorConceptId === b.anchorConceptId;
+      const sharedOnlyAnchor =
+        sameAnchor && sharedIds.length === 1 && sharedIds[0] === cleanText(a.anchorConceptId, 120);
+      const depA = dependencyClassOf(a);
+      const depB = dependencyClassOf(b);
+      const sourceSetA = new Set((a.conceptIds || []).filter((id) => id !== a.anchorConceptId));
+      const sourceSetB = new Set((b.conceptIds || []).filter((id) => id !== b.anchorConceptId));
+      const sharedSourceDriver = sharedIds.some((id) => sourceSetA.has(id) && sourceSetB.has(id));
+
+      // Avoid artificial chains for parallel motifs that only share the same anchor.
+      if (type === "supports") {
+        const strongOverlap = sharedIds.length >= 2;
+        const mixedDependencySameAnchor = sameAnchor && depA !== depB;
+        const structuralBridge = aDependsOnB || bDependsOnA;
+        const sharedDriverDifferentTargets = sharedSourceDriver && !sameAnchor && depA !== depB;
+        if (sharedOnlyAnchor) continue;
+        if (!strongOverlap && !mixedDependencySameAnchor && !structuralBridge && !sharedDriverDifferentTargets) continue;
+      }
+
       const from =
         type === "refines"
           ? (a.conceptIds || []).length >= (b.conceptIds || []).length

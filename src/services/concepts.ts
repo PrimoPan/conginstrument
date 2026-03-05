@@ -481,22 +481,58 @@ function conceptPriorityScore(c: ConceptItem): number {
   return c.score + nonFreeformBoost + lockBoost + nodeBoost;
 }
 
+const STRUCTURED_SIMILARITY_MERGE_FAMILIES = new Set<ConceptFamily>([
+  "meeting_critical",
+  "duration_city",
+  "generic_constraint",
+  "limiting_factor",
+  "activity_preference",
+  "scenic_preference",
+  "sub_location",
+  "other",
+]);
+
+function criticalDaySignature(c: ConceptItem): string {
+  if (c.family !== "meeting_critical") return "";
+  const text = cleanText(`${c.title} ${c.semanticKey}`, 260).toLowerCase();
+  const action =
+    /离开|返程|回程|departure|leave|return/.test(text)
+      ? "leave"
+      : /到达|出发|arrive|arrival|depart/.test(text)
+      ? "arrive"
+      : "";
+  const day = text.match(/(\d{1,2})\s*(?:天|day|days)/)?.[1] || "";
+  if (!action && !day) return "";
+  return `${action}:${day}`;
+}
+
 function shouldCollapseHighlySimilarConcept(a: ConceptItem, b: ConceptItem): boolean {
   if (a.id === b.id) return false;
   if (a.kind !== b.kind || a.polarity !== b.polarity) return false;
   if (a.scope !== b.scope || a.family !== b.family) return false;
+  if (normalizeSimilarityText(a.semanticKey) === normalizeSimilarityText(b.semanticKey)) return true;
+
   const freeformA = a.semanticKey.startsWith("slot:freeform:");
   const freeformB = b.semanticKey.startsWith("slot:freeform:");
-  if (!freeformA && !freeformB) return false;
+  const structuredMergeFamily = STRUCTURED_SIMILARITY_MERGE_FAMILIES.has(a.family);
+  if (!freeformA && !freeformB && !structuredMergeFamily) return false;
+
+  const criticalA = criticalDaySignature(a);
+  const criticalB = criticalDaySignature(b);
+  if (criticalA && criticalA === criticalB) return true;
 
   const titleA = normalizeSimilarityText(a.title);
   const titleB = normalizeSimilarityText(b.title);
   if (!!titleA && titleA === titleB) return true;
+  if (!!titleA && !!titleB && (titleA.includes(titleB) || titleB.includes(titleA))) {
+    return true;
+  }
 
   const textA = `${a.title} ${a.description} ${(a.evidenceTerms || []).join(" ")}`;
   const textB = `${b.title} ${b.description} ${(b.evidenceTerms || []).join(" ")}`;
   const sim = jaccardSimilarity(similarityTokens(textA), similarityTokens(textB));
-  return sim >= 0.82;
+  const minSim = structuredMergeFamily && !freeformA && !freeformB ? 0.88 : 0.82;
+  return sim >= minSim;
 }
 
 function mergeConceptPair(a: ConceptItem, b: ConceptItem, now: string): ConceptItem {
