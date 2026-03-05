@@ -1218,6 +1218,7 @@ export function buildTravelPlanState(params: {
   motifs?: ConceptMotif[];
   taskId?: string;
   previous?: TravelPlanState | null;
+  forceTaskSwitch?: boolean;
 }): TravelPlanState {
   const locale = params.locale;
   const graph = params.graph;
@@ -1441,6 +1442,7 @@ export function buildTravelPlanState(params: {
       .filter(Boolean)
   );
   const isTaskSwitch =
+    !!params.forceTaskSwitch ||
     !!params.previous &&
     Number(params.previous?.source?.turnCount || 0) > 0 &&
     detectDestinationTaskSwitch(destinations, previousDestinations);

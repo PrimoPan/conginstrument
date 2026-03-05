@@ -2,6 +2,7 @@ import type { AppLocale } from "../../i18n/locale.js";
 import { isEnglishLocale } from "../../i18n/locale.js";
 import type { ConceptItem } from "../concepts.js";
 import type { ConceptMotif } from "./conceptMotifs.js";
+import type { MotifTransferState } from "../motifTransfer/types.js";
 
 export type MotifQuestionPlan = {
   question: string | null;
@@ -164,11 +165,41 @@ function buildTemplateQuestion(params: {
   return { question: directTemplate(params), template };
 }
 
+function transferMismatchTemplate(params: {
+  locale?: AppLocale;
+  transferState?: MotifTransferState | null;
+}): { question: string; rationale: string } | null {
+  const state = params.transferState;
+  if (!state) return null;
+  const pendingRevision = (state.revisionRequests || []).find((x) => x.status === "pending_user_choice");
+  if (pendingRevision) {
+    const q = t(
+      params.locale,
+      "你刚才否定了已迁移规则。请确认：要覆盖原 motif，还是新建版本？",
+      "You negated an adopted transfer rule. Should we overwrite the old motif or create a new version?"
+    );
+    return { question: q, rationale: `transfer_revision_pending:${pendingRevision.motif_type_id}` };
+  }
+  const degraded = (state.activeInjections || [])
+    .filter((x) => x.injection_state === "disabled" || Number(x.transfer_confidence || 0) < 0.62)
+    .sort((a, b) => Number(a.transfer_confidence || 0) - Number(b.transfer_confidence || 0));
+  if (!degraded.length) return null;
+  const top = degraded[0];
+  const phrase = cleanText(top.constraint_text || top.motif_type_title, 80);
+  const q = t(
+    params.locale,
+    `上次规则这次是否仍适用？例如「${phrase}」如果不再适用，我会改为新版本。`,
+    `Does the prior rule still apply here? For example "${phrase}". If not, I can create a new version.`
+  );
+  return { question: q, rationale: `transfer_mismatch:${top.motif_type_id}` };
+}
+
 export function planMotifQuestion(params: {
   motifs: ConceptMotif[];
   concepts: ConceptItem[];
   recentTurns: Array<{ role: "user" | "assistant"; content: string }>;
   locale?: AppLocale;
+  transferState?: MotifTransferState | null;
 }): MotifQuestionPlan {
   const motifs = (Array.isArray(params.motifs) ? params.motifs : []).filter(
     (m) => (m.reuseClass || "reusable") === "reusable"
@@ -207,6 +238,24 @@ export function planMotifQuestion(params: {
       question,
       rationale: `motif_conflict:${top.id}`,
       topMotifId: top.id,
+    };
+  }
+
+  const transferMismatch = transferMismatchTemplate({
+    locale: params.locale,
+    transferState: params.transferState,
+  });
+  if (transferMismatch?.question) {
+    if (wasAskedRecently(transferMismatch.question, params.recentTurns)) {
+      return {
+        question: null,
+        rationale: `transfer_mismatch_recently_asked:${transferMismatch.rationale}`,
+      };
+    }
+    return {
+      question: transferMismatch.question,
+      rationale: transferMismatch.rationale,
+      template: "direct",
     };
   }
 

@@ -7,6 +7,7 @@ export type ConceptMotifType = "pair" | "triad";
 export type MotifInstanceStatus = "active" | "uncertain" | "deprecated" | "cancelled";
 export type MotifLifecycleStatus = MotifInstanceStatus | "disabled";
 export type MotifChangeState = "new" | "updated" | "unchanged";
+export type MotifSilentChangeSource = "new" | "updated" | "transferred" | "unchanged";
 export type MotifCausalOperator =
   | "direct_causation"
   | "mediated_causation"
@@ -105,6 +106,12 @@ export type ConceptMotif = {
   subgraph_verified?: boolean;
   reasoning_eligible?: boolean;
   coverage_skip_reason?: string;
+  transfer_confidence?: number;
+  injection_state?: "injected" | "pending_confirmation" | "disabled";
+  applied_from_task_id?: string;
+  last_extracted_turn?: number;
+  confidence_trace?: Array<{ turn: number; confidence: number }>;
+  change_source?: MotifSilentChangeSource;
 };
 
 const MAX_ACTIVE_MOTIFS_PER_ANCHOR = 3;
@@ -1212,6 +1219,7 @@ function normalizeMotifs(input: any): ConceptMotif[] {
     const statusRaw = cleanText((raw as any)?.status, 24).toLowerCase();
     const motifInstanceStatusRaw = cleanText((raw as any)?.motif_instance_status, 24).toLowerCase();
     const noveltyRaw = cleanText((raw as any)?.novelty, 24).toLowerCase();
+    const changeSourceRaw = cleanText((raw as any)?.change_source, 24).toLowerCase();
     const causalRaw = cleanText((raw as any)?.causalOperator, 40).toLowerCase();
     const reuseClassRaw = cleanText((raw as any)?.reuseClass, 32).toLowerCase();
     const coverageOriginRaw = cleanText((raw as any)?.coverage_origin, 24).toLowerCase();
@@ -1366,6 +1374,36 @@ function normalizeMotifs(input: any): ConceptMotif[] {
       rationale: cleanText((raw as any)?.rationale, 220) || undefined,
       coverage_origin: coverageOriginRaw === "edge_repair" ? "edge_repair" : "native",
       subgraph_verified: typeof subgraphVerifiedRaw === "boolean" ? subgraphVerifiedRaw : undefined,
+      transfer_confidence:
+        Number.isFinite(Number((raw as any)?.transfer_confidence))
+          ? clamp01((raw as any)?.transfer_confidence, 0.7)
+          : undefined,
+      injection_state:
+        cleanText((raw as any)?.injection_state, 32) === "injected" ||
+        cleanText((raw as any)?.injection_state, 32) === "pending_confirmation" ||
+        cleanText((raw as any)?.injection_state, 32) === "disabled"
+          ? (cleanText((raw as any)?.injection_state, 32) as any)
+          : undefined,
+      applied_from_task_id: cleanText((raw as any)?.applied_from_task_id, 80) || undefined,
+      last_extracted_turn: Number.isFinite(Number((raw as any)?.last_extracted_turn))
+        ? Number((raw as any)?.last_extracted_turn)
+        : undefined,
+      confidence_trace: Array.isArray((raw as any)?.confidence_trace)
+        ? (raw as any).confidence_trace
+            .map((x: any) => ({
+              turn: Number.isFinite(Number(x?.turn)) ? Number(x.turn) : 0,
+              confidence: clamp01(x?.confidence, 0.7),
+            }))
+            .filter((x: any) => Number.isFinite(x.turn) && x.turn > 0)
+            .slice(-32)
+        : undefined,
+      change_source:
+        changeSourceRaw === "new" ||
+        changeSourceRaw === "updated" ||
+        changeSourceRaw === "transferred" ||
+        changeSourceRaw === "unchanged"
+          ? (changeSourceRaw as MotifSilentChangeSource)
+          : undefined,
     });
   }
   return out;

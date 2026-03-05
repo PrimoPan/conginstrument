@@ -10,6 +10,8 @@ import {
 import { isEnglishLocale, type AppLocale } from "../i18n/locale.js";
 import { planMotifQuestion } from "./motif/questionPlanner.js";
 import { buildCognitiveModel } from "./cognitiveModel.js";
+import type { MotifTransferState } from "./motifTransfer/types.js";
+import { buildTransferredConstraintPrompt } from "./motifTransfer/application.js";
 
 const STREAM_MODE = (process.env.CI_STREAM_MODE || "pseudo") as "upstream" | "pseudo";
 const DEBUG = process.env.CI_DEBUG_LLM === "1";
@@ -207,6 +209,7 @@ function motifPriorityQuestion(params: {
   model: ReturnType<typeof buildCognitiveModel>;
   recentTurns: Array<{ role: "user" | "assistant"; content: string }>;
   locale?: AppLocale;
+  motifTransferState?: MotifTransferState | null;
 }) {
   const motifs = params.model.motifs || [];
   const contexts = params.model.contexts || [];
@@ -216,6 +219,7 @@ function motifPriorityQuestion(params: {
     concepts,
     recentTurns: params.recentTurns,
     locale: params.locale,
+    transferState: params.motifTransferState,
   });
   return {
     motifs,
@@ -261,6 +265,7 @@ export async function generateAssistantTextNonStreaming(params: {
   recentTurns: Array<{ role: "user" | "assistant"; content: string }>;
   systemPrompt?: string;
   locale?: AppLocale;
+  motifTransferState?: MotifTransferState | null;
 }): Promise<string> {
   const safeRecent = normalizeRecentTurns(params.recentTurns);
   const model = buildCognitiveModel({
@@ -276,6 +281,11 @@ export async function generateAssistantTextNonStreaming(params: {
     model,
     recentTurns: safeRecent,
     locale: params.locale,
+    motifTransferState: params.motifTransferState,
+  });
+  const transferConstraints = buildTransferredConstraintPrompt({
+    locale: params.locale,
+    state: params.motifTransferState,
   });
   const uncertaintyPlan = planUncertaintyQuestion({
     graph: params.graph,
@@ -290,6 +300,9 @@ export async function generateAssistantTextNonStreaming(params: {
 
   const systemOne =
     `${buildChatSystemPrompt(params.locale, params.systemPrompt)}\n\n` +
+    (transferConstraints
+      ? `${t(params.locale, "迁移约束（内部指令）：", "Transferred constraints (internal instruction):")}\n${transferConstraints}\n\n`
+      : "") +
     `${t(params.locale, "当前意图图摘要（只供参考，不要复述）：", "Current intent graph summary (reference only, do not repeat verbatim):")}\n${gsum}` +
     `\n\n${t(params.locale, "Context 摘要（只供你内部使用，不要逐字复述）：", "Context summary (internal use only, do not quote verbatim):")}\n${contextSummaryForPrompt(motifCtx.contexts)}` +
     `\n\n${t(params.locale, "不确定性分析（内部信号，不要复述）：", "Uncertainty signal (internal, do not repeat verbatim):")} ${uncertaintyPlan.rationale}` +
@@ -351,6 +364,7 @@ export async function streamAssistantText(params: {
   locale?: AppLocale;
   onToken: (token: string) => void;
   signal?: AbortSignal;
+  motifTransferState?: MotifTransferState | null;
 }): Promise<string> {
   if (STREAM_MODE === "pseudo") {
     const full = await generateAssistantTextNonStreaming(params);
@@ -372,6 +386,11 @@ export async function streamAssistantText(params: {
     model,
     recentTurns: safeRecent,
     locale: params.locale,
+    motifTransferState: params.motifTransferState,
+  });
+  const transferConstraints = buildTransferredConstraintPrompt({
+    locale: params.locale,
+    state: params.motifTransferState,
   });
   const uncertaintyPlan = planUncertaintyQuestion({
     graph: params.graph,
@@ -386,6 +405,9 @@ export async function streamAssistantText(params: {
 
   const systemOne =
     `${buildChatSystemPrompt(params.locale, params.systemPrompt)}\n\n` +
+    (transferConstraints
+      ? `${t(params.locale, "迁移约束（内部指令）：", "Transferred constraints (internal instruction):")}\n${transferConstraints}\n\n`
+      : "") +
     `${t(params.locale, "当前意图图摘要（只供参考，不要复述）：", "Current intent graph summary (reference only, do not repeat verbatim):")}\n${gsum}` +
     `\n\n${t(params.locale, "Context 摘要（只供你内部使用，不要逐字复述）：", "Context summary (internal use only, do not quote verbatim):")}\n${contextSummaryForPrompt(motifCtx.contexts)}` +
     `\n\n${t(params.locale, "不确定性分析（内部信号，不要复述）：", "Uncertainty signal (internal, do not repeat verbatim):")} ${uncertaintyPlan.rationale}` +

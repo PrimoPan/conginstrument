@@ -1,6 +1,7 @@
 import type { CognitiveModel } from "./cognitiveModel.js";
 import type { TravelPlanState, TravelPlanTaskHistorySegment } from "./travelPlan/state.js";
 import { isEnglishLocale, type AppLocale } from "../i18n/locale.js";
+import type { MotifLibraryEntryPayload, MotifTransferState } from "./motifTransfer/types.js";
 
 export type TaskDetection = {
   current_task_id: string;
@@ -33,11 +34,16 @@ export type CognitiveStateMotifInstance = {
 };
 
 export type MotifTransferCandidate = {
+  candidate_id: string;
   motif_type_id: string;
   motif_type_title: string;
   dependency: string;
   reusable_description: string;
-  status: "uncertain";
+  status: "active" | "uncertain" | "deprecated" | "cancelled";
+  match_score: number;
+  recommended_mode: "A" | "B" | "C";
+  decision_status: "pending" | "adopted" | "modified_pending_confirmation" | "ignored" | "revised";
+  decision_at?: string;
   reason: string;
 };
 
@@ -68,6 +74,26 @@ export type MotifLibraryPattern = {
   motif_type_id: string;
   motif_type_title: string;
   dependency: string;
+  abstraction_levels: ("L1" | "L2" | "L3")[];
+  status: "active" | "uncertain" | "deprecated" | "cancelled";
+  current_version_id: string;
+  versions: Array<{
+    version_id: string;
+    version: number;
+    title: string;
+    dependency: string;
+    reusable_description: string;
+    abstraction_levels: {
+      L1?: string;
+      L2?: string;
+      L3?: string;
+    };
+    status: "active" | "uncertain" | "deprecated" | "cancelled";
+    source_task_id?: string;
+    source_conversation_id?: string;
+    created_at: string;
+    updated_at: string;
+  }>;
   role_schema?: {
     drivers: string[];
     target: string[];
@@ -75,6 +101,13 @@ export type MotifLibraryPattern = {
   reusable_description: string;
   usage_count: number;
   source_task_ids: string[];
+  usage_stats?: {
+    adopted_count: number;
+    ignored_count: number;
+    feedback_negative_count: number;
+    transfer_confidence: number;
+    last_used_at?: string;
+  };
 };
 
 export type CognitiveState = {
@@ -414,6 +447,8 @@ export function buildCognitiveState(params: {
   model: CognitiveModel;
   travelPlanState: TravelPlanState;
   conversations?: ConversationTravelRecord[];
+  persistentMotifLibrary?: MotifLibraryEntryPayload[];
+  motifTransferState?: MotifTransferState | null;
 }): CognitiveState {
   const currentTaskId = clean(params.travelPlanState.task_id, 80) || clean(params.conversationId, 80);
 
@@ -478,34 +513,170 @@ export function buildCognitiveState(params: {
     }
   }
 
-  const motifLibrary: MotifLibraryPattern[] = Array.from(motifPatternGroups.entries()).map(([patternId, g]) => ({
-    motif_type_id: patternId,
-    motif_type_title: motifTypeTitle(g.motif, params.locale),
-    dependency: clean(g.motif?.dependencyClass || g.motif?.relation, 32) || "enable",
-    role_schema:
-      g.motif?.motif_type_role_schema && typeof g.motif.motif_type_role_schema === "object"
-        ? {
-            drivers: uniqStrings((g.motif.motif_type_role_schema.drivers || []).map((x: any) => clean(x, 80)), 8),
-            target: uniqStrings((g.motif.motif_type_role_schema.target || []).map((x: any) => clean(x, 80)), 8),
-          }
-        : undefined,
-    reusable_description: motifReusableDescription(g.motif, params.locale),
-    usage_count: g.count,
-    source_task_ids: Array.from(g.sourceTaskIds).slice(0, 20),
-  }));
+  const motifLibraryDerived: MotifLibraryPattern[] = Array.from(motifPatternGroups.entries()).map(([patternId, g], idx) => {
+    const now = new Date().toISOString();
+    const versionId = `mv_${clean(patternId, 64).replace(/[^a-z0-9_:\-]/gi, "_")}_${idx + 1}`;
+    const title = motifTypeTitle(g.motif, params.locale);
+    const dependency = clean(g.motif?.dependencyClass || g.motif?.relation, 32) || "enable";
+    const reusableDescription = motifReusableDescription(g.motif, params.locale);
+    return {
+      motif_type_id: patternId,
+      motif_type_title: title,
+      dependency,
+      abstraction_levels: ["L1", "L2"],
+      status: "active",
+      current_version_id: versionId,
+      versions: [
+        {
+          version_id: versionId,
+          version: 1,
+          title,
+          dependency,
+          reusable_description: reusableDescription,
+          abstraction_levels: {
+            L1: clean(g.motif?.title, 180) || title,
+            L2: title,
+            L3: clean(g.motif?.motif_type_reusable_description, 220) || reusableDescription,
+          },
+          status: "active",
+          source_task_id: currentTaskId,
+          source_conversation_id: clean(params.conversationId, 80),
+          created_at: now,
+          updated_at: now,
+        },
+      ],
+      role_schema:
+        g.motif?.motif_type_role_schema && typeof g.motif.motif_type_role_schema === "object"
+          ? {
+              drivers: uniqStrings((g.motif.motif_type_role_schema.drivers || []).map((x: any) => clean(x, 80)), 8),
+              target: uniqStrings((g.motif.motif_type_role_schema.target || []).map((x: any) => clean(x, 80)), 8),
+            }
+          : undefined,
+      reusable_description: reusableDescription,
+      usage_count: g.count,
+      source_task_ids: Array.from(g.sourceTaskIds).slice(0, 20),
+      usage_stats: {
+        adopted_count: 0,
+        ignored_count: 0,
+        feedback_negative_count: 0,
+        transfer_confidence: 0.7,
+      },
+    };
+  });
 
-  const motifTransferCandidates: MotifTransferCandidate[] = motifLibrary.slice(0, 6).map((p) => ({
-    motif_type_id: p.motif_type_id,
-    motif_type_title: p.motif_type_title,
-    dependency: p.dependency,
-    reusable_description: p.reusable_description,
-    status: "uncertain",
-    reason: tr(
-      params.locale,
-      "迁移候选需在当前任务中获得新证据确认。",
-      "Transfer candidate requires fresh evidence in current task."
-    ),
-  }));
+  const motifLibraryMap = new Map<string, MotifLibraryPattern>();
+  for (const item of motifLibraryDerived) motifLibraryMap.set(item.motif_type_id, item);
+  for (const item of params.persistentMotifLibrary || []) {
+    motifLibraryMap.set(clean(item.motif_type_id, 180), {
+      motif_type_id: clean(item.motif_type_id, 180),
+      motif_type_title: clean(item.motif_type_title, 180),
+      dependency: clean(item.dependency, 32) || "enable",
+      abstraction_levels:
+        Array.isArray(item.abstraction_levels) && item.abstraction_levels.length
+          ? item.abstraction_levels.filter((x) => x === "L1" || x === "L2" || x === "L3")
+          : ["L1", "L2"],
+      status:
+        clean(item.status, 24) === "uncertain" ||
+        clean(item.status, 24) === "deprecated" ||
+        clean(item.status, 24) === "cancelled"
+          ? (clean(item.status, 24) as any)
+          : "active",
+      current_version_id: clean(item.current_version_id, 120),
+      versions: Array.isArray(item.versions)
+        ? item.versions.map((v) => ({
+            version_id: clean(v.version_id, 120),
+            version: Number(v.version || 1),
+            title: clean(v.title, 180),
+            dependency: clean(v.dependency, 32) || "enable",
+            reusable_description: clean(v.reusable_description, 240),
+            abstraction_levels: {
+              L1: clean(v.abstraction_levels?.L1, 180) || undefined,
+              L2: clean(v.abstraction_levels?.L2, 180) || undefined,
+              L3: clean(v.abstraction_levels?.L3, 180) || undefined,
+            },
+            status:
+              clean(v.status, 24) === "uncertain" ||
+              clean(v.status, 24) === "deprecated" ||
+              clean(v.status, 24) === "cancelled"
+                ? (clean(v.status, 24) as any)
+                : "active",
+            source_task_id: clean(v.source_task_id, 80) || undefined,
+            source_conversation_id: clean(v.source_conversation_id, 80) || undefined,
+            created_at: clean(v.created_at, 40) || new Date().toISOString(),
+            updated_at: clean(v.updated_at, 40) || new Date().toISOString(),
+          }))
+        : [],
+      reusable_description:
+        clean(item.versions?.find((v) => clean(v.version_id, 120) === clean(item.current_version_id, 120))?.reusable_description, 240) ||
+        clean(item.versions?.[item.versions.length - 1]?.reusable_description, 240),
+      usage_count: Number(item.usage_stats?.adopted_count || 0),
+      source_task_ids: uniqStrings((item.source_task_ids || []).map((x) => clean(x, 80)), 20),
+      usage_stats: {
+        adopted_count: Number(item.usage_stats?.adopted_count || 0),
+        ignored_count: Number(item.usage_stats?.ignored_count || 0),
+        feedback_negative_count: Number(item.usage_stats?.feedback_negative_count || 0),
+        transfer_confidence: Number(item.usage_stats?.transfer_confidence || 0.7),
+        last_used_at: clean(item.usage_stats?.last_used_at, 40) || undefined,
+      },
+    });
+  }
+  const motifLibrary = Array.from(motifLibraryMap.values()).sort(
+    (a, b) =>
+      Number(b.usage_stats?.adopted_count || b.usage_count || 0) -
+        Number(a.usage_stats?.adopted_count || a.usage_count || 0) ||
+      String(a.motif_type_id).localeCompare(String(b.motif_type_id))
+  );
+
+  const motifTransferCandidates: MotifTransferCandidate[] = Array.isArray(params.motifTransferState?.recommendations)
+    ? params.motifTransferState!.recommendations.map((r) => ({
+        candidate_id: clean(r.candidate_id, 220),
+        motif_type_id: clean(r.motif_type_id, 180),
+        motif_type_title: clean(r.motif_type_title, 180),
+        dependency: clean(r.dependency, 32) || "enable",
+        reusable_description: clean(r.reusable_description, 240),
+        status:
+          clean(r.status, 24) === "active" ||
+          clean(r.status, 24) === "deprecated" ||
+          clean(r.status, 24) === "cancelled"
+            ? (clean(r.status, 24) as any)
+            : "uncertain",
+        match_score: Number(r.match_score || 0),
+        recommended_mode:
+          clean(r.recommended_mode, 8) === "A" ||
+          clean(r.recommended_mode, 8) === "C"
+            ? (clean(r.recommended_mode, 8) as any)
+            : "B",
+        decision_status:
+          clean(r.decision_status, 40) === "adopted" ||
+          clean(r.decision_status, 40) === "modified_pending_confirmation" ||
+          clean(r.decision_status, 40) === "ignored" ||
+          clean(r.decision_status, 40) === "revised"
+            ? (clean(r.decision_status, 40) as any)
+            : "pending",
+        decision_at: clean(r.decision_at, 40) || undefined,
+        reason: clean(r.reason, 220),
+      }))
+    : motifLibrary.slice(0, 6).map((p, idx) => ({
+        candidate_id: clean(`${p.motif_type_id}::${p.current_version_id || `v${idx + 1}`}`, 220),
+        motif_type_id: p.motif_type_id,
+        motif_type_title: p.motif_type_title,
+        dependency: p.dependency,
+        reusable_description: p.reusable_description,
+        status: p.status === "deprecated" || p.status === "cancelled" ? p.status : "uncertain",
+        match_score: Number(p.usage_stats?.transfer_confidence || 0.7),
+        recommended_mode:
+          p.status === "deprecated" || p.status === "cancelled"
+            ? "C"
+            : Number(p.usage_stats?.transfer_confidence || 0.7) >= 0.75
+            ? "A"
+            : "B",
+        decision_status: "pending",
+        reason: tr(
+          params.locale,
+          "迁移候选需在当前任务中获得新证据确认。",
+          "Transfer candidate requires fresh evidence in current task."
+        ),
+      }));
 
   const currentOpenQuestions = uniqStrings((params.travelPlanState.open_questions || []).map((x: any) => clean(x, 180)), 8);
   const currentClarificationQuestions = mapClarificationQuestions({

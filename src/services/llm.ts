@@ -5,6 +5,7 @@ import { generateGraphPatch } from "./graphUpdater.js";
 import { buildExtremeWeatherAdvisory } from "./weather/advisor.js";
 import { buildFxRateAdvisory } from "./fx/advisor.js";
 import type { AppLocale } from "../i18n/locale.js";
+import type { MotifTransferState } from "./motifTransfer/types.js";
 
 const DEBUG = process.env.CI_DEBUG_LLM === "1";
 function dlog(...args: any[]) {
@@ -62,6 +63,7 @@ export async function generateTurn(params: {
   stateContextUserTurns?: string[];
   systemPrompt?: string;
   locale?: AppLocale;
+  motifTransferState?: MotifTransferState | null;
 }): Promise<{ assistant_text: string; graph_patch: GraphPatch }> {
   const safeRecent = normalizeRecentTurns(params.recentTurns);
   const recentWithCurrentUser = appendCurrentUserTurn(safeRecent, params.userText);
@@ -72,6 +74,7 @@ export async function generateTurn(params: {
     recentTurns: recentWithCurrentUser,
     systemPrompt: params.systemPrompt,
     locale: params.locale,
+    motifTransferState: params.motifTransferState,
   });
 
   const fxAdvisory = await buildFxRateAdvisory({
@@ -119,6 +122,7 @@ export async function generateTurnStreaming(params: {
   locale?: AppLocale;
   onToken: (token: string) => void;
   signal?: AbortSignal;
+  motifTransferState?: MotifTransferState | null;
 }): Promise<{ assistant_text: string; graph_patch: GraphPatch }> {
   const safeRecent = normalizeRecentTurns(params.recentTurns);
   const recentWithCurrentUser = appendCurrentUserTurn(safeRecent, params.userText);
@@ -131,6 +135,7 @@ export async function generateTurnStreaming(params: {
     locale: params.locale,
     onToken: params.onToken,
     signal: params.signal,
+    motifTransferState: params.motifTransferState,
   });
 
   const fxAdvisory = await buildFxRateAdvisory({

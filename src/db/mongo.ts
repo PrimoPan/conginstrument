@@ -32,6 +32,13 @@ export type ConversationDoc = {
   motifLinks?: any[];
   contexts?: any[];
   travelPlanState?: any;
+  taskLifecycle?: {
+    status: "active" | "closed";
+    endedAt?: string;
+    endedTaskId?: string;
+    reopenedAt?: string;
+    updatedAt?: string;
+  };
 };
 
 export type TurnDoc = {
@@ -45,6 +52,46 @@ export type TurnDoc = {
   graphVersion: number;
 };
 
+export type MotifLibraryVersion = {
+  version_id: string;
+  version: number;
+  title: string;
+  dependency: string;
+  reusable_description: string;
+  abstraction_levels: {
+    L1?: string;
+    L2?: string;
+    L3?: string;
+  };
+  status: "active" | "uncertain" | "deprecated" | "cancelled";
+  source_task_id?: string;
+  source_conversation_id?: string;
+  created_at: string;
+  updated_at: string;
+};
+
+export type MotifLibraryDoc = {
+  _id?: ObjectId;
+  userId: ObjectId;
+  motif_type_id: string;
+  motif_type_title: string;
+  dependency: string;
+  abstraction_levels: ("L1" | "L2" | "L3")[];
+  current_version_id: string;
+  versions: MotifLibraryVersion[];
+  source_task_ids: string[];
+  usage_stats: {
+    adopted_count: number;
+    ignored_count: number;
+    feedback_negative_count: number;
+    transfer_confidence: number;
+    last_used_at?: string;
+  };
+  status: "active" | "uncertain" | "deprecated" | "cancelled";
+  createdAt: Date;
+  updatedAt: Date;
+};
+
 let client: MongoClient;
 let db: Db;
 
@@ -53,6 +100,7 @@ export const collections = {} as {
   sessions: Collection<SessionDoc>;
   conversations: Collection<ConversationDoc>;
   turns: Collection<TurnDoc>;
+  motifLibrary: Collection<MotifLibraryDoc>;
 };
 
 export async function connectMongo() {
@@ -64,6 +112,7 @@ export async function connectMongo() {
   collections.sessions = db.collection<SessionDoc>("sessions");
   collections.conversations = db.collection<ConversationDoc>("conversations");
   collections.turns = db.collection<TurnDoc>("turns");
+  collections.motifLibrary = db.collection<MotifLibraryDoc>("motif_library");
 
   // indexes
   await collections.users.createIndex({ username: 1 }, { unique: true });
@@ -73,6 +122,8 @@ export async function connectMongo() {
 
   await collections.conversations.createIndex({ userId: 1, updatedAt: -1 });
   await collections.turns.createIndex({ conversationId: 1, createdAt: 1 });
+  await collections.motifLibrary.createIndex({ userId: 1, motif_type_id: 1 }, { unique: true });
+  await collections.motifLibrary.createIndex({ userId: 1, updatedAt: -1 });
 
   return db;
 }
