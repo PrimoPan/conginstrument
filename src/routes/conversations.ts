@@ -96,6 +96,7 @@ type ConversationPlanningBootstrap = {
   destination?: string;
   keepConsistentText?: string;
   carryHealthReligion?: boolean;
+  carryStableProfile?: boolean;
 };
 
 function slugToken(input: string, max = 48): string {
@@ -138,6 +139,7 @@ function defaultTravelPlanState(params: {
   nowIso: string;
   destinationScope?: string[];
   constraints?: string[];
+  openQuestions?: string[];
   summary?: string;
 }): TravelPlanState {
   const en = isEnglishLocale(params.locale);
@@ -147,6 +149,9 @@ function defaultTravelPlanState(params: {
   const constraints = Array.isArray(params.constraints)
     ? params.constraints.map((x) => cleanInput(x, 180)).filter(Boolean)
     : [];
+  const openQuestions = Array.isArray(params.openQuestions)
+    ? params.openQuestions.map((x) => cleanInput(x, 180)).filter(Boolean)
+    : [];
   const defaultSummary = en
     ? "No travel plan yet. Start chatting to build one."
     : "暂无旅行计划，请先开始对话。";
@@ -154,6 +159,9 @@ function defaultTravelPlanState(params: {
   const sourceMap: Record<string, string> = {};
   constraints.forEach((_, idx) => {
     sourceMap[`constraints.${idx}`] = "transferred_pattern_based";
+  });
+  openQuestions.forEach((_, idx) => {
+    sourceMap[`open_questions.${idx}`] = "transferred_pattern_based";
   });
 
   return {
@@ -176,7 +184,7 @@ function defaultTravelPlanState(params: {
     food_plan: [],
     risk_notes: [],
     budget_notes: [],
-    open_questions: [],
+    open_questions: openQuestions,
     rationale_refs: [],
     source_map: sourceMap,
     export_ready_text: "",
@@ -192,8 +200,11 @@ function parsePlanningBootstrap(raw: any): ConversationPlanningBootstrap | null 
   const destination = cleanInput((raw as any).destination, 80);
   const keepConsistentText = cleanInput((raw as any).keepConsistentText, 400);
   const carryHealthReligionRaw = (raw as any).carryHealthReligion;
+  const carryStableProfileRaw = (raw as any).carryStableProfile;
   const carryHealthReligion =
     carryHealthReligionRaw == null ? true : parseBoolFlag(carryHealthReligionRaw);
+  const carryStableProfile =
+    carryStableProfileRaw == null ? carryHealthReligion : parseBoolFlag(carryStableProfileRaw);
 
   if (!sourceConversationId && !destination && !keepConsistentText) return null;
   return {
@@ -201,6 +212,7 @@ function parsePlanningBootstrap(raw: any): ConversationPlanningBootstrap | null 
     destination: destination || undefined,
     keepConsistentText: keepConsistentText || undefined,
     carryHealthReligion,
+    carryStableProfile,
   };
 }
 
@@ -243,6 +255,25 @@ function limitingKindFromSemantic(semanticKey: string): string {
   return semanticKey.slice("slot:constraint:limiting:".length).split(":")[0] || "";
 }
 
+function conceptKind(raw: any): string {
+  return cleanInput(raw?.kind, 40).toLowerCase();
+}
+
+function isHealthOrReligionKind(kind: string): boolean {
+  return kind === "health" || kind === "religion";
+}
+
+function isHardStableLimitingKind(kind: string): boolean {
+  return (
+    kind === "health" ||
+    kind === "religion" ||
+    kind === "language" ||
+    kind === "mobility" ||
+    kind === "diet" ||
+    kind === "safety"
+  );
+}
+
 function isCarryHealthReligionConcept(concept: any): boolean {
   const semantic = conceptSemanticKey(concept);
   const family = conceptFamily(concept);
@@ -253,6 +284,75 @@ function isCarryHealthReligionConcept(concept: any): boolean {
   return /冠心病|心脏|心肺|慢性病|健康|医疗|health|cardiac|medical|宗教|信仰|礼拜|祷告|religion|faith|prayer|halal|kosher/i.test(
     text
   );
+}
+
+type CarryPolicy = {
+  level: "hard_auto" | "soft_confirm";
+  reason: string;
+};
+
+function inferStableCarryPolicy(concept: any): CarryPolicy | null {
+  const semantic = conceptSemanticKey(concept);
+  const family = conceptFamily(concept);
+  const text = conceptText(concept);
+  const kind = limitingKindFromSemantic(semantic);
+  const kindLabel = conceptKind(concept);
+
+  if (isHardStableLimitingKind(kind)) {
+    return { level: "hard_auto", reason: `stable_limiting:${kind}` };
+  }
+
+  // Soft carry buckets: ask user to confirm for new trip.
+  if (kind === "logistics") return { level: "soft_confirm", reason: "soft_transport_baseline" };
+  if (family === "people" || semantic === "slot:people") {
+    return { level: "soft_confirm", reason: "soft_traveler_profile" };
+  }
+  if (family === "lodging" || semantic === "slot:lodging") {
+    return { level: "soft_confirm", reason: "soft_lodging_baseline" };
+  }
+  if (
+    family === "activity_preference" ||
+    family === "scenic_preference" ||
+    /低强度|节奏|轻松|慢一点|pace|low intensity|easy|slow/i.test(text)
+  ) {
+    return { level: "soft_confirm", reason: "soft_pace_style" };
+  }
+  if (
+    /保险|医院|急救|药物|应急|insurance|hospital|emergency|medication|risk protocol/i.test(text) &&
+    (family === "generic_constraint" || family === "limiting_factor" || kindLabel === "constraint")
+  ) {
+    return { level: "soft_confirm", reason: "soft_risk_protocol" };
+  }
+
+  return null;
+}
+
+function shouldExcludeCrossTripCarry(concept: any): boolean {
+  const family = conceptFamily(concept);
+  const semantic = conceptSemanticKey(concept);
+  if (family === "destination" || family === "duration_city" || family === "meeting_critical") return true;
+  if (semantic.startsWith("slot:destination:")) return true;
+  if (semantic.startsWith("slot:duration_city:")) return true;
+  if (semantic.startsWith("slot:meeting_critical:")) return true;
+  if (semantic.startsWith("slot:sub_location:")) return true;
+  if (semantic.startsWith("slot:budget")) return true;
+  const text = conceptText(concept);
+  if (/米兰|milan|京都|kyoto|东京|tokyo|巴黎|paris|罗马|rome/i.test(text) && family === "other") {
+    return true;
+  }
+  return false;
+}
+
+function softCarryQuestionTitle(concept: any): string {
+  return cleanInput(concept?.title, 120) || cleanInput(concept?.description, 120) || "偏好信息";
+}
+
+function buildSoftCarryQuestion(params: { locale: AppLocale; concept: any }): string {
+  const title = softCarryQuestionTitle(params.concept);
+  if (isEnglishLocale(params.locale)) {
+    return `Should we keep this from your previous trip as well: "${title}"?`;
+  }
+  return `是否在新行程中继续沿用「${title}」？`;
 }
 
 function carriesByKeepText(concept: any, keepTokens: Set<string>, keepTextRaw: string): boolean {
@@ -356,25 +456,53 @@ async function buildBootstrapGraphAndPlan(params: {
     }
   }
 
-  const selectedCarryConcepts: ConceptItem[] = [];
-  const seenCarry = new Set<string>();
-  const tryPush = (concept: ConceptItem) => {
+  const autoCarryConcepts: Array<{ concept: ConceptItem; origin: "explicit" | "auto" }> = [];
+  const softCarryConcepts: Array<{ concept: ConceptItem; reason: string }> = [];
+  const seenAutoCarry = new Set<string>();
+  const seenSoftCarry = new Set<string>();
+  const carryStableProfile = params.bootstrap.carryStableProfile !== false;
+  const carryHealthReligion = params.bootstrap.carryHealthReligion !== false;
+
+  const conceptIdentity = (concept: ConceptItem): string => {
     const semantic = conceptSemanticKey(concept);
     const id = cleanInput(concept?.id, 120);
-    const key = semantic || id || cleanInput(concept?.title, 120);
-    if (!key || seenCarry.has(key)) return;
-    seenCarry.add(key);
-    selectedCarryConcepts.push(concept);
+    return semantic || id || cleanInput(concept?.title, 120);
+  };
+  const pushAuto = (concept: ConceptItem, origin: "explicit" | "auto") => {
+    const key = conceptIdentity(concept);
+    if (!key || seenAutoCarry.has(key)) return;
+    seenAutoCarry.add(key);
+    autoCarryConcepts.push({ concept, origin });
+  };
+  const pushSoft = (concept: ConceptItem, reason: string) => {
+    const key = conceptIdentity(concept);
+    if (!key || seenSoftCarry.has(key) || seenAutoCarry.has(key)) return;
+    seenSoftCarry.add(key);
+    softCarryConcepts.push({ concept, reason });
   };
 
-  if (params.bootstrap.carryHealthReligion !== false) {
-    for (const concept of sourceConcepts) {
-      if (isCarryHealthReligionConcept(concept)) tryPush(concept);
+  for (const concept of sourceConcepts) {
+    const explicitMatched = keepConsistentText && carriesByKeepText(concept, keepTokens, keepTextLower);
+    if (explicitMatched) {
+      pushAuto(concept, "explicit");
+      continue;
     }
-  }
-  if (keepConsistentText) {
-    for (const concept of sourceConcepts) {
-      if (carriesByKeepText(concept, keepTokens, keepTextLower)) tryPush(concept);
+
+    if (shouldExcludeCrossTripCarry(concept)) continue;
+
+    if (!carryStableProfile) {
+      if (carryHealthReligion && isCarryHealthReligionConcept(concept)) {
+        pushAuto(concept, "auto");
+      }
+      continue;
+    }
+
+    const policy = inferStableCarryPolicy(concept);
+    if (!policy) continue;
+    if (policy.level === "hard_auto") {
+      pushAuto(concept, "auto");
+    } else {
+      pushSoft(concept, policy.reason);
     }
   }
 
@@ -393,40 +521,64 @@ async function buildBootstrapGraphAndPlan(params: {
       confidence: 0.92,
       importance: 0.9,
       key: `slot:destination:${slugToken(destination, 56) || "unknown"}`,
-      sourceMsgIds: ["planning_bootstrap"],
+      sourceMsgIds: ["manual_user_bootstrap", "planning_bootstrap"],
+      validation_status: "resolved",
       value: {
         provenance: "planning_bootstrap",
+        conceptState: {
+          validation_status: "resolved",
+        },
       },
     } as any);
   }
 
-  selectedCarryConcepts.slice(0, 10).forEach((concept, idx) => {
+  autoCarryConcepts.slice(0, 12).forEach((carry, idx) => {
+    const concept = carry.concept;
     const semantic = cleanInput((concept as any)?.semanticKey, 180);
     const title = cleanInput((concept as any)?.title, 120);
     const nodeId = stableGraphItemId("n_carry", `${semantic || title || "constraint"}_${idx}`);
     const type = mapConceptKind((concept as any)?.kind);
+    const explicit = carry.origin === "explicit";
     nodes.push({
       id: nodeId,
       type,
       layer: defaultLayerForType(type) as any,
       strength: defaultStrengthForType(type) as any,
-      statement: title || cleanInput((concept as any)?.description, 120) || `Carry ${idx + 1}`,
-      status: "confirmed",
-      confidence: Math.max(0.56, Math.min(0.98, Number((concept as any)?.score) || 0.82)),
-      importance: Math.max(0.56, Math.min(0.98, Number((concept as any)?.score) || 0.82)),
+      statement: explicit
+        ? title || cleanInput((concept as any)?.description, 120) || `Carry ${idx + 1}`
+        : isEnglishLocale(params.locale)
+        ? `Carry-over candidate: ${title || cleanInput((concept as any)?.description, 100) || `Item ${idx + 1}`}`
+        : `待确认沿用:${title || cleanInput((concept as any)?.description, 100) || `条目${idx + 1}`}`,
+      status: explicit ? "confirmed" : "proposed",
+      confidence: explicit
+        ? Math.max(0.56, Math.min(0.98, Number((concept as any)?.score) || 0.82))
+        : Math.max(0.5, Math.min(0.88, Number((concept as any)?.score) || 0.74)),
+      importance: explicit
+        ? Math.max(0.56, Math.min(0.98, Number((concept as any)?.score) || 0.82))
+        : Math.max(0.5, Math.min(0.88, Number((concept as any)?.score) || 0.74)),
       key: semantic || `slot:freeform:${type}:${slugToken(title || `carry_${idx + 1}`)}`,
       sourceMsgIds: uniqValues(
-        [
-          "planning_bootstrap",
-          `transfer_from:${cleanInput(params.bootstrap?.sourceConversationId, 24) || "history"}`,
-          ...(((concept as any)?.sourceMsgIds || []) as string[]),
-        ],
+        explicit
+          ? [
+              "manual_user_bootstrap",
+              "planning_bootstrap",
+              `transfer_from:${cleanInput(params.bootstrap?.sourceConversationId, 24) || "history"}`,
+            ]
+          : [
+              "transfer_pattern_candidate",
+              "planning_bootstrap",
+              `transfer_from:${cleanInput(params.bootstrap?.sourceConversationId, 24) || "history"}`,
+            ],
         8
       ),
+      validation_status: explicit ? "resolved" : "pending",
       value: {
         provenance: "planning_bootstrap",
         transfer_from: cleanInput(params.bootstrap?.sourceConversationId, 80) || undefined,
-        transfer_reason: "carry_over_from_previous_trip",
+        transfer_reason: explicit ? "explicit_user_keep_consistency" : "transferred_pattern_based",
+        conceptState: {
+          validation_status: explicit ? "resolved" : "pending",
+        },
       },
     } as any);
     if (destinationNodeId) {
@@ -440,7 +592,7 @@ async function buildBootstrapGraphAndPlan(params: {
     }
   });
 
-  if (keepConsistentText && !selectedCarryConcepts.length) {
+  if (keepConsistentText && !autoCarryConcepts.length) {
     const nodeId = stableGraphItemId("n_keep", keepConsistentText);
     nodes.push({
       id: nodeId,
@@ -454,9 +606,13 @@ async function buildBootstrapGraphAndPlan(params: {
       confidence: 0.8,
       importance: 0.78,
       key: `slot:constraint:limiting:other:${slugToken(keepConsistentText, 40) || "carry"}`,
-      sourceMsgIds: ["planning_bootstrap"],
+      sourceMsgIds: ["manual_user_bootstrap", "planning_bootstrap"],
+      validation_status: "resolved",
       value: {
         provenance: "planning_bootstrap",
+        conceptState: {
+          validation_status: "resolved",
+        },
       },
     } as any);
     if (destinationNodeId) {
@@ -477,17 +633,23 @@ async function buildBootstrapGraphAndPlan(params: {
     edges: edges.slice(0, 48),
   };
 
-  const carryTitles = selectedCarryConcepts
-    .map((c) => cleanInput((c as any)?.title, 120))
+  const carryTitles = autoCarryConcepts
+    .map((x) => cleanInput((x.concept as any)?.title, 120))
     .filter(Boolean)
-    .slice(0, 6);
+    .slice(0, 8);
   const constraints = carryTitles;
   if (keepConsistentText && !carryTitles.length) constraints.push(keepConsistentText);
+  const softCarryQuestions = uniqValues(
+    softCarryConcepts
+      .slice(0, 8)
+      .map((x) => buildSoftCarryQuestion({ locale: params.locale, concept: x.concept })),
+    8
+  );
 
   const summary = destination
     ? isEnglishLocale(params.locale)
-      ? `New trip to ${destination}. Baseline constraints are preloaded and can be refined in chat.`
-      : `已创建前往${destination}的新旅行规划，并预置可复用约束，可继续补充。`
+      ? `New trip to ${destination}. Reusable baseline constraints are preloaded, with additional carry-over items pending confirmation.`
+      : `已创建前往${destination}的新旅行规划，并预置可复用约束；部分跨行程信息待你确认后沿用。`
     : isEnglishLocale(params.locale)
     ? "A new trip planning session is created with reusable constraints preloaded."
     : "已创建新的旅行规划会话，并预置可复用约束。";
@@ -502,6 +664,7 @@ async function buildBootstrapGraphAndPlan(params: {
     nowIso,
     destinationScope: destination ? [destination] : [],
     constraints,
+    openQuestions: softCarryQuestions,
     summary,
   });
 
