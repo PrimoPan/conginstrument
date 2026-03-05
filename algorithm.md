@@ -12,7 +12,7 @@ This document describes the implemented runtime and invariants for:
 
 Canonical entrypoint:
 
-- `/Users/primopan/UISTcoginstrument/app/conginstrument/src/services/cognitiveModel.ts`
+- `conginstrument/src/services/cognitiveModel.ts`
 
 Processing order:
 
@@ -100,8 +100,8 @@ Covered relations:
 
 Implemented in:
 
-- `/Users/primopan/UISTcoginstrument/app/conginstrument/src/services/motif/conceptMotifs.ts`
-- `/Users/primopan/UISTcoginstrument/app/conginstrument/src/services/motif/relationValidator.ts`
+- `conginstrument/src/services/motif/conceptMotifs.ts`
+- `conginstrument/src/services/motif/relationValidator.ts`
 
 For each edge candidate:
 
@@ -149,9 +149,9 @@ Uncovered required edges trigger deterministic `edge_repair` motifs.
 
 Implemented in:
 
-- `/Users/primopan/UISTcoginstrument/app/conginstrument/src/services/graphUpdater/intentSignals.ts`
-- `/Users/primopan/UISTcoginstrument/app/conginstrument/src/services/graphUpdater/slotFunctionCall.ts`
-- `/Users/primopan/UISTcoginstrument/app/conginstrument/src/services/graphUpdater/slotStateMachine.ts`
+- `conginstrument/src/services/graphUpdater/intentSignals.ts`
+- `conginstrument/src/services/graphUpdater/slotFunctionCall.ts`
+- `conginstrument/src/services/graphUpdater/slotStateMachine.ts`
 
 When limiting factors exist, strategy nodes are linked as directed subtrees by semantic family:
 
@@ -189,7 +189,7 @@ Frontend layout:
 
 Implemented in:
 
-- `/Users/primopan/UISTcoginstrument/app/conginstrument-web/src/components/flow/MotifReasoningCanvas.tsx`
+- `conginstrument-web/src/components/flow/MotifReasoningCanvas.tsx`
 
 ## 5. Save Interaction Rules (Frontend)
 
@@ -213,8 +213,8 @@ If graph edits are unsaved and user sends a new turn:
 
 Implemented in:
 
-- `/Users/primopan/UISTcoginstrument/app/conginstrument-web/src/App.tsx`
-- `/Users/primopan/UISTcoginstrument/app/conginstrument-web/src/components/FlowPanel.tsx`
+- `conginstrument-web/src/App.tsx`
+- `conginstrument-web/src/components/FlowPanel.tsx`
 
 ## 6. Task and Portfolio State
 

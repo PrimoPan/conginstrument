@@ -19,7 +19,7 @@ Use this skill for backend graph quality regression triage.
 1. Run type check for backend:
 
 ```bash
-cd /Users/primopan/UISTcoginstrument/app/conginstrument
+cd conginstrument
 npx tsc --noEmit --module NodeNext --moduleResolution NodeNext --target ES2022 --skipLibCheck --esModuleInterop $(find src -name '*.ts' -maxdepth 5 | tr '\n' ' ')
 ```
 
@@ -50,4 +50,3 @@ Report findings as:
 2. Expected slot state
 3. Actual graph diff (nodes + edges)
 4. Fix location (`file + function`)
-
