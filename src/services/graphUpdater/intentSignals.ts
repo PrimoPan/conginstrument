@@ -1828,6 +1828,22 @@ function extractDestinationList(text: string): Array<{ city: string; evidence: s
     push(m[2], m[0] || m[2], idx + String(m[1]).length + 1);
   }
 
+  const trailingPreferencePairRe =
+    /([^\s，。,；;！!？?\d]{2,16})\s*(?:和|与|及|加|、|,|，)\s*([^\s，。,；;！!？?\d]{2,16})\s*(?:优先|为主|重点|首选)(?=[，。,；;！!？?\s]|$)/gi;
+  for (const m of scanText.matchAll(trailingPreferencePairRe)) {
+    if (!m?.[1] || !m?.[2]) continue;
+    const idx = Number(m.index) || 0;
+    push(m[1], m[0] || m[1], idx);
+    push(m[2], m[0] || m[2], idx + String(m[1]).length + 1);
+  }
+
+  const lodgingFocusRe =
+    /([A-Za-z\u4e00-\u9fff]{2,14})\s*(?:多住一点|住久一点|多待一点|多留一点|重点住|优先住|主要住)(?:也可以|也行)?(?=[，。,；;！!？?\s]|$)/gi;
+  for (const m of scanText.matchAll(lodgingFocusRe)) {
+    if (!m?.[1]) continue;
+    push(m[1], m[0] || m[1], Number(m.index) || 0);
+  }
+
   const seen = new Set<string>();
   const dedup = out
     .sort((a, b) => a.index - b.index)
@@ -2967,7 +2983,9 @@ export function extractIntentSignals(userText: string, opts?: { historyMode?: bo
   ) {
     const destinations = (out.destinations || []).filter((x) => isLikelyDestinationCandidate(x));
     const hasSingleDestination = destinations.length <= 1;
-    if (hasSingleDestination) {
+    const destinationLooksLikeLodgingFocus =
+      /(多住一点|住久一点|多待一点|多留一点|重点住|优先住|主要住)/.test(out.destinationEvidence || "");
+    if (hasSingleDestination && !destinationLooksLikeLodgingFocus) {
       out.cityDurations = [
         {
           city: remapBySubLocationParent(out.destination, out.subLocations),

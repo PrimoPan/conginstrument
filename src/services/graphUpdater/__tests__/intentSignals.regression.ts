@@ -775,6 +775,23 @@ const cases: Case[] = [
     },
   },
   {
+    name: "trailing priority pair should extract preferred cities",
+    run: () => {
+      const s = extractIntentSignals("我想安排西班牙和葡萄牙10天，里斯本和塞维利亚优先，马德里不是必须。");
+      assert.equal((s.destinations || []).includes("里斯本"), true);
+      assert.equal((s.destinations || []).includes("塞维利亚"), true);
+    },
+  },
+  {
+    name: "lodging focus region should be extracted as destination hint",
+    run: () => {
+      const s = extractIntentSignals("不是必须环岛，南岸多住一点也可以，斯奈山半岛先不去，整体还是9天。");
+      assert.equal((s.destinations || []).includes("南岸"), true);
+      assert.equal((s.removedDestinations || []).includes("斯奈山半岛"), true);
+      assert.equal(s.durationDays, 9);
+    },
+  },
+  {
     name: "budget total phrasing should not set explicit duration-total cue",
     run: () => {
       const s = extractIntentSignals("想带妈妈去摩洛哥7到8天，预算总共3万元，语言不太通，希望别太折腾。");
