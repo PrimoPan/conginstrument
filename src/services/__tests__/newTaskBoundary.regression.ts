@@ -167,6 +167,35 @@ run("latest-user-text detector should trigger destination switch for a different
   assert.equal(out.is_task_switch, true);
 });
 
+run("lodging-focus refinement should stay in the same task when it clearly refines the current trip", () => {
+  const prev = makePlan("冰岛九天旅行");
+  prev.destinations = ["冰岛"];
+  prev.destination_scope = ["冰岛"];
+  prev.travel_dates_or_duration = "9天";
+  const out = detectTaskSwitchFromLatestUserTurn({
+    conversationId: "conv_3",
+    locale,
+    previousTravelPlan: prev,
+    latestUserText: "不是必须环岛，南岸多住一点也可以，斯奈山半岛先不去，整体还是9天。",
+  });
+  assert.equal(out.switch_reason_code, "continuous");
+  assert.equal(out.is_task_switch, false);
+});
+
+run("fresh trip phrasing should still switch even if the new task mentions longer lodging", () => {
+  const prev = makePlan("冰岛九天旅行");
+  prev.destinations = ["冰岛"];
+  prev.destination_scope = ["冰岛"];
+  const out = detectTaskSwitchFromLatestUserTurn({
+    conversationId: "conv_4",
+    locale,
+    previousTravelPlan: prev,
+    latestUserText: "我想安排西班牙10天，住久一点也可以，不要太赶。",
+  });
+  assert.equal(out.switch_reason_code, "destination_switch");
+  assert.equal(out.is_task_switch, true);
+});
+
 run("retrieval hints should down-rank stable profile motifs when carry is disabled", () => {
   const plan = makePlan("巴黎七天旅行，偏好在地体验和慢节奏。");
   const motifLibrary = makeLibrary();

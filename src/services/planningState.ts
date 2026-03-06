@@ -222,8 +222,35 @@ function uniqStrings(arr: string[], max = 48): string[] {
   return out;
 }
 
+const LODGING_FOCUS_RE = /(多住一点|住久一点|多待一点|多留一点|重点住|优先住|主要住)/i;
+const CONTINUATION_REFINEMENT_RE =
+  /(整体还是|总时长还是|总时长还是按|还是按|不是必须|先不|先完全去掉|完全去掉|去掉|删掉|移除|保留|都保留|继续|也可以|也行|最后\s*[0-9一二三四五六七八九十两]{0,2}\s*晚|按.+(?:住|晚)|以.+为主住)/i;
+const FRESH_TRIP_CUE_RE =
+  /(?:我想|我们想|想|准备|打算).{0,8}(?:去|安排|规划|计划)|(?:重新规划|新任务|下一趟|再规划一趟|another trip|new task|start over|plan a new trip)/i;
+
 function tr(locale: AppLocale, zh: string, en: string): string {
   return isEnglishLocale(locale) ? en : zh;
+}
+
+function shouldCarryPreviousDestinationsForRefinement(params: {
+  latestUserText?: string;
+  currentDestinations: string[];
+  previousDestinations: string[];
+  destinationEvidences?: string[];
+  removedDestinations?: string[];
+}): boolean {
+  const latestUserText = clean(params.latestUserText, 320);
+  if (!latestUserText || !params.currentDestinations.length || !params.previousDestinations.length) return false;
+  if (FRESH_TRIP_CUE_RE.test(latestUserText)) return false;
+  const destinationEvidenceText = uniqStrings(
+    [...(params.destinationEvidences || []), latestUserText].map((x) => clean(x, 120)),
+    8
+  ).join(" ");
+  const hasLodgingFocus = LODGING_FOCUS_RE.test(destinationEvidenceText);
+  if (!hasLodgingFocus) return false;
+  const hasContinuationCue =
+    CONTINUATION_REFINEMENT_RE.test(latestUserText) || (params.removedDestinations || []).length > 0;
+  return hasContinuationCue;
 }
 
 function sourceTokens(raw: any): string[] {
@@ -559,11 +586,20 @@ export function detectTaskSwitchFromLatestUserTurn(params: {
     ].filter(Boolean),
     12
   );
+  const effectiveCurrentDestinations = shouldCarryPreviousDestinationsForRefinement({
+    latestUserText,
+    currentDestinations,
+    previousDestinations,
+    destinationEvidences: (signals.destinationEvidences || []) as string[],
+    removedDestinations: (signals.removedDestinations || []) as string[],
+  })
+    ? uniqStrings([...previousDestinations, ...currentDestinations], 12)
+    : currentDestinations;
 
   return buildTaskDetection({
     conversationId: clean(params.previousTravelPlan?.task_id, 80) || clean(params.conversationId, 80),
     locale: params.locale,
-    currentDestinations,
+    currentDestinations: effectiveCurrentDestinations,
     previousDestinations,
     taskLifecycle: params.taskLifecycle || null,
     latestUserText,
