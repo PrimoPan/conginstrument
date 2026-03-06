@@ -20,7 +20,7 @@ export const SAFETY_STRATEGY_RE =
   /治安|安全|安全感|不被坑|防坑|防骗|诈骗|抢劫|夜间|夜里|夜晚|security|safety|safe|scam|fraud|danger|risk/i;
 
 export const LANGUAGE_CONSTRAINT_RE =
-  /不会英语|不会英文|英语不好|英文不好|语言不通|语言障碍|翻译|口译|同传|不懂西语|不懂法语|不会当地语言|沟通困难|speak english|english poor|language barrier|translation/i;
+  /不会英语|不会英文|英语不好|英文不好|语言不通|语言障碍|翻译|口译|同传|不懂西语|不懂法语|不会当地语言|沟通困难|(?:法语|阿拉伯语|西语|西班牙语|葡语|葡萄牙语|德语|日语|韩语|英语|英文)(?:和|与|及|、|,|，)?(?:法语|阿拉伯语|西语|西班牙语|葡语|葡萄牙语|德语|日语|韩语|英语|英文|当地语言)?(?:都不会|都不懂|不会|不懂|不太会|不太懂|不好)|(?:不会|不懂|不太会|不太懂)[^，。；;\n]{0,18}(?:法语|阿拉伯语|西语|西班牙语|葡语|葡萄牙语|德语|日语|韩语|英语|英文|当地语言)|speak english|english poor|language barrier|translation/i;
 
 export const HARD_CONSTRAINT_RE = /不能|不宜|避免|禁忌|必须|只能|不要|不可|不得|无法|不方便|不能够/i;
 export const HARD_REQUIRE_RE = /硬性要求|一定要|必须|务必|绝对/i;

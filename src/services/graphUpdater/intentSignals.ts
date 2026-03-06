@@ -2287,16 +2287,49 @@ function mergeImportanceMap(
   return Object.keys(out).length ? out : undefined;
 }
 
+function constraintClauses(userText: string): string[] {
+  const out: string[] = [];
+  const seen = new Set<string>();
+  for (const part of sentenceParts(userText)) {
+    for (const raw of String(part || "").split(/[，,、]/)) {
+      const clause = cleanStatement(raw, 120);
+      if (!clause || seen.has(clause)) continue;
+      seen.add(clause);
+      out.push(clause);
+    }
+  }
+  return out.length ? out : sentenceParts(userText);
+}
+
 export function pickHealthClause(userText: string): string | undefined {
-  const parts = sentenceParts(userText);
+  const parts = constraintClauses(userText);
   const hit = parts.find((x) => MEDICAL_HEALTH_RE.test(x));
   return hit || undefined;
 }
 
 export function pickLanguageConstraintClause(userText: string): string | undefined {
-  const parts = sentenceParts(userText);
-  const hit = parts.find((x) => LANGUAGE_CONSTRAINT_RE.test(x));
-  return hit || undefined;
+  const parts = constraintClauses(userText);
+  const patterns = [
+    /((?:法语|阿拉伯语|西语|西班牙语|葡语|葡萄牙语|德语|日语|韩语|英语|英文|当地语言)(?:和|与|及|、|,|，)?(?:法语|阿拉伯语|西语|西班牙语|葡语|葡萄牙语|德语|日语|韩语|英语|英文|当地语言)?(?:都不会|都不懂|不会|不懂|不太会|不太懂|不好))/i,
+    /((?:不会|不懂|不太会|不太懂)[^，。；;\n]{0,18}(?:法语|阿拉伯语|西语|西班牙语|葡语|葡萄牙语|德语|日语|韩语|英语|英文|当地语言))/i,
+    /((?:语言不通|语言障碍|沟通困难)[^，。；;\n]{0,18})/i,
+  ];
+  for (const part of parts) {
+    if (!LANGUAGE_CONSTRAINT_RE.test(part)) continue;
+    let snippet = part;
+    for (const re of patterns) {
+      const m = part.match(re);
+      if (m?.[1]) {
+        snippet = m[1];
+        break;
+      }
+    }
+    snippet = cleanStatement(snippet, 60)
+      .replace(/^(?:另外|再就是|还有|而且|并且|同时|希望|最好|尽量)\s*/i, "")
+      .trim();
+    if (snippet) return snippet;
+  }
+  return undefined;
 }
 
 function isLanguageOnlyConstraint(text: string | undefined): boolean {
@@ -3006,7 +3039,7 @@ export function extractIntentSignals(userText: string, opts?: { historyMode?: bo
       importance: clampImportance(params.importance, params.hard ? 0.84 : 0.76),
     });
   };
-  for (const part of sentenceParts(text)) {
+  for (const part of constraintClauses(text)) {
     const s = cleanStatement(part, 120);
     if (!s) continue;
     if (/^(预算(?:上限)?|总行程时长|行程时长|城市时长|停留时长|同行人数|目的地)[:：]/.test(s)) continue;
@@ -3020,7 +3053,7 @@ export function extractIntentSignals(userText: string, opts?: { historyMode?: bo
       SAFETY_STRATEGY_RE.test(s) ||
       TRANSPORT_CONVENIENCE_RE.test(s) ||
       HEALTH_STRATEGY_DIET_RE.test(s) ||
-      /签证|护照|入境|治安|安全|被坑|防骗|轮椅|无障碍|转机|换乘|托运|语言障碍|不会英语|翻译|饮食|忌口|素食|清真|宗教|礼拜|祷告|斋月|安息日|低盐|低脂|高纤维|清淡|少油|少糖|不想太累|不太折腾|中老年|老人|地铁近|交通方便|halal|kosher|vegetarian|vegan|religion|prayer|visa|passport|safety|logistics|low[-\s]?salt|low[-\s]?fat|high[-\s]?fiber|diet/i.test(
+      /签证|护照|入境|治安|安全|被坑|防骗|轮椅|无障碍|转机|换乘|托运|语言障碍|不会英语|不会英文|法语|阿拉伯语|西语|葡语|英语|英文|不懂|翻译|饮食|忌口|素食|清真|宗教|礼拜|祷告|斋月|安息日|低盐|低脂|高纤维|清淡|少油|少糖|不想太累|不太折腾|中老年|老人|地铁近|交通方便|halal|kosher|vegetarian|vegan|religion|prayer|visa|passport|safety|logistics|low[-\s]?salt|low[-\s]?fat|high[-\s]?fiber|diet/i.test(
         s
       );
     if (!likelyConstraintCue) continue;

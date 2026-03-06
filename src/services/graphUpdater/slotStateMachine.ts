@@ -895,6 +895,7 @@ export function buildSlotStateMachine(params: {
   const limitingFactorSlotKeys: string[] = [];
   const limitingFactorSlotsByKind = new Map<string, string[]>();
   const limitingFactorBySlot = new Map<string, LimitingFactor>();
+  const limitingFactorNodeIndexBySlot = new Map<string, number>();
   let peopleSlotKey: string | null = null;
   let budgetSlotKey: string | null = null;
   let budgetSpentSlotKey: string | null = null;
@@ -1345,32 +1346,84 @@ export function buildSlotStateMachine(params: {
                 ]
               : undefined;
 
-    nodes.push({
-      slotKey,
-      type: "constraint",
-      layer: riskKind.has(kind) && (severity === "critical" || severity === "high") ? "risk" : "requirement",
-      strength: factor.hard ? "hard" : "soft",
-      severity,
-      statement: statementWithPrefix(params.locale, "限制因素: ", "Limiting factor: ", factor.text),
-      confidence: factor.hard ? 0.9 : 0.82,
-      importance: imp,
-      tags: ["limiting_factor", kind],
-      evidenceIds: [factor.evidence || factor.text].filter(Boolean),
-      sourceMsgIds: ["latest_user"],
-      key: slotKey,
-      motifType: "hypothesis",
-      claim: factor.text,
-      evidence: motifEvidence(factor.evidence || factor.text),
-      linkedIntentIds: ["slot:goal"],
-      revisionHistory: [{ at: now, action: "updated", by: "system", reason: "slot_state_machine" }],
-      priority: imp,
-      rebuttalPoints,
-    });
-    limitingFactorSlotKeys.push(slotKey);
-    if (!limitingFactorSlotsByKind.has(kind)) limitingFactorSlotsByKind.set(kind, []);
-    limitingFactorSlotsByKind.get(kind)!.push(slotKey);
-    limitingFactorBySlot.set(slotKey, factor);
-    pushEdge(edges, slotKey, "slot:goal", factor.hard ? "constraint" : "determine", factor.hard ? 0.92 : 0.82);
+    const existingNodeIdx = limitingFactorNodeIndexBySlot.get(slotKey);
+    if (existingNodeIdx == null) {
+      nodes.push({
+        slotKey,
+        type: "constraint",
+        layer: riskKind.has(kind) && (severity === "critical" || severity === "high") ? "risk" : "requirement",
+        strength: factor.hard ? "hard" : "soft",
+        severity,
+        statement: statementWithPrefix(params.locale, "限制因素: ", "Limiting factor: ", factor.text),
+        confidence: factor.hard ? 0.9 : 0.82,
+        importance: imp,
+        tags: ["limiting_factor", kind],
+        evidenceIds: [factor.evidence || factor.text].filter(Boolean),
+        sourceMsgIds: ["latest_user"],
+        key: slotKey,
+        motifType: "hypothesis",
+        claim: factor.text,
+        evidence: motifEvidence(factor.evidence || factor.text),
+        linkedIntentIds: ["slot:goal"],
+        revisionHistory: [{ at: now, action: "updated", by: "system", reason: "slot_state_machine" }],
+        priority: imp,
+        rebuttalPoints,
+      });
+      limitingFactorNodeIndexBySlot.set(slotKey, nodes.length - 1);
+      limitingFactorSlotKeys.push(slotKey);
+      if (!limitingFactorSlotsByKind.has(kind)) limitingFactorSlotsByKind.set(kind, []);
+      limitingFactorSlotsByKind.get(kind)!.push(slotKey);
+      limitingFactorBySlot.set(slotKey, factor);
+      pushEdge(edges, slotKey, "slot:goal", factor.hard ? "constraint" : "determine", factor.hard ? 0.92 : 0.82);
+      continue;
+    }
+
+    const existingNode = nodes[existingNodeIdx];
+    existingNode.strength =
+      existingNode.strength === "hard" || factor.hard ? "hard" : existingNode.strength || "soft";
+    existingNode.severity =
+      existingNode.severity === "critical" || severity === "critical"
+        ? "critical"
+        : existingNode.severity === "high" || severity === "high"
+          ? "high"
+          : existingNode.severity || severity;
+    existingNode.layer =
+      riskKind.has(kind) && (existingNode.severity === "critical" || existingNode.severity === "high")
+        ? "risk"
+        : existingNode.layer || "requirement";
+    existingNode.confidence = Math.max(Number(existingNode.confidence) || 0, factor.hard ? 0.9 : 0.82);
+    existingNode.importance = Math.max(Number(existingNode.importance) || 0, imp);
+    existingNode.priority = Math.max(Number(existingNode.priority) || 0, imp);
+    existingNode.evidenceIds = Array.from(
+      new Set([...(existingNode.evidenceIds || []), factor.evidence || factor.text].filter(Boolean))
+    ).slice(0, 4);
+    existingNode.evidence = motifEvidence(
+      cleanStatement(
+        [
+          ...(Array.isArray(existingNode.evidence)
+            ? existingNode.evidence.map((item: any) => item?.quote).filter(Boolean)
+            : []),
+          factor.evidence || factor.text,
+        ].join("; "),
+        120
+      )
+    );
+
+    const prevFactor = limitingFactorBySlot.get(slotKey);
+    if ((Number(factor.importance) || 0) >= (Number(prevFactor?.importance) || 0)) {
+      existingNode.statement = statementWithPrefix(params.locale, "限制因素: ", "Limiting factor: ", factor.text);
+      existingNode.claim = factor.text;
+      existingNode.rebuttalPoints = existingNode.rebuttalPoints || rebuttalPoints;
+      limitingFactorBySlot.set(slotKey, {
+        ...prevFactor,
+        ...factor,
+        evidence: cleanStatement(
+          [prevFactor?.evidence, factor.evidence || factor.text].filter(Boolean).join("; "),
+          120
+        ),
+        importance: Math.max(Number(prevFactor?.importance) || 0, Number(factor.importance) || 0),
+      } as LimitingFactor);
+    }
   }
 
   if (params.signals.criticalPresentation) {

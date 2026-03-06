@@ -12,6 +12,8 @@ import { buildSlotStateMachine } from "../slotStateMachine.js";
 import { compileSlotStateToPatch } from "../slotGraphCompiler.js";
 import { generateGraphPatch } from "../../graphUpdater.js";
 import { applyPatchWithGuards } from "../../../core/graph/patchApply.js";
+import { buildCognitiveModel } from "../../cognitiveModel.js";
+import { buildConflictGatePayload } from "../../motif/conflictGate.js";
 import { planUncertaintyQuestion } from "../../uncertainty/questionPlanner.js";
 import { reconcileConceptsWithGraph, stableConceptIdFromSemanticKey } from "../../concepts.js";
 import {
@@ -580,6 +582,23 @@ const cases: Case[] = [
     },
   },
   {
+    name: "combined language clause should become concise language constraint instead of a whole-sentence generic limit",
+    run: () => {
+      const s = extractIntentSignals(
+        "想带妈妈第一次去摩洛哥，7到8天，预算总共3万元，想去马拉喀什和非斯，卡萨可以作为落地中转，法语和阿拉伯语都不会，希望别太折腾。"
+      );
+      assert.equal(s.languageConstraint, "法语和阿拉伯语都不会");
+      assert.equal(
+        (s.genericConstraints || []).some((x) => /想带妈妈第一次去摩洛哥/.test(x.text)),
+        false
+      );
+      assert.equal(
+        (s.genericConstraints || []).some((x) => /法语和阿拉伯语都不会/.test(x.text)),
+        false
+      );
+    },
+  },
+  {
     name: "removed destination should disappear from merged destinations and city durations",
     run: () => {
       const merged = extractIntentSignalsWithRecency(
@@ -588,6 +607,57 @@ const cases: Case[] = [
       );
       assert.equal((merged.destinations || []).some((x) => /卡萨/.test(x)), false);
       assert.equal((merged.cityDurations || []).some((x) => x.city === "卡萨布兰卡"), false);
+    },
+  },
+  {
+    name: "morocco refinement with language constraint should not trigger conflict gate",
+    run: async () => {
+      const turn1 =
+        "想带妈妈第一次去摩洛哥，7到8天，预算总共3万元，想去马拉喀什和非斯，卡萨可以作为落地中转，法语和阿拉伯语都不会，希望别太折腾。";
+      const turn2 = "那就先以马拉喀什4晚、非斯2晚，卡萨最多半天过渡，其他先别塞满。";
+      let graph: any = { id: "g_morocco_language", version: 1, nodes: [], edges: [] };
+
+      const patch1 = await generateGraphPatch({
+        graph,
+        userText: turn1,
+        recentTurns: [{ role: "user", content: turn1 }],
+        stateContextUserTurns: [turn1],
+        assistantText: "收到",
+        locale: "zh-CN",
+      });
+      graph = applyPatchWithGuards(graph, patch1).newGraph;
+
+      const patch2 = await generateGraphPatch({
+        graph,
+        userText: turn2,
+        recentTurns: [
+          { role: "user", content: turn1 },
+          { role: "assistant", content: "收到" },
+          { role: "user", content: turn2 },
+        ],
+        stateContextUserTurns: [turn1, turn2],
+        assistantText: "收到",
+        locale: "zh-CN",
+      });
+      graph = applyPatchWithGuards(graph, patch2).newGraph;
+
+      assert.equal(
+        graph.nodes.some(
+          (n: any) =>
+            Array.isArray(n.tags) &&
+            n.tags.includes("language") &&
+            /法语和阿拉伯语都不会/.test(String(n.statement || ""))
+        ),
+        true
+      );
+
+      const model = buildCognitiveModel({ graph, locale: "zh-CN" });
+      const gate = buildConflictGatePayload(model.motifs, "zh-CN");
+      assert.equal(gate, null);
+      assert.equal(
+        model.motifs.some((m) => m.status === "deprecated" && /法语和阿拉伯语都不会/.test(m.title)),
+        false
+      );
     },
   },
   {
