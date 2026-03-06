@@ -206,6 +206,17 @@ function hasCompleteTravelDurationCoverage(out: Pick<IntentSignals, "cityDuratio
   return statedDays > 0 && Math.abs(statedDays - travelSum) <= 1;
 }
 
+function matchesRemovedDestination(removed: Set<string>, city: string): boolean {
+  const normalized = canonicalCity(city);
+  if (!normalized) return false;
+  for (const candidate of removed) {
+    if (!candidate) continue;
+    if (normalized === candidate) return true;
+    if (candidate.length >= 2 && (normalized.includes(candidate) || candidate.includes(normalized))) return true;
+  }
+  return false;
+}
+
 function filterRemovedDestinationArtifacts(out: IntentSignals): void {
   const removedSet = new Set(
     (out.removedDestinations || [])
@@ -216,17 +227,17 @@ function filterRemovedDestinationArtifacts(out: IntentSignals): void {
 
   out.destinations = (out.destinations || [])
     .map((x) => canonicalCity(x))
-    .filter((city) => !!city && !removedSet.has(city));
+    .filter((city) => !!city && !matchesRemovedDestination(removedSet, city));
   if (!out.destinations.length) out.destinations = undefined;
 
   out.cityDurations = (out.cityDurations || []).filter((seg) => {
     const city = canonicalCity(seg?.city || "");
-    return !!city && !removedSet.has(city);
+    return !!city && !matchesRemovedDestination(removedSet, city);
   });
   if (!out.cityDurations.length) out.cityDurations = undefined;
 
   const primary = canonicalCity(out.destination || "");
-  if (!primary || removedSet.has(primary)) {
+  if (!primary || matchesRemovedDestination(removedSet, primary)) {
     out.destination = out.destinations?.[0];
     out.destinationEvidence = out.destination ? out.destinationEvidence || out.destination : undefined;
   }
@@ -235,7 +246,7 @@ function filterRemovedDestinationArtifacts(out: IntentSignals): void {
     const filtered: Record<string, number> = {};
     for (const [city, value] of Object.entries(out.destinationImportanceByCity)) {
       const normalized = canonicalCity(city);
-      if (!normalized || removedSet.has(normalized)) continue;
+      if (!normalized || matchesRemovedDestination(removedSet, normalized)) continue;
       filtered[normalized] = Math.max(Number(filtered[normalized]) || 0, Number(value) || 0);
     }
     out.destinationImportanceByCity = Object.keys(filtered).length ? filtered : undefined;
@@ -245,7 +256,7 @@ function filterRemovedDestinationArtifacts(out: IntentSignals): void {
     const filtered: Record<string, number> = {};
     for (const [city, value] of Object.entries(out.cityDurationImportanceByCity)) {
       const normalized = canonicalCity(city);
-      if (!normalized || removedSet.has(normalized)) continue;
+      if (!normalized || matchesRemovedDestination(removedSet, normalized)) continue;
       filtered[normalized] = Math.max(Number(filtered[normalized]) || 0, Number(value) || 0);
     }
     out.cityDurationImportanceByCity = Object.keys(filtered).length ? filtered : undefined;

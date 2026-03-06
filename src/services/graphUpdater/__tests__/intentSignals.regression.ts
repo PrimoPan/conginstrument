@@ -854,7 +854,7 @@ const cases: Case[] = [
     name: "signal sanitizer should filter removed destinations even if an upstream extractor re-injects them",
     run: () => {
       const sanitized = sanitizeIntentSignals({
-        destinations: ["摩洛哥", "马拉喀什", "非斯", "卡萨"],
+        destinations: ["摩洛哥", "马拉喀什", "非斯", "卡萨布兰卡"],
         removedDestinations: ["卡萨"],
         cityDurations: [
           {
@@ -870,17 +870,17 @@ const cases: Case[] = [
             kind: "travel",
           },
           {
-            city: "卡萨",
+            city: "卡萨布兰卡",
             days: 1,
-            evidence: "卡萨1天",
+            evidence: "卡萨布兰卡1天",
             kind: "travel",
           },
         ],
         durationDays: 8,
         durationEvidence: "8天",
       });
-      assert.ok(!(sanitized.destinations || []).includes("卡萨"));
-      assert.ok(!(sanitized.cityDurations || []).some((x) => x.city === "卡萨"));
+      assert.ok(!(sanitized.destinations || []).some((x) => /卡萨/.test(x)));
+      assert.ok(!(sanitized.cityDurations || []).some((x) => /卡萨/.test(x.city)));
     },
   },
   {
@@ -1174,7 +1174,7 @@ const cases: Case[] = [
         userText: "卡萨先完全去掉，剩下时间宁可在马拉喀什放空，也别频繁换城。",
         recentTurns: [{ role: "user", content: "卡萨先完全去掉，剩下时间宁可在马拉喀什放空，也别频繁换城。" }],
         signals: {
-          destinations: ["摩洛哥", "马拉喀什", "非斯", "卡萨"],
+          destinations: ["摩洛哥", "马拉喀什", "非斯", "卡萨布兰卡"],
           cityDurations: [
             {
               city: "马拉喀什",
@@ -1189,9 +1189,9 @@ const cases: Case[] = [
               kind: "travel",
             },
             {
-              city: "卡萨",
+              city: "卡萨布兰卡",
               days: 1,
-              evidence: "卡萨1天",
+              evidence: "卡萨布兰卡1天",
               kind: "travel",
             },
           ],
@@ -1201,8 +1201,8 @@ const cases: Case[] = [
         locale: "zh-CN",
       });
       const slotKeys = state.nodes.map((n: any) => String(n.slotKey || ""));
-      assert.equal(slotKeys.includes("slot:destination:卡萨"), false);
-      assert.equal(slotKeys.includes("slot:duration_city:卡萨"), false);
+      assert.equal(slotKeys.includes("slot:destination:卡萨布兰卡"), false);
+      assert.equal(slotKeys.includes("slot:duration_city:卡萨布兰卡"), false);
       assert.equal(slotKeys.includes("slot:destination:马拉喀什"), true);
       assert.equal(slotKeys.includes("slot:destination:非斯"), true);
     },

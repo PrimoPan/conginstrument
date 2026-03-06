@@ -31,6 +31,17 @@ function slug(input: string): string {
     .slice(0, 28);
 }
 
+function matchesRemovedDestination(removed: Set<string>, city?: string): boolean {
+  const normalized = normalizeDestination(city || "");
+  if (!normalized) return false;
+  for (const candidate of removed) {
+    if (!candidate) continue;
+    if (normalized === candidate) return true;
+    if (candidate.length >= 2 && (normalized.includes(candidate) || candidate.includes(normalized))) return true;
+  }
+  return false;
+}
+
 function motifEvidence(quote?: string, source = "dialogue"): Array<{ quote: string; source?: string }> | undefined {
   const q = cleanStatement(quote || "", 120);
   if (!q) return undefined;
@@ -886,7 +897,7 @@ export function buildSlotStateMachine(params: {
   const pushDestination = (raw?: string) => {
     const city = normalizeDestination(raw || "");
     if (!city || !isLikelyDestinationCandidate(city)) return;
-    if (removedDestinationSet.has(city)) return;
+    if (matchesRemovedDestination(removedDestinationSet, city)) return;
     const key = slug(city);
     if (!key || destinationMap.has(key)) return;
     destinationMap.set(key, city);
@@ -1015,7 +1026,7 @@ export function buildSlotStateMachine(params: {
 
   for (const seg of durationState.cityDurations) {
     const normalizedSegCity = normalizeDestination(seg.city);
-    if (normalizedSegCity && removedDestinationSet.has(normalizedSegCity)) continue;
+    if (normalizedSegCity && matchesRemovedDestination(removedDestinationSet, normalizedSegCity)) continue;
     const cityKey = slug(seg.city);
     if (!durationState.emitCityDurationSlots.has(cityKey)) continue;
     const slotKey = `slot:duration_city:${cityKey}`;
