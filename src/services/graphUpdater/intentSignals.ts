@@ -2137,6 +2137,16 @@ export function buildTravelIntentStatement(
       return true;
     });
   const destinations = alignedDestinations.map((x) => x.city);
+  const goalAlignedDestinations = (
+    alignedDestinations.filter(
+      (x) => !/(多住一点|住久一点|多待一点|多留一点|重点住|优先住|主要住)/.test(x.evidence)
+    ).length
+      ? alignedDestinations.filter(
+          (x) => !/(多住一点|住久一点|多待一点|多留一点|重点住|优先住|主要住)/.test(x.evidence)
+        )
+      : alignedDestinations
+  );
+  const goalDestinationsPool = goalAlignedDestinations.map((x) => x.city);
   const normalizedPrimary = normalizeDestination(signals.destination || "");
   const primaryDestination =
     normalizedPrimary &&
@@ -2147,21 +2157,21 @@ export function buildTravelIntentStatement(
       : "";
   const en = isEnglishLocale(locale);
   const goalDestinations =
-    destinations.length >= 2
+    goalDestinationsPool.length >= 2
       ? (() => {
-          const firstEvidence = alignedDestinations[0]?.evidence;
+          const firstEvidence = goalAlignedDestinations[0]?.evidence;
           if (firstEvidence) {
-            const primaryCluster = alignedDestinations
+            const primaryCluster = goalAlignedDestinations
               .filter((x) => x.evidence === firstEvidence)
               .map((x) => x.city);
             if (primaryCluster.length >= 2) return primaryCluster.slice(0, 3);
           }
-          if (primaryDestination && destinations.includes(primaryDestination)) {
-            return [primaryDestination, ...destinations.filter((x) => x !== primaryDestination)].slice(0, 3);
+          if (primaryDestination && goalDestinationsPool.includes(primaryDestination)) {
+            return [primaryDestination, ...goalDestinationsPool.filter((x) => x !== primaryDestination)].slice(0, 3);
           }
-          return destinations.slice(0, 3);
+          return goalDestinationsPool.slice(0, 3);
         })()
-      : [primaryDestination || destinations[0] || ""].filter(Boolean);
+      : [primaryDestination || goalDestinationsPool[0] || destinations[0] || ""].filter(Boolean);
   const destinationPhrase =
     goalDestinations.length >= 2
       ? en

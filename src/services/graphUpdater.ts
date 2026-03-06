@@ -114,6 +114,24 @@ function hasDirectDurationCue(text: string): boolean {
   return false;
 }
 
+function readGraphDestinationSlots(graph: CDG): string[] {
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const node of graph.nodes || []) {
+    const key = String((node as any)?.key || "");
+    if (!key.startsWith("slot:destination:")) continue;
+    const city = normalizeDestination(key.slice("slot:destination:".length));
+    if (!city || !isLikelyDestinationCandidate(city) || seen.has(city)) continue;
+    seen.add(city);
+    out.push(city);
+  }
+  return out;
+}
+
+function isLodgingFocusRefinement(text: string): boolean {
+  return /(多住一点|住久一点|多待一点|多留一点|重点住|优先住|主要住)/.test(String(text || ""));
+}
+
 function mergeRemovedDestinations(...lists: Array<string[] | undefined>): string[] | undefined {
   const seen = new Set<string>();
   const merged: string[] = [];
@@ -326,6 +344,31 @@ async function buildSignals(params: {
   }
 
   signals = sanitizeIntentSignals(signals);
+
+  if (isLodgingFocusRefinement(params.userText)) {
+    const removed = new Set((signals.removedDestinations || []).map((x) => normalizeDestination(x)).filter(Boolean));
+    const preservedGraphDestinations = readGraphDestinationSlots(params.graph).filter((x) => !removed.has(x));
+    if (preservedGraphDestinations.length) {
+      const evidenceByCity = new Map<string, string>();
+      (signals.destinations || []).forEach((city, index) => {
+        const normalized = normalizeDestination(city);
+        const evidence = String(signals.destinationEvidences?.[index] || signals.destinationEvidence || city || "");
+        if (normalized && evidence && !evidenceByCity.has(normalized)) evidenceByCity.set(normalized, evidence);
+      });
+      for (const city of preservedGraphDestinations) {
+        if (!evidenceByCity.has(city)) evidenceByCity.set(city, city);
+      }
+      const mergedDestinations = Array.from(
+        new Set([...preservedGraphDestinations, ...(signals.destinations || []).map((x) => normalizeDestination(x)).filter(Boolean)])
+      ).filter((x) => !removed.has(x));
+      if (mergedDestinations.length) {
+        signals.destinations = mergedDestinations.slice(0, 8);
+        signals.destination = signals.destinations[0];
+        signals.destinationEvidences = signals.destinations.map((city) => evidenceByCity.get(city) || city);
+        signals.destinationEvidence = signals.destinationEvidences[0] || signals.destination;
+      }
+    }
+  }
 
   const budgetLedger = buildBudgetLedgerFromUserTurns(
     [...historyUserTexts, params.userText].map((text, i) => ({

@@ -872,6 +872,65 @@ const cases: Case[] = [
     },
   },
   {
+    name: "lodging focus refinement should preserve existing graph anchor even without prior user-turn replay",
+    run: async () => {
+      const turn = "不是必须环岛，南岸多住一点也可以，斯奈山半岛先不去，整体还是9天。";
+      const graph = {
+          id: "g_iceland_existing_anchor",
+          version: 2,
+          nodes: [
+            {
+              id: "n_goal",
+              type: "belief",
+              layer: "intent",
+              statement: "意图：去冰岛旅游9天",
+              status: "confirmed",
+              confidence: 0.86,
+              importance: 0.84,
+              key: "slot:goal",
+            } as any,
+            {
+              id: "n_dest_iceland",
+              type: "factual_assertion",
+              layer: "requirement",
+              statement: "目的地: 冰岛",
+              status: "confirmed",
+              confidence: 0.9,
+              importance: 0.8,
+              key: "slot:destination:冰岛",
+            } as any,
+            {
+              id: "n_duration_total",
+              type: "constraint",
+              layer: "requirement",
+              statement: "总行程时长: 9天",
+              status: "confirmed",
+              confidence: 0.9,
+              importance: 0.84,
+              key: "slot:duration_total",
+            } as any,
+          ],
+          edges: [],
+        } as any;
+      const patch = await generateGraphPatch({
+        graph,
+        userText: turn,
+        recentTurns: [{ role: "user", content: turn }],
+        stateContextUserTurns: [turn],
+        assistantText: "收到",
+        locale: "zh-CN",
+      });
+      const nextGraph = applyPatchWithGuards(graph, patch).newGraph;
+      const goalNode = nextGraph.nodes.find((n: any) => String(n.key || "") === "slot:goal");
+      const destinationKeys = nextGraph.nodes
+        .filter((n: any) => String(n.key || "").startsWith("slot:destination:"))
+        .map((n: any) => String(n.key))
+        .sort();
+      assert.deepEqual(destinationKeys, ["slot:destination:冰岛", "slot:destination:南岸"]);
+      assert.equal(goalNode?.statement, "意图：去冰岛旅游9天");
+    },
+  },
+  {
     name: "budget total phrasing should not set explicit duration-total cue",
     run: () => {
       const s = extractIntentSignals("想带妈妈去摩洛哥7到8天，预算总共3万元，语言不太通，希望别太折腾。");
