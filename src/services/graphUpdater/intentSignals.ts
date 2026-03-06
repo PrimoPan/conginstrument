@@ -1591,7 +1591,7 @@ export function normalizeDestination(raw: string): string {
   );
   // 迭代剥离尾部噪声，避免“巴塞罗那参加CHI”“米兰玩”这类污染目的地槽位。
   const tailNoiseRe =
-    /(参加|参会|开会|会议|chi|conference|workshop|summit|论坛|峰会|玩|逛|旅游|旅行|游玩|出行|度假|计划|安排)$/i;
+    /(参加|参会|开会|会议|chi|conference|workshop|summit|论坛|峰会|玩|逛|旅游|旅行|游玩|出行|度假|计划|安排|放空|休整|休息|放松|躺平|慢游)$/i;
   let changed = true;
   while (changed && s) {
     const next = s.replace(tailNoiseRe, "");
@@ -1603,6 +1603,7 @@ export function normalizeDestination(raw: string): string {
   const strippedCountryPrefix = s.replace(COUNTRY_PREFIX_RE, "");
   if (strippedCountryPrefix && strippedCountryPrefix !== s) s = strippedCountryPrefix;
   s = s.replace(/^的+/g, "");
+  s = s.replace(/(放空|休整|休息|放松|躺平|慢游)$/i, "");
   s = s.replace(/(旅游|旅行|游玩|出行|度假|参会|开会|会议|行程|计划|玩|逛)$/i, "");
   s = s.replace(/(不确定要不要去|不确定要不要|不确定是否去|不确定|不是必须|先完全|完全|了)$/i, "");
   s = s.replace(/(地方|区域|位置|片区)(吧|呢|呀|啊)?$/i, "");

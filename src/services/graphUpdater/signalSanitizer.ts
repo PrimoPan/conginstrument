@@ -206,6 +206,91 @@ function hasCompleteTravelDurationCoverage(out: Pick<IntentSignals, "cityDuratio
   return statedDays > 0 && Math.abs(statedDays - travelSum) <= 1;
 }
 
+function filterRemovedDestinationArtifacts(out: IntentSignals): void {
+  const removedSet = new Set(
+    (out.removedDestinations || [])
+      .map((x) => canonicalCity(x))
+      .filter(Boolean)
+  );
+  if (!removedSet.size) return;
+
+  out.destinations = (out.destinations || [])
+    .map((x) => canonicalCity(x))
+    .filter((city) => !!city && !removedSet.has(city));
+  if (!out.destinations.length) out.destinations = undefined;
+
+  out.cityDurations = (out.cityDurations || []).filter((seg) => {
+    const city = canonicalCity(seg?.city || "");
+    return !!city && !removedSet.has(city);
+  });
+  if (!out.cityDurations.length) out.cityDurations = undefined;
+
+  const primary = canonicalCity(out.destination || "");
+  if (!primary || removedSet.has(primary)) {
+    out.destination = out.destinations?.[0];
+    out.destinationEvidence = out.destination ? out.destinationEvidence || out.destination : undefined;
+  }
+
+  if (out.destinationImportanceByCity) {
+    const filtered: Record<string, number> = {};
+    for (const [city, value] of Object.entries(out.destinationImportanceByCity)) {
+      const normalized = canonicalCity(city);
+      if (!normalized || removedSet.has(normalized)) continue;
+      filtered[normalized] = Math.max(Number(filtered[normalized]) || 0, Number(value) || 0);
+    }
+    out.destinationImportanceByCity = Object.keys(filtered).length ? filtered : undefined;
+  }
+
+  if (out.cityDurationImportanceByCity) {
+    const filtered: Record<string, number> = {};
+    for (const [city, value] of Object.entries(out.cityDurationImportanceByCity)) {
+      const normalized = canonicalCity(city);
+      if (!normalized || removedSet.has(normalized)) continue;
+      filtered[normalized] = Math.max(Number(filtered[normalized]) || 0, Number(value) || 0);
+    }
+    out.cityDurationImportanceByCity = Object.keys(filtered).length ? filtered : undefined;
+  }
+}
+
+function pruneRedundantEnvelopeCityDurations(out: IntentSignals): void {
+  const segments = (out.cityDurations || []).filter((seg) => {
+    const city = canonicalCity(seg?.city || "");
+    const days = Number(seg?.days) || 0;
+    return !!city && !isNoiseCityLike(city) && isLikelyDestinationCandidate(city) && days > 0;
+  });
+  if (segments.length < 3) return;
+
+  const statedDays = Number(out.durationDays) || 0;
+  if (statedDays <= 0) return;
+
+  const dropCities = new Set<string>();
+  for (const seg of segments) {
+    if (seg.kind === "meeting") continue;
+    const segCity = canonicalCity(seg.city);
+    const segDays = Number(seg.days) || 0;
+    if (!segCity || segDays <= 0 || Math.abs(segDays - statedDays) > 1) continue;
+
+    const siblingTravel = segments.filter(
+      (other) => other !== seg && other.kind !== "meeting" && canonicalCity(other.city) !== segCity
+    );
+    const siblingCityCount = new Set(siblingTravel.map((other) => canonicalCity(other.city)).filter(Boolean)).size;
+    const siblingSum = siblingTravel.reduce((acc, other) => acc + (Number(other.days) || 0), 0);
+    const maxSiblingDays = siblingTravel.reduce((acc, other) => Math.max(acc, Number(other.days) || 0), 0);
+    if (
+      siblingCityCount >= 2 &&
+      siblingSum > 0 &&
+      Math.abs(siblingSum - statedDays) <= 1 &&
+      segDays >= maxSiblingDays
+    ) {
+      dropCities.add(segCity);
+    }
+  }
+
+  if (!dropCities.size) return;
+  out.cityDurations = (out.cityDurations || []).filter((seg) => !dropCities.has(canonicalCity(seg?.city || "")));
+  if (!out.cityDurations.length) out.cityDurations = undefined;
+}
+
 function stableTravelSnapshotCities(out: IntentSignals): Array<{ city: string; evidence: string }> {
   const completeCoverage = hasCompleteTravelDurationCoverage(out);
   if (out.hasPartialDurationAllocation && !completeCoverage) return [];
@@ -388,6 +473,9 @@ export function sanitizeIntentSignals(input: IntentSignals): IntentSignals {
       out.destination = out.destinations[0];
     }
   }
+
+  filterRemovedDestinationArtifacts(out);
+  pruneRedundantEnvelopeCityDurations(out);
 
   if (out.criticalPresentation) {
     const city = canonicalCity(out.criticalPresentation.city || "");

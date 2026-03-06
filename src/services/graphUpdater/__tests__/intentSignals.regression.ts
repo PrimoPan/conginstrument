@@ -608,6 +608,45 @@ const cases: Case[] = [
     },
   },
   {
+    name: "signal sanitizer should drop redundant coarse city-duration envelope when finer cities already cover total",
+    run: () => {
+      const sanitized = sanitizeIntentSignals({
+        destinations: ["京都", "大阪"],
+        cityDurations: [
+          {
+            city: "关西",
+            days: 7,
+            evidence: "关西7天",
+            kind: "travel",
+          },
+          {
+            city: "京都",
+            days: 6,
+            evidence: "京都6晚",
+            kind: "travel",
+          },
+          {
+            city: "大阪",
+            days: 1,
+            evidence: "大阪1晚",
+            kind: "travel",
+          },
+        ],
+        durationDays: 7,
+        durationEvidence: "整体还是7天",
+      });
+      assert.equal(sanitized.durationDays, 7);
+      assert.deepEqual(
+        (sanitized.cityDurations || []).map((x) => [x.city, x.days]),
+        [
+          ["京都", 6],
+          ["大阪", 1],
+        ]
+      );
+      assert.deepEqual(sanitized.destinations, ["京都", "大阪"]);
+    },
+  },
+  {
     name: "slot compiler should remove coarse destination nodes after stable city snapshot refinement",
     run: () => {
       const signals = sanitizeIntentSignals({
@@ -800,6 +839,48 @@ const cases: Case[] = [
       );
       assert.equal((merged.destinations || []).some((x) => /卡萨/.test(x)), false);
       assert.equal((merged.cityDurations || []).some((x) => x.city === "卡萨布兰卡"), false);
+    },
+  },
+  {
+    name: "removal turn should not turn relaxation wording into a fake destination",
+    run: () => {
+      const latest = extractIntentSignals("卡萨先完全去掉，剩下时间宁可在马拉喀什放空，也别频繁换城。");
+      assert.ok((latest.removedDestinations || []).includes("卡萨"));
+      assert.ok(!(latest.destinations || []).includes("马拉喀什放空"));
+      assert.notEqual(latest.destination, "马拉喀什放空");
+    },
+  },
+  {
+    name: "signal sanitizer should filter removed destinations even if an upstream extractor re-injects them",
+    run: () => {
+      const sanitized = sanitizeIntentSignals({
+        destinations: ["摩洛哥", "马拉喀什", "非斯", "卡萨"],
+        removedDestinations: ["卡萨"],
+        cityDurations: [
+          {
+            city: "马拉喀什",
+            days: 4,
+            evidence: "马拉喀什4晚",
+            kind: "travel",
+          },
+          {
+            city: "非斯",
+            days: 2,
+            evidence: "非斯2晚",
+            kind: "travel",
+          },
+          {
+            city: "卡萨",
+            days: 1,
+            evidence: "卡萨1天",
+            kind: "travel",
+          },
+        ],
+        durationDays: 8,
+        durationEvidence: "8天",
+      });
+      assert.ok(!(sanitized.destinations || []).includes("卡萨"));
+      assert.ok(!(sanitized.cityDurations || []).some((x) => x.city === "卡萨"));
     },
   },
   {
