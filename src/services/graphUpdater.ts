@@ -5,6 +5,8 @@ import {
   buildTravelIntentStatement,
   extractIntentSignals,
   mergeIntentSignals,
+  normalizeDestination,
+  isLikelyDestinationCandidate,
   type IntentSignals,
 } from "./graphUpdater/intentSignals.js";
 import { resolveIntentSignalsGeo } from "./graphUpdater/geoResolver.js";
@@ -110,6 +112,20 @@ function hasDirectDurationCue(text: string): boolean {
   if (/(玩|旅游|旅行|出行|行程|停留|待)\s*[0-9一二三四五六七八九十两]{1,3}\s*天/i.test(s)) return true;
   if (/(我|我们|计划|准备|想|打算).{0,20}[0-9一二三四五六七八九十两]{1,3}\s*天/i.test(s)) return true;
   return false;
+}
+
+function mergeRemovedDestinations(...lists: Array<string[] | undefined>): string[] | undefined {
+  const seen = new Set<string>();
+  const merged: string[] = [];
+  for (const list of lists) {
+    for (const item of list || []) {
+      const city = normalizeDestination(String(item || ""));
+      if (!city || !isLikelyDestinationCandidate(city) || seen.has(city)) continue;
+      seen.add(city);
+      merged.push(city);
+    }
+  }
+  return merged.length ? merged : undefined;
 }
 
 function pickRootGoalId(graph: CDG): string | null {
@@ -249,6 +265,10 @@ async function buildSignals(params: {
   }
   const latestSignals = extractIntentSignals(params.userText, { locale: params.locale });
   const textSignals = mergeIntentSignals(accumulatedHistorySignals, latestSignals, params.locale);
+  const explicitRemovedDestinations = mergeRemovedDestinations(
+    latestSignals.removedDestinations,
+    textSignals.removedDestinations
+  );
   let signals = textSignals;
 
   if (USE_FUNCTION_SLOT_EXTRACTION) {
@@ -296,6 +316,13 @@ async function buildSignals(params: {
     });
   } catch (e: any) {
     dlog("geo resolver failed:", e?.message || e);
+  }
+
+  if (explicitRemovedDestinations?.length) {
+    signals.removedDestinations = mergeRemovedDestinations(
+      signals.removedDestinations,
+      explicitRemovedDestinations
+    );
   }
 
   signals = sanitizeIntentSignals(signals);
