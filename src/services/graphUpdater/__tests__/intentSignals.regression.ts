@@ -1983,6 +1983,77 @@ const cases: Case[] = [
     },
   },
   {
+    name: "motif titles should refresh when stable concept ids get new graph statements",
+    run: () => {
+      const graph = {
+        id: "g_motif_title_refresh",
+        version: 4,
+        nodes: [
+          {
+            id: "n_goal",
+            type: "belief",
+            layer: "intent",
+            statement: "意图：去京都和大阪旅游7天",
+            status: "confirmed",
+            confidence: 0.86,
+            importance: 0.84,
+            key: "slot:goal",
+          },
+          {
+            id: "n_duration",
+            type: "constraint",
+            layer: "requirement",
+            statement: "总行程时长: 7天",
+            status: "confirmed",
+            confidence: 0.95,
+            importance: 0.8,
+            key: "slot:duration_total",
+          },
+        ] as any,
+        edges: [{ id: "e1", from: "n_duration", to: "n_goal", type: "constraint", confidence: 0.9 }] as any,
+      } as any;
+
+      const baseConcepts = [
+        {
+          id: "c_semantic:slot:goal_belief_positive_global_dv4jnl",
+          title: "意图：去关西和京都和大阪旅游7天",
+          semanticKey: "slot:goal",
+        },
+        {
+          id: "c_semantic:slot:duration_total_constraint_positive_global_18gtnyd",
+          title: "总行程时长: 7天",
+          semanticKey: "slot:duration_total",
+        },
+      ] as any;
+      const baseMotifs = [
+        {
+          id: "m_pattern:pair_constraint_duration_total->goal",
+          title: "总行程时长: 7天 限制 意图：去关西和京都和大阪旅游7天",
+          relation: "constraint",
+          dependencyClass: "constraint",
+          conceptIds: [
+            "c_semantic:slot:duration_total_constraint_positive_global_18gtnyd",
+            "c_semantic:slot:goal_belief_positive_global_dv4jnl",
+          ],
+          anchorConceptId: "c_semantic:slot:goal_belief_positive_global_dv4jnl",
+          status: "active",
+        },
+      ] as any;
+
+      const concepts = reconcileConceptsWithGraph({ graph, baseConcepts });
+      const goalConcept = concepts.find((c) => c.semanticKey === "slot:goal");
+      assert.ok(goalConcept);
+      assert.equal(goalConcept!.title.includes("关西"), false);
+      assert.equal(goalConcept!.title.includes("意图：去京都和大阪旅游7天"), true);
+
+      const motifs = reconcileMotifsWithGraph({ graph, concepts, baseMotifs, locale: "zh-CN" });
+      const target = motifs.find((m) => m.id === "m_pattern:pair_constraint_duration_total->goal");
+      assert.ok(target);
+      assert.equal(target!.title.includes("关西"), false);
+      assert.equal(target!.title.includes("意图：去京都和大阪旅游7天"), true);
+    },
+  },
+  {
     name: "same-semantic relation shadow should be cancelled instead of deprecated",
     run: () => {
       const graph = {

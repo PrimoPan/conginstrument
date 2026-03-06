@@ -3361,16 +3361,12 @@ export function reconcileMotifsWithGraph(params: {
     const prev = baseById.get(m.id);
     const inferred = inferBaseStatus(m, prev, conceptById);
     const status = inferred.status;
-    const preferDerivedTitle = isEnglishLocale(params.locale) && hasCjk(prev?.title || "");
-    const preferDerivedDescription =
-      isEnglishLocale(params.locale) &&
-      (hasCjk(prev?.description || "") ||
-        /模式：|复合结构：|限制|支持|决定|冲突/.test(cleanText(prev?.description, 160)));
     const baseMerged = {
       ...m,
-      title: prev?.title && !preferDerivedTitle ? prev.title : m.title,
-      description:
-        prev?.description && !preferDerivedDescription ? prev.description : m.description,
+      // Motif semantics can change even when the motif id stays stable.
+      // Keep derived copy fresh, and only let explicit user edits override later.
+      title: m.title,
+      description: m.description,
       status,
       statusReason: inferred.reason || prev?.statusReason,
       state_transition_reason: inferred.reason || undefined,

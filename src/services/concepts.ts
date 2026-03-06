@@ -1090,8 +1090,10 @@ export function reconcileConceptsWithGraph(params: { graph: CDG; baseConcepts?: 
     );
     return {
       ...d,
-      title: ex.title || d.title,
-      description: ex.description || d.description,
+      // Concept semantics come from the current graph; keep control-state from
+      // history, but refresh human-readable text whenever graph evidence changes.
+      title: d.title,
+      description: d.description,
       score: d.score,
       validationStatus: normalizeValidationStatus(ex.validationStatus || d.validationStatus, d.validationStatus),
       extractionStage: normalizeExtractionStage(ex.extractionStage || d.extractionStage, d.extractionStage),
