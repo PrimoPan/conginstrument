@@ -193,6 +193,26 @@ function reconcileDurationBySegments(out: IntentSignals): void {
   }
 }
 
+function stableTravelSnapshotCities(out: IntentSignals): Array<{ city: string; evidence: string }> {
+  if (out.hasPartialDurationAllocation) return [];
+  const ordered: Array<{ city: string; evidence: string }> = [];
+  const seen = new Set<string>();
+  for (const seg of out.cityDurations || []) {
+    if (seg?.kind === "meeting") continue;
+    const city = canonicalCity(seg?.city || "");
+    const days = Number(seg?.days) || 0;
+    if (!city || days <= 0 || isNoiseCityLike(city) || !isLikelyDestinationCandidate(city)) continue;
+    const key = slug(city);
+    if (!key || seen.has(key)) continue;
+    seen.add(key);
+    ordered.push({
+      city,
+      evidence: cleanStatement(seg?.evidence || `${city}${days}天`, 56),
+    });
+  }
+  return ordered;
+}
+
 export function sanitizeIntentSignals(input: IntentSignals): IntentSignals {
   const out: IntentSignals = { ...input };
   const derivedConstraints: NonNullable<IntentSignals["genericConstraints"]> = [];
@@ -365,6 +385,21 @@ export function sanitizeIntentSignals(input: IntentSignals): IntentSignals {
         out.destinations = Array.from(destMap.values()).slice(0, 8);
         out.destination = out.destinations[0];
       }
+    }
+  }
+
+  const stableTravelCities = stableTravelSnapshotCities(out);
+  if (stableTravelCities.length >= 2) {
+    out.destinations = stableTravelCities.map((x) => x.city).slice(0, 8);
+    out.destination = out.destinations[0];
+    out.destinationEvidence = stableTravelCities[0]?.evidence || out.destination;
+    if (out.destinationImportanceByCity) {
+      const filtered: Record<string, number> = {};
+      for (const city of out.destinations) {
+        const importance = Number(out.destinationImportanceByCity[city]);
+        if (Number.isFinite(importance) && importance > 0) filtered[city] = importance;
+      }
+      out.destinationImportanceByCity = Object.keys(filtered).length ? filtered : undefined;
     }
   }
 

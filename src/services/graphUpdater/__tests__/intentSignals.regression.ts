@@ -10,6 +10,7 @@ import { buildBudgetLedgerFromUserTurns } from "../../travelPlan/budgetLedger.js
 import { buildTravelPlanState } from "../../travelPlan/state.js";
 import { buildSlotStateMachine } from "../slotStateMachine.js";
 import { compileSlotStateToPatch } from "../slotGraphCompiler.js";
+import { sanitizeIntentSignals } from "../signalSanitizer.js";
 import { generateGraphPatch } from "../../graphUpdater.js";
 import { applyPatchWithGuards } from "../../../core/graph/patchApply.js";
 import { buildCognitiveModel } from "../../cognitiveModel.js";
@@ -499,6 +500,122 @@ const cases: Case[] = [
           ["大阪", 1],
         ]
       );
+    },
+  },
+  {
+    name: "signal sanitizer should collapse mixed country-region-city destinations to stable city snapshot",
+    run: () => {
+      const sanitized = sanitizeIntentSignals({
+        destination: "日本",
+        destinations: ["日本", "关西", "京都", "大阪"],
+        destinationEvidence: "日本关西",
+        cityDurations: [
+          {
+            city: "京都",
+            days: 6,
+            evidence: "京都6晚",
+            kind: "travel",
+          },
+          {
+            city: "大阪",
+            days: 1,
+            evidence: "大阪1晚",
+            kind: "travel",
+          },
+        ],
+        durationDays: 7,
+        durationEvidence: "整体还是7天",
+      });
+      assert.deepEqual(sanitized.destinations, ["京都", "大阪"]);
+      assert.equal(sanitized.destination, "京都");
+      assert.equal(sanitized.destinationEvidence, "京都6晚");
+    },
+  },
+  {
+    name: "slot compiler should remove coarse destination nodes after stable city snapshot refinement",
+    run: () => {
+      const signals = sanitizeIntentSignals({
+        destination: "日本",
+        destinations: ["日本", "关西", "京都", "大阪"],
+        destinationEvidence: "日本关西",
+        cityDurations: [
+          {
+            city: "京都",
+            days: 6,
+            evidence: "京都6晚",
+            kind: "travel",
+          },
+          {
+            city: "大阪",
+            days: 1,
+            evidence: "大阪1晚",
+            kind: "travel",
+          },
+        ],
+        durationDays: 7,
+        durationEvidence: "整体还是7天",
+      });
+      const state = buildSlotStateMachine({
+        userText: "可以，那就按京都为主住6晚，大阪最后1晚，整体还是7天。",
+        recentTurns: [{ role: "user", content: "可以，那就按京都为主住6晚，大阪最后1晚，整体还是7天。" }],
+        signals,
+        locale: "zh-CN",
+      });
+      const patch = compileSlotStateToPatch({
+        graph: {
+          id: "g_hierarchy_cleanup",
+          version: 1,
+          nodes: [
+            {
+              id: "n_country",
+              type: "factual_assertion",
+              layer: "requirement",
+              statement: "目的地: 日本",
+              status: "confirmed",
+              confidence: 0.9,
+              importance: 0.8,
+              key: "slot:destination:日本",
+            } as any,
+            {
+              id: "n_region",
+              type: "factual_assertion",
+              layer: "requirement",
+              statement: "目的地: 关西",
+              status: "confirmed",
+              confidence: 0.9,
+              importance: 0.8,
+              key: "slot:destination:关西",
+            } as any,
+            {
+              id: "n_city_kyoto",
+              type: "factual_assertion",
+              layer: "requirement",
+              statement: "目的地: 京都",
+              status: "confirmed",
+              confidence: 0.9,
+              importance: 0.8,
+              key: "slot:destination:京都",
+            } as any,
+            {
+              id: "n_city_osaka",
+              type: "factual_assertion",
+              layer: "requirement",
+              statement: "目的地: 大阪",
+              status: "confirmed",
+              confidence: 0.9,
+              importance: 0.8,
+              key: "slot:destination:大阪",
+            } as any,
+          ],
+          edges: [],
+        },
+        state,
+      });
+      const removeNodeIds = patch.ops
+        .filter((op) => op.op === "remove_node")
+        .map((op: any) => op.id)
+        .sort();
+      assert.deepEqual(removeNodeIds, ["n_country", "n_region"]);
     },
   },
   {
