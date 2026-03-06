@@ -1333,6 +1333,17 @@ const cases: Case[] = [
     },
   },
   {
+    name: "partial city allocation should keep the coarse country anchor in goal text",
+    run: () => {
+      const latest = "先按马拉喀什4晚、非斯2晚，卡萨最多半天过渡，整体还是8天。";
+      const merged = extractIntentSignalsWithRecency(
+        "我想和妈妈去摩洛哥玩7到8天，第一次去，想轻松一点，英语沟通压力别太大。",
+        latest
+      );
+      assert.equal(buildTravelIntentStatement(merged, latest, "zh-CN"), "意图：去摩洛哥旅游8天");
+    },
+  },
+  {
     name: "slot state should drop removed destinations so compiler can clean stale graph nodes",
     run: () => {
       const signals = extractIntentSignalsWithRecency(

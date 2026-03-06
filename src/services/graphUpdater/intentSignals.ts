@@ -2155,9 +2155,22 @@ export function buildTravelIntentStatement(
     !Array.from(subLocationNames).some((sub) => sub && sub.length >= 2 && normalizedPrimary.includes(sub))
       ? normalizedPrimary
       : "";
+  const cityAllocationDestinations = new Set(
+    (signals.cityDurations || [])
+      .map((seg) => normalizeDestination(seg?.city || ""))
+      .filter((city) => !!city && isLikelyDestinationCandidate(city))
+  );
+  const shouldPreferScopeAnchorInGoal =
+    !!signals.hasPartialDurationAllocation &&
+    !!primaryDestination &&
+    cityAllocationDestinations.size >= 2 &&
+    !cityAllocationDestinations.has(primaryDestination) &&
+    goalDestinationsPool.some((city) => cityAllocationDestinations.has(city));
   const en = isEnglishLocale(locale);
   const goalDestinations =
-    goalDestinationsPool.length >= 2
+    shouldPreferScopeAnchorInGoal
+      ? [primaryDestination]
+      : goalDestinationsPool.length >= 2
       ? (() => {
           const firstEvidence = goalAlignedDestinations[0]?.evidence;
           if (firstEvidence) {
