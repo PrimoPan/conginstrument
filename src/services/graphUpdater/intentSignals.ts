@@ -3508,9 +3508,16 @@ function mergeSignalsWithLatest(history: IntentSignals, latest: IntentSignals, l
   const latestHasSnapshotDuration =
     latest.durationDays != null &&
     (!!latest.hasDurationUpdateCue || (!!latest.hasTemporalAnchor && !!latest.hasExplicitTotalCue));
+  const latestHasStructuredCityAllocation =
+    (latest.cityDurations || []).filter((seg) => {
+      const city = normalizeDestination(seg?.city || "");
+      const days = Number(seg?.days) || 0;
+      return !!city && isLikelyDestinationCandidate(city) && days > 0 && seg?.kind !== "meeting";
+    }).length >= 2 &&
+    (!!latestStableCitySnapshot || !!latest.hasPartialDurationAllocation || latest.durationDays != null);
 
   if (latest.cityDurations?.length) {
-    out.cityDurations = latestHasSnapshotDuration || !!latestStableCitySnapshot
+    out.cityDurations = latestHasSnapshotDuration || latestHasStructuredCityAllocation
       ? mergeCityDurations(undefined, latest.cityDurations)
       : mergeCityDurations(out.cityDurations, latest.cityDurations);
   } else {

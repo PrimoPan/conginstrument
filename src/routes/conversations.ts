@@ -893,6 +893,55 @@ type PlanningStateBundleParams = {
   isNewConversation?: boolean;
 };
 
+function buildPersistedTaskDetection(params: PlanningStateBundleParams): TaskDetection {
+  const conversationId = String(params.travelPlanState.task_id || params.conversationId);
+  const currentDestinationScope =
+    (params.travelPlanState as any)?.destination_scope ||
+    params.travelPlanState.destinations ||
+    [];
+  const previousDestinationScope =
+    (params.previousTravelPlan as any)?.destination_scope ||
+    params.previousTravelPlan?.destinations ||
+    [];
+
+  if (params.isNewConversation) {
+    return buildTaskDetection({
+      conversationId,
+      locale: params.locale,
+      currentDestinations: currentDestinationScope,
+      previousDestinations: previousDestinationScope,
+      isNewConversation: true,
+      taskLifecycle: params.taskLifecycle || null,
+      latestUserText: params.latestUserText,
+      tripGoalSummary: cleanInput(params.travelPlanState.trip_goal_summary || params.travelPlanState.summary, 220),
+      travelers: Array.isArray(params.travelPlanState.travelers) ? params.travelPlanState.travelers : [],
+      duration: cleanInput(params.travelPlanState.travel_dates_or_duration, 80) || undefined,
+    });
+  }
+
+  if (cleanInput(params.latestUserText, 320)) {
+    return detectTaskSwitchFromLatestUserTurn({
+      conversationId,
+      locale: params.locale,
+      latestUserText: params.latestUserText,
+      previousTravelPlan: params.previousTravelPlan || null,
+      taskLifecycle: params.taskLifecycle || null,
+    });
+  }
+
+  return buildTaskDetection({
+    conversationId,
+    locale: params.locale,
+    currentDestinations: currentDestinationScope,
+    previousDestinations: previousDestinationScope,
+    taskLifecycle: params.taskLifecycle || null,
+    latestUserText: params.latestUserText,
+    tripGoalSummary: cleanInput(params.travelPlanState.trip_goal_summary || params.travelPlanState.summary, 220),
+    travelers: Array.isArray(params.travelPlanState.travelers) ? params.travelPlanState.travelers : [],
+    duration: cleanInput(params.travelPlanState.travel_dates_or_duration, 80) || undefined,
+  });
+}
+
 async function buildPlanningStateBundle(params: PlanningStateBundleParams): Promise<PlanningStateBundle> {
   const convs = await collections.conversations
     .find({ userId: params.userId, locale: params.locale })
@@ -925,27 +974,7 @@ async function buildPlanningStateBundle(params: PlanningStateBundleParams): Prom
     });
   }
 
-  const currentDestinationScope =
-    (params.travelPlanState as any)?.destination_scope ||
-    params.travelPlanState.destinations ||
-    [];
-  const previousDestinationScope =
-    (params.previousTravelPlan as any)?.destination_scope ||
-    params.previousTravelPlan?.destinations ||
-    [];
-
-  const taskDetection = buildTaskDetection({
-    conversationId: String(params.travelPlanState.task_id || params.conversationId),
-    locale: params.locale,
-    currentDestinations: currentDestinationScope,
-    previousDestinations: previousDestinationScope,
-    isNewConversation: !!params.isNewConversation,
-    taskLifecycle: params.taskLifecycle || null,
-    latestUserText: params.latestUserText,
-    tripGoalSummary: cleanInput(params.travelPlanState.trip_goal_summary || params.travelPlanState.summary, 220),
-    travelers: Array.isArray(params.travelPlanState.travelers) ? params.travelPlanState.travelers : [],
-    duration: cleanInput(params.travelPlanState.travel_dates_or_duration, 80) || undefined,
-  });
+  const taskDetection = buildPersistedTaskDetection(params);
 
   const cognitiveState = buildCognitiveState({
     conversationId: String(params.conversationId),
@@ -980,28 +1009,8 @@ function buildPlanningStateBundleFallback(params: PlanningStateBundleParams): Pl
       locale: params.locale,
     },
   ];
-  const currentDestinationScope =
-    (params.travelPlanState as any)?.destination_scope ||
-    params.travelPlanState.destinations ||
-    [];
-  const previousDestinationScope =
-    (params.previousTravelPlan as any)?.destination_scope ||
-    params.previousTravelPlan?.destinations ||
-    [];
-
   return {
-    taskDetection: buildTaskDetection({
-      conversationId: String(params.travelPlanState.task_id || params.conversationId),
-      locale: params.locale,
-      currentDestinations: currentDestinationScope,
-      previousDestinations: previousDestinationScope,
-      isNewConversation: !!params.isNewConversation,
-      taskLifecycle: params.taskLifecycle || null,
-      latestUserText: params.latestUserText,
-      tripGoalSummary: cleanInput(params.travelPlanState.trip_goal_summary || params.travelPlanState.summary, 220),
-      travelers: Array.isArray(params.travelPlanState.travelers) ? params.travelPlanState.travelers : [],
-      duration: cleanInput(params.travelPlanState.travel_dates_or_duration, 80) || undefined,
-    }),
+    taskDetection: buildPersistedTaskDetection(params),
     cognitiveState: buildCognitiveState({
       conversationId: String(params.conversationId),
       locale: params.locale,

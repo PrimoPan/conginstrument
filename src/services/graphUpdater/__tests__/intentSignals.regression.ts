@@ -1320,6 +1320,19 @@ const cases: Case[] = [
     },
   },
   {
+    name: "partial city allocation should drop stale country duration envelope during signal merge",
+    run: () => {
+      const merged = extractIntentSignalsWithRecency(
+        "我想和妈妈去摩洛哥玩7到8天，第一次去，想轻松一点，英语沟通压力别太大。",
+        "先按马拉喀什4晚、非斯2晚，卡萨最多半天过渡，整体还是8天。"
+      );
+      assert.equal(merged.durationDays, 8);
+      assert.equal((merged.cityDurations || []).some((x) => x.city === "摩洛哥"), false);
+      assert.equal((merged.cityDurations || []).some((x) => x.city === "马拉喀什" && x.days === 4), true);
+      assert.equal((merged.cityDurations || []).some((x) => x.city === "非斯" && x.days === 2), true);
+    },
+  },
+  {
     name: "slot state should drop removed destinations so compiler can clean stale graph nodes",
     run: () => {
       const signals = extractIntentSignalsWithRecency(

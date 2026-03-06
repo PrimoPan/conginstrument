@@ -218,6 +218,104 @@ async function main() {
     assert.ok((second.task_history || []).some((x) => x.task_id === first.task_id));
   });
 
+  await run("forceTaskSwitch false should preserve current task track for coarse-to-fine refinements", () => {
+    const first = buildTravelPlanState({
+      locale: "zh-CN",
+      graph: graphWithDestination("关西", "conv_refine"),
+      turns: turnsFixture(),
+      concepts: [],
+      motifs: [],
+      taskId: "conv_refine",
+      previous: null,
+    });
+
+    const refinedGraph = {
+      id: "conv_refine",
+      version: 2,
+      nodes: [
+        {
+          id: "n_goal",
+          type: "belief",
+          layer: "intent",
+          key: "slot:goal",
+          statement: "意图：去京都和大阪旅游7天",
+          status: "confirmed",
+          confidence: 0.92,
+          importance: 0.9,
+        },
+        {
+          id: "n_total",
+          type: "constraint",
+          layer: "requirement",
+          key: "slot:duration_total",
+          statement: "总行程时长: 7天",
+          status: "confirmed",
+          confidence: 0.9,
+          importance: 0.84,
+        },
+        {
+          id: "n_dest_kyoto",
+          type: "factual_assertion",
+          key: "slot:destination:京都",
+          statement: "目的地：京都",
+          status: "confirmed",
+          confidence: 0.9,
+          importance: 0.85,
+        },
+        {
+          id: "n_dest_osaka",
+          type: "factual_assertion",
+          key: "slot:destination:大阪",
+          statement: "目的地：大阪",
+          status: "confirmed",
+          confidence: 0.9,
+          importance: 0.85,
+        },
+        {
+          id: "n_city_kyoto",
+          type: "factual_assertion",
+          key: "slot:duration_city:京都",
+          statement: "城市时长: 京都 6天",
+          status: "confirmed",
+          confidence: 0.84,
+          importance: 0.72,
+        },
+        {
+          id: "n_city_osaka",
+          type: "factual_assertion",
+          key: "slot:duration_city:大阪",
+          statement: "城市时长: 大阪 1天",
+          status: "confirmed",
+          confidence: 0.84,
+          importance: 0.72,
+        },
+      ],
+      edges: [],
+    } as any;
+
+    const second = buildTravelPlanState({
+      locale: "zh-CN",
+      graph: refinedGraph,
+      turns: [
+        ...turnsFixture(),
+        {
+          createdAt: new Date().toISOString(),
+          userText: "可以，那就按京都为主住6晚，大阪最后1晚，整体还是7天。",
+          assistantText: "收到",
+        },
+      ],
+      concepts: [],
+      motifs: [],
+      taskId: "conv_refine",
+      previous: first,
+      forceTaskSwitch: false,
+    });
+
+    assert.equal(second.task_id, first.task_id);
+    assert.equal(second.plan_version, first.plan_version + 1);
+    assert.equal((second.task_history || []).length || 0, 0);
+  });
+
   await run("en-US travel plan text stays pure English with English date anchors", () => {
     const graph = {
       id: "conv_en",

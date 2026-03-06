@@ -1544,11 +1544,15 @@ export function buildTravelPlanState(params: {
       .map((x) => clean(x, 40))
       .filter(Boolean)
   );
+  const shouldInferTaskSwitchFromDestinations = params.forceTaskSwitch == null;
   const isTaskSwitch =
     !!params.forceTaskSwitch ||
-    !!params.previous &&
-    Number(params.previous?.source?.turnCount || 0) > 0 &&
-    detectDestinationTaskSwitch(destinations, previousDestinations);
+    (
+      shouldInferTaskSwitchFromDestinations &&
+      !!params.previous &&
+      Number(params.previous?.source?.turnCount || 0) > 0 &&
+      detectDestinationTaskSwitch(destinations, previousDestinations)
+    );
   const taskId = isTaskSwitch
     ? `${baseTaskId}:task_${Math.max(1, Number(params.previous?.plan_version || params.previous?.version || 0) + 1)}`
     : clean(params.previous?.task_id, 80) || baseTaskId;
