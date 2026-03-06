@@ -425,5 +425,7 @@ export function sanitizeGraphPatchStrict(raw: any): GraphPatch {
     if (opsIn[0] && typeof opsIn[0] === "object") dlog("op0_keys=", Object.keys(opsIn[0]));
   }
 
-  return { ops: opsOut.slice(0, 12), notes: mergedNotes };
+  // Keep the full deterministic patch. Truncating here can silently drop
+  // stale-node removals, which are appended after the main slot updates.
+  return { ops: opsOut, notes: mergedNotes };
 }

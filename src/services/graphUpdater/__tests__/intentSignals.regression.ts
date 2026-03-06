@@ -16,6 +16,7 @@ import { applyPatchWithGuards } from "../../../core/graph/patchApply.js";
 import { buildCognitiveModel } from "../../cognitiveModel.js";
 import { buildConflictGatePayload } from "../../motif/conflictGate.js";
 import { planUncertaintyQuestion } from "../../uncertainty/questionPlanner.js";
+import { sanitizeGraphPatchStrict } from "../../patchGuard.js";
 import { reconcileConceptsWithGraph, stableConceptIdFromSemanticKey } from "../../concepts.js";
 import {
   isMotifLowConfidence,
@@ -1258,6 +1259,87 @@ const cases: Case[] = [
       const patch = compileSlotStateToPatch({ graph, state });
       const applied = applyPatchWithGuards(graph, patch).newGraph;
       assert.equal(applied.nodes.some((n: any) => n.key === "slot:destination:卡萨"), false);
+    },
+  },
+  {
+    name: "patch guard should preserve stale-slot removals even when compiled patch exceeds 12 ops",
+    run: () => {
+      const state = buildSlotStateMachine({
+        userText: "卡萨先完全去掉，剩下时间宁可在马拉喀什放空，也别频繁换城。",
+        recentTurns: [
+          { role: "user", content: "我想带妈妈第一次去摩洛哥，7到8天，预算总共3万元，别太折腾，法语和阿拉伯语都不会，主要想去马拉喀什和非斯。" },
+          { role: "assistant", content: "收到" },
+          { role: "user", content: "可以，先按马拉喀什4晚、非斯2晚，卡萨最多半天中转，整体还是8天。" },
+          { role: "assistant", content: "收到" },
+          { role: "user", content: "卡萨先完全去掉，剩下时间宁可在马拉喀什放空，也别频繁换城。" },
+        ],
+        signals: {
+          destination: "摩洛哥",
+          destinations: ["摩洛哥", "马拉喀什", "非斯", "卡萨"],
+          destinationEvidence: "摩洛哥、马拉喀什、非斯",
+          cityDurations: [
+            { city: "马拉喀什", days: 4, evidence: "马拉喀什4晚", kind: "travel" },
+            { city: "非斯", days: 2, evidence: "非斯2晚", kind: "travel" },
+            { city: "卡萨", days: 1, evidence: "卡萨最多半天中转", kind: "travel" },
+          ],
+          durationDays: 8,
+          durationEvidence: "整体还是8天",
+          budgetCny: 30000,
+          budgetRemainingCny: 30000,
+          budgetEvidence: "预算总共3万元",
+          languageConstraint: "法语和阿拉伯语都不会",
+          languageEvidence: "法语和阿拉伯语都不会",
+          activityPreference: "别太折腾",
+          activityPreferenceEvidence: "别太折腾",
+          lodgingPreference: "别太折腾",
+          lodgingPreferenceEvidence: "别太折腾",
+          genericConstraints: [
+            { text: "别太折腾", evidence: "别太折腾", hard: true, kind: "mobility", importance: 0.84 },
+            { text: "也别频繁换城", evidence: "也别频繁换城", hard: true, kind: "mobility", importance: 0.82 },
+          ],
+          removedDestinations: ["卡萨"],
+        },
+        locale: "zh-CN",
+      });
+      const graph = {
+        id: "g_patch_guard_removal_budget",
+        version: 1,
+        nodes: [
+          { id: "n_goal", type: "belief", layer: "intent", statement: "意图：去摩洛哥和马拉喀什和非斯旅游8天", status: "confirmed", confidence: 0.9, importance: 0.9, key: "slot:goal" },
+          { id: "n_dest_morocco", type: "factual_assertion", layer: "requirement", statement: "目的地: 摩洛哥", status: "confirmed", confidence: 0.9, importance: 0.84, key: "slot:destination:摩洛哥" },
+          { id: "n_dest_marrakech", type: "factual_assertion", layer: "requirement", statement: "目的地: 马拉喀什", status: "confirmed", confidence: 0.9, importance: 0.84, key: "slot:destination:马拉喀什" },
+          { id: "n_dest_fes", type: "factual_assertion", layer: "requirement", statement: "目的地: 非斯", status: "confirmed", confidence: 0.9, importance: 0.84, key: "slot:destination:非斯" },
+          { id: "n_activity", type: "preference", layer: "preference", statement: "活动偏好: 别太折腾", status: "confirmed", confidence: 0.82, importance: 0.78, key: "slot:activity_preference" },
+          { id: "n_duration_total", type: "constraint", layer: "requirement", statement: "总行程时长: 8天", status: "confirmed", confidence: 0.9, importance: 0.84, key: "slot:duration_total" },
+          { id: "n_budget", type: "constraint", layer: "requirement", statement: "预算上限: 30000元", status: "confirmed", confidence: 0.9, importance: 0.84, key: "slot:budget" },
+          { id: "n_budget_remaining", type: "factual_assertion", layer: "requirement", statement: "剩余预算: 30000元", status: "confirmed", confidence: 0.88, importance: 0.82, key: "slot:budget_remaining" },
+          { id: "n_language", type: "constraint", layer: "requirement", statement: "限制因素: 法语和阿拉伯语都不会", status: "confirmed", confidence: 0.88, importance: 0.84, key: "slot:constraint:limiting:language" },
+          { id: "n_mobility", type: "constraint", layer: "requirement", statement: "限制因素: 别太折腾", status: "confirmed", confidence: 0.88, importance: 0.84, key: "slot:constraint:limiting:mobility" },
+          { id: "n_lodging", type: "preference", layer: "preference", statement: "住宿偏好: 别太折腾", status: "confirmed", confidence: 0.8, importance: 0.74, key: "slot:lodging" },
+          { id: "n_dest_kasa", type: "factual_assertion", layer: "requirement", statement: "目的地: 卡萨", status: "confirmed", confidence: 0.86, importance: 0.76, key: "slot:destination:卡萨" },
+          { id: "n_dur_marrakech", type: "factual_assertion", layer: "requirement", statement: "城市时长: 马拉喀什 4天", status: "confirmed", confidence: 0.84, importance: 0.74, key: "slot:duration_city:马拉喀什" },
+          { id: "n_dur_fes", type: "factual_assertion", layer: "requirement", statement: "城市时长: 非斯 2天", status: "confirmed", confidence: 0.84, importance: 0.74, key: "slot:duration_city:非斯" },
+          { id: "n_dur_kasa", type: "factual_assertion", layer: "requirement", statement: "城市时长: 卡萨 1天", status: "confirmed", confidence: 0.82, importance: 0.7, key: "slot:duration_city:卡萨" },
+        ],
+        edges: [
+          { id: "e_dest_kasa_goal", from: "n_dest_kasa", to: "n_goal", type: "enable", confidence: 0.8 },
+          { id: "e_dur_kasa_dest", from: "n_dur_kasa", to: "n_dest_kasa", type: "determine", confidence: 0.82 },
+        ],
+      } as any;
+      const compiled = compileSlotStateToPatch({ graph, state });
+      assert.ok(compiled.ops.length > 12);
+      const sanitized = sanitizeGraphPatchStrict(compiled);
+      const removedNodeIds = sanitized.ops
+        .filter((op: any) => op.op === "remove_node")
+        .map((op: any) => op.id)
+        .sort();
+      const removedEdgeIds = sanitized.ops
+        .filter((op: any) => op.op === "remove_edge")
+        .map((op: any) => op.id)
+        .sort();
+      assert.deepEqual(removedNodeIds, ["n_dest_kasa", "n_dur_kasa"]);
+      assert.deepEqual(removedEdgeIds, ["e_dest_kasa_goal", "e_dur_kasa_dest"]);
+      assert.ok(sanitized.ops.length > 12);
     },
   },
   {
