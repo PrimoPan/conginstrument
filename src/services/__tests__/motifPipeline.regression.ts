@@ -55,14 +55,18 @@ function makeMotif(params: {
   conceptIds: string[];
   anchorConceptId: string;
   confidence: number;
+  dependencyClass?: "enable" | "constraint" | "determine";
+  motifType?: "pair" | "triad";
+  status?: "active" | "uncertain" | "deprecated" | "disabled" | "cancelled";
 }): ConceptMotif {
+  const dependencyClass = params.dependencyClass || "enable";
   return {
     id: params.id,
     motif_id: params.id,
-    motif_type: "enable",
+    motif_type: dependencyClass,
     templateKey: `manual:${params.id}`,
-    motifType: "pair",
-    relation: "enable",
+    motifType: params.motifType || "pair",
+    relation: dependencyClass,
     roles: {
       sources: params.conceptIds.filter((x) => x !== params.anchorConceptId),
       target: params.anchorConceptId,
@@ -77,11 +81,11 @@ function makeMotif(params: {
     confidence: params.confidence,
     supportEdgeIds: [],
     supportNodeIds: [],
-    status: "active",
+    status: params.status || "active",
     resolved: false,
     novelty: "new",
     updatedAt: new Date().toISOString(),
-    dependencyClass: "enable",
+    dependencyClass,
     reuseClass: "reusable",
   } as ConceptMotif;
 }
@@ -175,6 +179,80 @@ run("motif link transitive reduction keeps user edge", () => {
   const userEdge = links.find((l) => l.fromMotifId === "m1" && l.toMotifId === "m3");
   assert.ok(userEdge, "expected user edge to remain after reduction");
   assert.equal(userEdge?.source, "user");
+});
+
+run("same-anchor motifs should form a topology chain instead of remaining isolated", () => {
+  const concepts = [
+    makeConcept("c_budget", "预算上限: 每人1万元", {
+      kind: "constraint",
+      family: "budget",
+      semanticKey: "slot:budget",
+    }),
+    makeConcept("c_pace", "节奏偏好: 不要太赶", {
+      kind: "constraint",
+      family: "limiting_factor",
+      semanticKey: "slot:constraint:limiting:pace:not_rushed",
+    }),
+    makeConcept("c_lodging", "住宿偏好: 不想频繁换酒店", {
+      kind: "preference",
+      family: "lodging",
+      semanticKey: "slot:lodging",
+    }),
+    makeConcept("c_goal", "意图: 完成关西7天家庭行程", {
+      kind: "belief",
+      family: "goal",
+      semanticKey: "slot:goal",
+    }),
+  ];
+  const motifs: ConceptMotif[] = [
+    makeMotif({
+      id: "m_budget_goal",
+      conceptIds: ["c_budget", "c_goal"],
+      anchorConceptId: "c_goal",
+      confidence: 0.92,
+      dependencyClass: "constraint",
+    }),
+    makeMotif({
+      id: "m_pace_goal",
+      conceptIds: ["c_pace", "c_goal"],
+      anchorConceptId: "c_goal",
+      confidence: 0.9,
+      dependencyClass: "enable",
+    }),
+    makeMotif({
+      id: "m_lodging_goal",
+      conceptIds: ["c_lodging", "c_goal"],
+      anchorConceptId: "c_goal",
+      confidence: 0.88,
+      dependencyClass: "enable",
+    }),
+  ];
+
+  const links = reconcileMotifLinks({ motifs, baseLinks: [] });
+  assert.equal(links.length >= 2, true);
+
+  const participation = new Map<string, number>();
+  for (const motif of motifs) participation.set(motif.id, 0);
+  for (const link of links) {
+    participation.set(link.fromMotifId, (participation.get(link.fromMotifId) || 0) + 1);
+    participation.set(link.toMotifId, (participation.get(link.toMotifId) || 0) + 1);
+  }
+  assert.equal(
+    motifs.every((motif) => (participation.get(motif.id) || 0) > 0),
+    true
+  );
+
+  const view = buildMotifReasoningView({
+    concepts,
+    motifs,
+    motifLinks: links,
+    locale: "zh-CN",
+  });
+  assert.equal(view.steps.some((step) => step.role === "isolated"), false);
+  assert.equal(
+    view.steps.some((step) => step.dependsOnMotifIds.length > 0 || step.role === "premise"),
+    true
+  );
 });
 
 run("reasoning view should produce complete ordered steps under cycle", () => {

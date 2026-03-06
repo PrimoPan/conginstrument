@@ -46,6 +46,12 @@ function dependencyClassOf(m: ConceptMotif): "enable" | "constraint" | "determin
   return "enable";
 }
 
+function dependencyRank(dep: "enable" | "constraint" | "determine"): number {
+  if (dep === "constraint") return 0;
+  if (dep === "determine") return 1;
+  return 2;
+}
+
 function motifStatePenalty(status: ConceptMotif["status"]): number {
   if (status === "active") return 1;
   if (status === "uncertain") return 0.84;
@@ -98,6 +104,44 @@ function sharedConceptIds(a: string[], b: string[]): string[] {
     if (setB.has(x) && !out.includes(x)) out.push(x);
   }
   return out;
+}
+
+function isSameAnchorTopologyCandidate(m: ConceptMotif): boolean {
+  return !!m.anchorConceptId && (m.status === "active" || m.status === "uncertain");
+}
+
+function motifSpecificity(m: ConceptMotif): number {
+  return Math.max(0, Array.isArray(m.conceptIds) ? m.conceptIds.length : 0);
+}
+
+function sameAnchorSort(a: ConceptMotif, b: ConceptMotif): number {
+  const depDiff = dependencyRank(dependencyClassOf(a)) - dependencyRank(dependencyClassOf(b));
+  if (depDiff) return depDiff;
+
+  const activeDiff = (a.status === "active" ? 0 : 1) - (b.status === "active" ? 0 : 1);
+  if (activeDiff) return activeDiff;
+
+  const specificityDiff = motifSpecificity(a) - motifSpecificity(b);
+  if (specificityDiff) return specificityDiff;
+
+  const motifTypeDiff = (a.motifType === "pair" ? 0 : 1) - (b.motifType === "pair" ? 0 : 1);
+  if (motifTypeDiff) return motifTypeDiff;
+
+  return b.confidence - a.confidence || a.id.localeCompare(b.id);
+}
+
+function hasLinkEitherWay(seen: Set<string>, aMotifId: string, bMotifId: string): boolean {
+  return seen.has(linkKey(aMotifId, bMotifId)) || seen.has(linkKey(bMotifId, aMotifId));
+}
+
+function sameAnchorLinkConfidence(a: ConceptMotif, b: ConceptMotif): number {
+  return clamp01(
+    ((a.confidence + b.confidence) / 2) *
+      motifStatePenalty(a.status) *
+      motifStatePenalty(b.status) *
+      0.9,
+    0.68
+  );
 }
 
 function autoType(a: ConceptMotif, b: ConceptMotif): MotifLinkType {
@@ -197,6 +241,45 @@ function buildAutoLinks(motifs: ConceptMotif[]): MotifLink[] {
             motifStatePenalty(to.status),
           0.72
         ),
+        source: "system",
+        updatedAt: now,
+      });
+
+      if (out.length >= 220) break;
+    }
+    if (out.length >= 220) break;
+  }
+
+  const anchorGroups = new Map<string, ConceptMotif[]>();
+  for (const motif of candidates) {
+    if (!isSameAnchorTopologyCandidate(motif)) continue;
+    const anchor = cleanText(motif.anchorConceptId, 120);
+    if (!anchor) continue;
+    if (!anchorGroups.has(anchor)) anchorGroups.set(anchor, []);
+    anchorGroups.get(anchor)!.push(motif);
+  }
+
+  for (const group of anchorGroups.values()) {
+    if (group.length < 2) continue;
+    const ordered = group.slice().sort(sameAnchorSort);
+    for (let i = 1; i < ordered.length; i += 1) {
+      const from = ordered[i - 1];
+      const to = ordered[i];
+      if (from.id === to.id) continue;
+      if (hasLinkEitherWay(seen, from.id, to.id)) continue;
+
+      const fromCnt = outDegree.get(from.id) || 0;
+      if (fromCnt >= 3) continue;
+
+      const k = linkKey(from.id, to.id);
+      seen.add(k);
+      outDegree.set(from.id, fromCnt + 1);
+      out.push({
+        id: stableId(`${from.id}:${to.id}:supports:anchor_chain`),
+        fromMotifId: from.id,
+        toMotifId: to.id,
+        type: "supports",
+        confidence: sameAnchorLinkConfidence(from, to),
         source: "system",
         updatedAt: now,
       });

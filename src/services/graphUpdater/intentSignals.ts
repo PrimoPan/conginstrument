@@ -55,6 +55,12 @@ type DateRangeCandidate = {
 
 type DateRangeBoundaryMode = "auto" | "inclusive" | "exclusive";
 
+type StableCityDurationSnapshot = {
+  cities: string[];
+  sumDays: number;
+  evidenceByCity: Map<string, string>;
+};
+
 export type IntentSignals = {
   peopleCount?: number;
   peopleEvidence?: string;
@@ -208,6 +214,42 @@ function formatDateRangeLabel(
 
 function formatCriticalEvidence(locale: AppLocale | undefined, reason: string, days: number): string {
   return isEnglishLocale(locale) ? `${reason} for ${days} days (hard constraint)` : `${reason} ${days}天（硬约束）`;
+}
+
+function summarizeStableCityDurationSnapshot(
+  signals?: Pick<IntentSignals, "cityDurations" | "durationDays">
+): StableCityDurationSnapshot | null {
+  const orderedCities: string[] = [];
+  const seen = new Set<string>();
+  const evidenceByCity = new Map<string, string>();
+  let sumDays = 0;
+  let hasTravelSegment = false;
+
+  for (const seg of signals?.cityDurations || []) {
+    const city = normalizeDestination(seg?.city || "");
+    const days = Number(seg?.days) || 0;
+    if (!city || days <= 0 || days > 60) continue;
+    if (!isLikelyDestinationCandidate(city)) continue;
+    if (!seen.has(city)) {
+      seen.add(city);
+      orderedCities.push(city);
+    }
+    if (!evidenceByCity.has(city)) {
+      evidenceByCity.set(city, cleanStatement(seg?.evidence || city, 48) || city);
+    }
+    sumDays += days;
+    if (seg?.kind !== "meeting") hasTravelSegment = true;
+  }
+
+  if (orderedCities.length < 2 || !hasTravelSegment || sumDays <= 0) return null;
+  const statedDays = Number(signals?.durationDays) || 0;
+  if (statedDays > 0 && Math.abs(statedDays - sumDays) > 1) return null;
+
+  return {
+    cities: orderedCities,
+    sumDays,
+    evidenceByCity,
+  };
 }
 
 function parseCnCompositeInt(raw: string): number | null {
@@ -1221,7 +1263,7 @@ function extractDateRangeDurations(text: string, locale?: AppLocale): DateRangeC
 
 function extractDurationCandidates(text: string): DurationCandidate[] {
   const out: DurationCandidate[] = [];
-  const re = /([0-9一二三四五六七八九十两]{1,3})\s*(天|周|星期)/g;
+  const re = /([0-9一二三四五六七八九十两]{1,3})\s*(天|周|星期)(?!上)/g;
   for (const m of text.matchAll(re)) {
     if (!m?.[1] || !m?.[2]) continue;
     const index = Number(m.index) || 0;
@@ -1474,6 +1516,7 @@ function inferDurationFromText(
 
 export function normalizeDestination(raw: string): string {
   let s = cleanStatement(raw, 24);
+  s = s.replace(/^(就按|按|改成|改为|改到)\s*/i, "");
   s = s.replace(/^(在|于|到|去|从|飞到|前往|抵达)\s*/i, "");
   s = s.replace(/^(我想|想|想去|想到|想逛|逛一逛|逛逛|逛|游览|游玩|探索|体验|顺带|顺便|顺路|顺道)\s*/i, "");
   s = s.replace(
@@ -1655,7 +1698,15 @@ function extractCityDurationSegments(
   const scanText = text.replace(
     /在此之前|在此之后|此前|此后|之前|之后|然后|再从|再去|再到|(前|后)\s*[0-9一二三四五六七八九十两]{1,2}\s*天/g,
     (m) => "，".repeat(m.length)
-  );
+  )
+    .replace(
+      /(^|[，。,；;！!？?\s])(?:就按|按)\s*(?=[A-Za-z\u4e00-\u9fff]{2,14}\s*[0-9一二三四五六七八九十两]{1,3}\s*(?:天|晚|夜)(?!上))/g,
+      "$1"
+    )
+    .replace(
+      /(天|晚|夜)(?!上)\s*(?:再加|外加|另加|加|和|与|及|再)\s*(?=[A-Za-z\u4e00-\u9fff]{2,14}\s*[0-9一二三四五六七八九十两]{1,3}\s*(?:天|晚|夜)(?!上))/g,
+      "$1，"
+    );
   const hasRelativeDayOffset = (snippet: string, city: string) => {
     const s = cleanStatement(snippet, 120);
     if (!s || !city) return false;
@@ -1675,7 +1726,7 @@ function extractCityDurationSegments(
   };
 
   const travelHintRe =
-    /(?:在|于|到|去|飞到|抵达|经过|途经|经停|经由)\s*([A-Za-z\u4e00-\u9fff]{2,16}?)(?=(?:玩|逛|停留|待|旅行|旅游|参会|开会|参加|[，。,；;！!？?\s]))\s*(?:玩|逛|停留|待|旅行|旅游|参会|开会|参加)?\s*([0-9一二三四五六七八九十两]{1,3})\s*天/gi;
+    /(?:在|于|到|去|飞到|抵达|经过|途经|经停|经由)\s*([A-Za-z\u4e00-\u9fff]{2,16}?)(?=(?:玩|逛|停留|待|旅行|旅游|参会|开会|参加|住|[，。,；;！!？?\s]))\s*(?:玩|逛|停留|待|旅行|旅游|参会|开会|参加|住)?\s*([0-9一二三四五六七八九十两]{1,3})\s*(天|晚|夜)(?!上)/gi;
   for (const m of scanText.matchAll(travelHintRe)) {
     const city = normalizeDestination(m?.[1] || "");
     const days = parseCnInt(m?.[2] || "");
@@ -1698,7 +1749,7 @@ function extractCityDurationSegments(
   }
 
   const re =
-    /(?:^|[，。,；;！!？?\s])(?:在|于|到|去|飞到|抵达|前往|经过|途经|经停|经由)?\s*([^\s，。,；;！!？?\d]{2,14})(?:\s*(?:停留|待|玩|逛|旅行|旅游|参会|开会|参加))?[^\n。；;，,]{0,6}?([0-9一二三四五六七八九十两]{1,3})\s*天/g;
+    /(?:^|[，。,；;！!？?\s])(?:在|于|到|去|飞到|抵达|前往|经过|途经|经停|经由)?\s*([^\s，。,；;！!？?\d]{2,14})(?:\s*(?:停留|待|玩|逛|旅行|旅游|参会|开会|参加|住))?[^\n。；;，,]{0,6}?([0-9一二三四五六七八九十两]{1,3})\s*(天|晚|夜)(?!上)/g;
   for (const m of scanText.matchAll(re)) {
     const rawCity = m?.[1] || "";
     const rawDays = m?.[2] || "";
@@ -3017,6 +3068,14 @@ function mergeSignalsWithLatest(history: IntentSignals, latest: IntentSignals, l
     return map.size ? Array.from(map.values()).slice(0, 6) : undefined;
   };
 
+  const latestStableCitySnapshot = summarizeStableCityDurationSnapshot(latest);
+  const latestStableCities = latestStableCitySnapshot?.cities || [];
+  const latestShouldReplaceCoarseDestinations =
+    latestStableCities.length >= 2 &&
+    (mergeDestinations(out.destinations, latest.destinations) || []).some(
+      (city) => !latestStableCities.includes(city)
+    );
+
   out.destinations = mergeDestinations(out.destinations, undefined);
   if (out.destination) {
     const d = normalizeDestination(out.destination);
@@ -3104,7 +3163,7 @@ function mergeSignalsWithLatest(history: IntentSignals, latest: IntentSignals, l
     (!!latest.hasDurationUpdateCue || (!!latest.hasTemporalAnchor && !!latest.hasExplicitTotalCue));
 
   if (latest.cityDurations?.length) {
-    out.cityDurations = latestHasSnapshotDuration
+    out.cityDurations = latestHasSnapshotDuration || !!latestStableCitySnapshot
       ? mergeCityDurations(undefined, latest.cityDurations)
       : mergeCityDurations(out.cityDurations, latest.cityDurations);
   } else {
@@ -3119,7 +3178,19 @@ function mergeSignalsWithLatest(history: IntentSignals, latest: IntentSignals, l
     mergeDestinations(out.destinations, undefined),
     out.subLocations
   );
+  if (latestShouldReplaceCoarseDestinations && latestStableCities.length) {
+    out.destinations = latestStableCities.slice(0, 8);
+    out.destinationEvidences = out.destinations.map(
+      (city) => latestStableCitySnapshot?.evidenceByCity.get(city) || city
+    );
+  }
   if (out.destinations?.length) out.destination = out.destinations[0];
+  if (latestShouldReplaceCoarseDestinations && out.destination) {
+    out.destinationEvidence =
+      latestStableCitySnapshot?.evidenceByCity.get(out.destination) ||
+      latest.destinationEvidence ||
+      out.destinationEvidence;
+  }
   out.cityDurationImportanceByCity = mergeImportanceMap(
     out.cityDurationImportanceByCity,
     latest.cityDurationImportanceByCity
@@ -3155,6 +3226,9 @@ function mergeSignalsWithLatest(history: IntentSignals, latest: IntentSignals, l
       !tinyCriticalOnly &&
       (out.durationDays == null ||
         latestHasSnapshotDuration ||
+        (!!latestStableCitySnapshot &&
+          latest.durationDays > 0 &&
+          latest.durationDays < (out.durationDays || 0)) ||
         latestStrength >= 0.9 ||
         latest.durationDays > (out.durationDays || 0) ||
         latestStrength + 0.06 >= historyStrength);
@@ -3187,7 +3261,8 @@ function mergeSignalsWithLatest(history: IntentSignals, latest: IntentSignals, l
       out.durationDays != null &&
       !latest.hasDurationUpdateCue &&
       !latest.hasExplicitTotalCue &&
-      !!latest.cityDurations?.length;
+      !!latest.cityDurations?.length &&
+      !latestStableCitySnapshot;
 
     const shouldTakeSeg =
       canPromoteBySegments &&

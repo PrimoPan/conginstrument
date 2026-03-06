@@ -117,13 +117,25 @@ function slug(input: string): string {
     .slice(0, 40);
 }
 
+function stableHash(input: string): string {
+  let hash = 2166136261;
+  for (const ch of String(input || "")) {
+    hash ^= ch.codePointAt(0) || 0;
+    hash = Math.imul(hash, 16777619);
+  }
+  return (hash >>> 0).toString(36);
+}
+
 function stableIdFromKey(key: string): string {
-  const safe = key
+  const raw = String(key || "").trim().toLowerCase();
+  const safe = raw
     .toLowerCase()
     .replace(/[^a-z0-9_\-:]/g, "_")
     .replace(/_+/g, "_")
     .replace(/^_+|_+$/g, "");
-  return `c_${safe.slice(0, 90) || "other"}`;
+  const hash = stableHash(raw || "other");
+  const base = safe.slice(0, 72) || "other";
+  return `c_${base}_${hash}`;
 }
 
 function statementScore(n: ConceptNode): number {

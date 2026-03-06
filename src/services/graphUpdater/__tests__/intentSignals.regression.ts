@@ -12,7 +12,7 @@ import { buildSlotStateMachine } from "../slotStateMachine.js";
 import { compileSlotStateToPatch } from "../slotGraphCompiler.js";
 import { generateGraphPatch } from "../../graphUpdater.js";
 import { planUncertaintyQuestion } from "../../uncertainty/questionPlanner.js";
-import { reconcileConceptsWithGraph } from "../../concepts.js";
+import { reconcileConceptsWithGraph, stableConceptIdFromSemanticKey } from "../../concepts.js";
 import {
   isMotifLowConfidence,
   motifLowConfidenceThreshold,
@@ -430,6 +430,83 @@ const cases: Case[] = [
         "机票已经买了，不需要考虑机票钱"
       );
       assert.equal(merged.durationDays, 3);
+    },
+  },
+  {
+    name: "multi-city night allocation should produce a stable 7-day city snapshot",
+    run: () => {
+      const s = extractIntentSignals("可以，就按京都6晚加大阪1晚来。");
+      assert.equal(s.durationDays, 7);
+      assert.deepEqual(
+        (s.cityDurations || []).map((x) => [x.city, x.days]),
+        [
+          ["京都", 6],
+          ["大阪", 1],
+        ]
+      );
+      assert.deepEqual(s.destinations, ["京都", "大阪"]);
+    },
+  },
+  {
+    name: "latest city-night snapshot should replace coarse historical destination instead of flattening peers",
+    run: () => {
+      const merged = extractIntentSignalsWithRecency(
+        "我们第一次去关西，7天，两个人，预算2万元，不想太赶，酒店别换太频繁。",
+        "可以，就按京都6晚加大阪1晚来。"
+      );
+      assert.equal(merged.durationDays, 7);
+      assert.deepEqual(merged.destinations, ["京都", "大阪"]);
+      assert.deepEqual(
+        (merged.cityDurations || []).map((x) => [x.city, x.days]),
+        [
+          ["京都", 6],
+          ["大阪", 1],
+        ]
+      );
+    },
+  },
+  {
+    name: "coherent city-night snapshot should override inflated slot duration",
+    run: () => {
+      const latest = extractIntentSignals("可以，就按京都6晚加大阪1晚来。");
+      const merged = mergeIntentSignals(
+        {
+          destination: "关西",
+          destinations: ["关西", "京都", "大阪"],
+          durationDays: 14,
+          durationEvidence: "14天",
+          durationStrength: 0.95,
+          cityDurations: [
+            {
+              city: "关西",
+              days: 7,
+              evidence: "关西7天",
+              kind: "travel",
+            },
+          ],
+        },
+        latest
+      );
+      assert.equal(merged.durationDays, 7);
+      assert.deepEqual(merged.destinations, ["京都", "大阪"]);
+      assert.deepEqual(
+        (merged.cityDurations || []).map((x) => [x.city, x.days]),
+        [
+          ["京都", 6],
+          ["大阪", 1],
+        ]
+      );
+    },
+  },
+  {
+    name: "unicode destination semantic keys should map to distinct stable concept ids",
+    run: () => {
+      const kansaiId = stableConceptIdFromSemanticKey("slot:destination:关西|factual_assertion|positive|current_task");
+      const kyotoId = stableConceptIdFromSemanticKey("slot:destination:京都|factual_assertion|positive|current_task");
+      const osakaId = stableConceptIdFromSemanticKey("slot:destination:大阪|factual_assertion|positive|current_task");
+      assert.notEqual(kansaiId, kyotoId);
+      assert.notEqual(kansaiId, osakaId);
+      assert.notEqual(kyotoId, osakaId);
     },
   },
   {
