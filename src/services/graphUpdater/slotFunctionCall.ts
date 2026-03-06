@@ -154,8 +154,25 @@ function toInt(x: any): number | undefined {
   return v;
 }
 
+function formatDayCount(locale: AppLocale | undefined, days: number): string {
+  return isEnglishLocale(locale) ? `${days} days` : `${days}天`;
+}
+
+function formatBudgetCny(locale: AppLocale | undefined, amount: number): string {
+  return isEnglishLocale(locale) ? `${amount} CNY` : `${amount}元`;
+}
+
+function formatPeopleCount(locale: AppLocale | undefined, count: number): string {
+  return isEnglishLocale(locale) ? `${count} people` : `${count}人`;
+}
+
+function formatCriticalEvidence(locale: AppLocale | undefined, reason: string, days: number): string {
+  return isEnglishLocale(locale) ? `${reason} for ${days} days` : `${reason}${days}天`;
+}
+
 function pickTopCritical(
-  list: NonNullable<SlotExtractionResult["critical_days"]>
+  list: NonNullable<SlotExtractionResult["critical_days"]>,
+  locale?: AppLocale
 ): NonNullable<IntentSignals["criticalPresentation"]> | null {
   const candidates = list
     .map((x) => {
@@ -172,7 +189,7 @@ function pickTopCritical(
         days,
         reason,
         city: cityOk,
-        evidence: cleanStatement(x.evidence || `${reason}${days}天`, 64),
+        evidence: cleanStatement(x.evidence || formatCriticalEvidence(locale, reason, days), 64),
         score,
       };
     })
@@ -189,7 +206,7 @@ function pickTopCritical(
   };
 }
 
-function slotsToSignals(slots: SlotExtractionResult): IntentSignals {
+function slotsToSignals(slots: SlotExtractionResult, locale?: AppLocale): IntentSignals {
   const out: IntentSignals = {};
   const subLocationChildToParent = new Map<string, string>();
   const subLocationDedup = new Set<string>();
@@ -323,7 +340,7 @@ function slotsToSignals(slots: SlotExtractionResult): IntentSignals {
       const days = toInt(seg?.days);
       if (!city || !days || days <= 0 || days > 120 || !isLikelyDestinationCandidate(city)) continue;
       const kind: "travel" | "meeting" = seg?.kind === "meeting" ? "meeting" : "travel";
-      const evidence = cleanStatement(seg?.evidence || `${city}${days}天`, 54);
+      const evidence = cleanStatement(seg?.evidence || `${city} ${formatDayCount(locale, days)}`, 54);
       const cur = map.get(city);
       const shouldReplace =
         !cur ||
@@ -343,7 +360,7 @@ function slotsToSignals(slots: SlotExtractionResult): IntentSignals {
       const sumDays = out.cityDurations.reduce((acc, x) => acc + x.days, 0);
       if (hasTravel && distinctCities >= 2 && (!out.durationDays || sumDays >= out.durationDays)) {
         out.durationDays = sumDays;
-        out.durationEvidence = out.cityDurations.map((x) => `${x.city}${x.days}天`).join(" + ");
+        out.durationEvidence = out.cityDurations.map((x) => `${x.city} ${formatDayCount(locale, x.days)}`).join(" + ");
         out.durationStrength = 0.88;
         out.durationImportance = clampImportance(
           Object.values(cityDurationImportanceByCity).reduce((a, b) => a + b, 0) /
@@ -358,7 +375,7 @@ function slotsToSignals(slots: SlotExtractionResult): IntentSignals {
     const days = toInt(slots.total_duration.days)!;
     if (days > 0 && days <= 120) {
       out.durationDays = days;
-      out.durationEvidence = cleanStatement(slots.total_duration.evidence || `${days}天`, 54);
+      out.durationEvidence = cleanStatement(slots.total_duration.evidence || formatDayCount(locale, days), 54);
       out.durationStrength = Math.max(0.84, clamp01(slots.total_duration.confidence, 0.9));
       out.durationImportance = clampImportance(slots.total_duration.importance, 0.8);
       out.hasTemporalAnchor = true;
@@ -371,7 +388,7 @@ function slotsToSignals(slots: SlotExtractionResult): IntentSignals {
     const cny = toInt(slots.budget.cny)!;
     if (cny >= 100 && cny <= 50_000_000) {
       out.budgetCny = cny;
-      out.budgetEvidence = cleanStatement(slots.budget.evidence || `${cny}元`, 40);
+      out.budgetEvidence = cleanStatement(slots.budget.evidence || formatBudgetCny(locale, cny), 40);
       out.budgetImportance = clampImportance(slots.budget.importance, slots.budget.hard ? 0.88 : 0.78);
     }
   }
@@ -380,13 +397,13 @@ function slotsToSignals(slots: SlotExtractionResult): IntentSignals {
     const count = toInt(slots.people.count)!;
     if (count > 0 && count <= 200) {
       out.peopleCount = count;
-      out.peopleEvidence = cleanStatement(slots.people.evidence || `${count}人`, 36);
+      out.peopleEvidence = cleanStatement(slots.people.evidence || formatPeopleCount(locale, count), 36);
       out.peopleImportance = clampImportance(slots.people.importance, 0.72);
     }
   }
 
   if (Array.isArray(slots.critical_days) && slots.critical_days.length) {
-    const best = pickTopCritical(slots.critical_days);
+    const best = pickTopCritical(slots.critical_days, locale);
     if (best) {
       out.criticalPresentation = best;
       const imp = Math.max(
@@ -937,7 +954,7 @@ export async function extractIntentSignalsByFunctionCall(params: {
 
   if (!parsed || typeof parsed !== "object") return null;
 
-  const signals = slotsToSignals(parsed);
+  const signals = slotsToSignals(parsed, params.locale);
   const hasAnySignal =
     !!signals.destination ||
     !!signals.durationDays ||

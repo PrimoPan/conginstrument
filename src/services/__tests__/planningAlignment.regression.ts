@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 
 import { buildCognitiveState, buildPortfolioDocumentState } from "../planningState.js";
 import { renderPortfolioTravelPlanPdf } from "../travelPlan/pdf.js";
-import { buildTravelPlanState } from "../travelPlan/state.js";
+import { buildTravelPlanSourceMapKey, buildTravelPlanState } from "../travelPlan/state.js";
 
 async function run(name: string, fn: () => void | Promise<void>) {
   try {
@@ -82,6 +82,17 @@ function turnsFixture() {
   ];
 }
 
+function englishTurnsFixture() {
+  return [
+    {
+      createdAt: new Date().toISOString(),
+      userText: "Plan a Milan trip for March 10-12. Keep it safe and low-hassle.",
+      assistantText:
+        "Day 1: Arrive and settle in.\n- Hotel check-in near the center\nDay 2: Central Milan highlights.\n- Duomo and nearby walk\nDay 3: Departure day.\n- Airport transfer buffer",
+    },
+  ];
+}
+
 async function main() {
   await run("source_map defaults to assistant_proposed and upgrades on user confirmation", () => {
     const graph = graphWithDestination("米兰", "conv_alpha");
@@ -114,6 +125,21 @@ async function main() {
       previous: base,
     });
     assert.equal(upgraded.source_map?.destination_scope?.source_label, "user_confirmed");
+  });
+
+  await run("source_map array keys stay Mongo-safe for empty bootstrap plans", () => {
+    const plan = buildTravelPlanState({
+      locale: "zh-CN",
+      graph: { id: "conv_safe", version: 0, nodes: [], edges: [] },
+      turns: [],
+      concepts: [],
+      motifs: [],
+      taskId: "conv_safe",
+      previous: null,
+    });
+    const keys = Object.keys(plan.source_map || {});
+    assert.equal(keys.some((key) => key.includes(".")), false);
+    assert.ok(keys.includes(buildTravelPlanSourceMapKey("open_questions", 1)));
   });
 
   await run("concepts_from_user excludes assistant-only and unknown evidence concepts", () => {
@@ -190,6 +216,79 @@ async function main() {
     assert.equal(second.plan_version, 1);
     assert.ok(Array.isArray(second.task_history));
     assert.ok((second.task_history || []).some((x) => x.task_id === first.task_id));
+  });
+
+  await run("en-US travel plan text stays pure English with English date anchors", () => {
+    const graph = {
+      id: "conv_en",
+      version: 1,
+      nodes: [
+        {
+          id: "n_goal",
+          type: "belief",
+          layer: "intent",
+          key: "slot:goal",
+          statement: "Intent: travel to Milan for 3 days",
+          status: "confirmed",
+          confidence: 0.92,
+          importance: 0.9,
+        },
+        {
+          id: "n_dest_milan",
+          type: "factual_assertion",
+          key: "slot:destination:milan",
+          statement: "Destination: Milan",
+          status: "confirmed",
+          confidence: 0.9,
+          importance: 0.85,
+        },
+        {
+          id: "n_duration",
+          type: "constraint",
+          key: "slot:duration_total",
+          statement: "Total duration: 3 days",
+          status: "confirmed",
+          confidence: 0.9,
+          importance: 0.84,
+        },
+        {
+          id: "n_budget",
+          type: "constraint",
+          key: "slot:budget",
+          statement: "Budget cap: 10000 CNY",
+          status: "confirmed",
+          confidence: 0.88,
+          importance: 0.82,
+        },
+      ],
+      edges: [],
+    } as any;
+
+    const plan = buildTravelPlanState({
+      locale: "en-US",
+      graph,
+      turns: englishTurnsFixture(),
+      concepts: [],
+      motifs: [],
+      taskId: "conv_en",
+      previous: null,
+    });
+
+    const joined = [
+      plan.summary,
+      plan.trip_goal_summary,
+      plan.travel_dates_or_duration,
+      plan.export_ready_text,
+      plan.day_by_day_plan.map((d) => `${d.dateLabel || ""} ${d.title} ${(d.items || []).join(" ")}`).join(" "),
+    ]
+      .filter(Boolean)
+      .join("\n");
+
+    assert.equal(plan.travel_dates_or_duration, "3/10 - 3/12 (3d)");
+    assert.equal(plan.day_by_day_plan[0]?.dateLabel, "3/10");
+    assert.match(plan.summary, /Destinations: Milan/);
+    assert.match(plan.export_ready_text, /Duration: 3\/10 - 3\/12 \(3d\)/);
+    assert.equal(/[\u4e00-\u9fff]/.test(joined), false);
   });
 
   await run("portfolio PDF renders multi-trip sections", async () => {

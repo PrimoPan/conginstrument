@@ -1,6 +1,6 @@
 import { MongoClient, Db, Collection, ObjectId } from "mongodb";
 import { config } from "../server/config.js";
-import type { AppLocale } from "../i18n/locale.js";
+import { DEFAULT_LOCALE, type AppLocale } from "../i18n/locale.js";
 
 export type UserDoc = {
   _id?: ObjectId;
@@ -73,6 +73,7 @@ export type MotifLibraryVersion = {
 export type MotifLibraryDoc = {
   _id?: ObjectId;
   userId: ObjectId;
+  locale: AppLocale;
   motif_type_id: string;
   motif_type_title: string;
   dependency: string;
@@ -114,6 +115,16 @@ export async function connectMongo() {
   collections.turns = db.collection<TurnDoc>("turns");
   collections.motifLibrary = db.collection<MotifLibraryDoc>("motif_library");
 
+  // Legacy docs predate locale partitioning and should remain on zh-CN behavior.
+  await collections.conversations.updateMany(
+    { locale: { $exists: false } as any },
+    { $set: { locale: DEFAULT_LOCALE } as any }
+  );
+  await collections.motifLibrary.updateMany(
+    { locale: { $exists: false } as any },
+    { $set: { locale: DEFAULT_LOCALE } as any }
+  );
+
   // indexes
   await collections.users.createIndex({ username: 1 }, { unique: true });
   await collections.sessions.createIndex({ token: 1 }, { unique: true });
@@ -121,9 +132,20 @@ export async function connectMongo() {
   await collections.sessions.createIndex({ expiresAt: 1 }, { expireAfterSeconds: 0 });
 
   await collections.conversations.createIndex({ userId: 1, updatedAt: -1 });
+  await collections.conversations.createIndex({ userId: 1, locale: 1, updatedAt: -1 });
   await collections.turns.createIndex({ conversationId: 1, createdAt: 1 });
-  await collections.motifLibrary.createIndex({ userId: 1, motif_type_id: 1 }, { unique: true });
-  await collections.motifLibrary.createIndex({ userId: 1, updatedAt: -1 });
+  await collections.motifLibrary.createIndex({ userId: 1, locale: 1, motif_type_id: 1 }, { unique: true });
+  await collections.motifLibrary.createIndex({ userId: 1, locale: 1, updatedAt: -1 });
+  try {
+    await collections.motifLibrary.dropIndex("userId_1_motif_type_id_1");
+  } catch {
+    // ignore when the legacy index is already absent
+  }
+  try {
+    await collections.motifLibrary.dropIndex("userId_1_updatedAt_-1");
+  } catch {
+    // ignore when the legacy index is already absent
+  }
 
   return db;
 }

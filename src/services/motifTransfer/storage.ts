@@ -1,5 +1,6 @@
 import { ObjectId } from "mongodb";
 import { collections } from "../../db/mongo.js";
+import { DEFAULT_LOCALE, type AppLocale } from "../../i18n/locale.js";
 import type { ConceptMotif } from "../motif/conceptMotifs.js";
 import type { MotifLibraryEntryPayload, MotifLibraryVersionPayload } from "./types.js";
 
@@ -27,8 +28,13 @@ function nowIso() {
   return new Date().toISOString();
 }
 
+function normalizeMotifLocale(locale?: AppLocale): AppLocale {
+  return locale || DEFAULT_LOCALE;
+}
+
 function toPayload(doc: any): MotifLibraryEntryPayload {
   return {
+    locale: normalizeMotifLocale(doc?.locale),
     motif_type_id: clean(doc?.motif_type_id, 180),
     motif_type_title: clean(doc?.motif_type_title, 180),
     dependency: clean(doc?.dependency, 40) || "enable",
@@ -133,9 +139,9 @@ export function motifVersionMeaningfullyChanged(params: {
   );
 }
 
-export async function listUserMotifLibrary(userId: ObjectId): Promise<MotifLibraryEntryPayload[]> {
+export async function listUserMotifLibrary(userId: ObjectId, locale: AppLocale): Promise<MotifLibraryEntryPayload[]> {
   const docs = await collections.motifLibrary
-    .find({ userId })
+    .find({ userId, locale: normalizeMotifLocale(locale) })
     .sort({ updatedAt: -1 })
     .limit(200)
     .toArray();
@@ -144,6 +150,7 @@ export async function listUserMotifLibrary(userId: ObjectId): Promise<MotifLibra
 
 export async function confirmMotifLibraryEntries(params: {
   userId: ObjectId;
+  locale: AppLocale;
   conversationId: string;
   taskId: string;
   motifs: ConceptMotif[];
@@ -157,6 +164,7 @@ export async function confirmMotifLibraryEntries(params: {
 }) {
   const now = new Date();
   const nowText = now.toISOString();
+  const locale = normalizeMotifLocale(params.locale);
   const motifById = new Map((params.motifs || []).map((m) => [clean(m.id, 140), m]));
   const stored: string[] = [];
 
@@ -179,6 +187,7 @@ export async function confirmMotifLibraryEntries(params: {
     };
     const existing = await collections.motifLibrary.findOne({
       userId: params.userId,
+      locale,
       motif_type_id: motifTypeId,
     });
     const prevVersion = Array.isArray(existing?.versions) ? existing!.versions[existing!.versions.length - 1] : null;
@@ -210,6 +219,7 @@ export async function confirmMotifLibraryEntries(params: {
     if (!existing) {
       await collections.motifLibrary.insertOne({
         userId: params.userId,
+        locale,
         motif_type_id: motifTypeId,
         motif_type_title: clean((motif as any)?.motif_type_title || motif.title, 180),
         dependency: clean((motif as any)?.dependencyClass || motif.relation, 40) || "enable",
@@ -234,7 +244,7 @@ export async function confirmMotifLibraryEntries(params: {
       );
       const nextVersions = shouldAppendVersion ? [...(existing.versions || []), version].slice(-60) : existing.versions || [];
       await collections.motifLibrary.updateOne(
-        { _id: existing._id, userId: params.userId },
+        { _id: existing._id, userId: params.userId, locale },
         {
           $set: {
             motif_type_title: clean((motif as any)?.motif_type_title || motif.title, 180),
@@ -256,6 +266,7 @@ export async function confirmMotifLibraryEntries(params: {
 
 export async function reviseMotifLibraryEntry(params: {
   userId: ObjectId;
+  locale: AppLocale;
   motifTypeId: string;
   choice: "overwrite" | "new_version";
   title?: string;
@@ -266,9 +277,14 @@ export async function reviseMotifLibraryEntry(params: {
   sourceTaskId?: string;
   sourceConversationId?: string;
 }) {
+  const locale = normalizeMotifLocale(params.locale);
   const motifTypeId = clean(params.motifTypeId, 180);
   if (!motifTypeId) return null;
-  const existing = await collections.motifLibrary.findOne({ userId: params.userId, motif_type_id: motifTypeId });
+  const existing = await collections.motifLibrary.findOne({
+    userId: params.userId,
+    locale,
+    motif_type_id: motifTypeId,
+  });
   if (!existing) return null;
 
   const now = new Date();
@@ -299,7 +315,7 @@ export async function reviseMotifLibraryEntry(params: {
       ? [...(existing.versions || []), version].slice(-60)
       : [...(existing.versions || []), version].slice(-60);
   await collections.motifLibrary.updateOne(
-    { _id: existing._id, userId: params.userId },
+    { _id: existing._id, userId: params.userId, locale },
     {
       $set: {
         motif_type_title: clean(params.title, 180) || clean(existing.motif_type_title, 180),
@@ -311,19 +327,25 @@ export async function reviseMotifLibraryEntry(params: {
       },
     }
   );
-  const updated = await collections.motifLibrary.findOne({ _id: existing._id, userId: params.userId });
+  const updated = await collections.motifLibrary.findOne({ _id: existing._id, userId: params.userId, locale });
   return updated ? toPayload(updated) : null;
 }
 
 export async function recordTransferUsage(params: {
   userId: ObjectId;
+  locale: AppLocale;
   motifTypeId: string;
   action: "adopt" | "ignore" | "feedback_negative";
   confidenceDelta?: number;
 }) {
+  const locale = normalizeMotifLocale(params.locale);
   const motifTypeId = clean(params.motifTypeId, 180);
   if (!motifTypeId) return;
-  const existing = await collections.motifLibrary.findOne({ userId: params.userId, motif_type_id: motifTypeId });
+  const existing = await collections.motifLibrary.findOne({
+    userId: params.userId,
+    locale,
+    motif_type_id: motifTypeId,
+  });
   if (!existing) return;
   const stats = existing.usage_stats || ({} as any);
   let confidence = Math.max(0, Math.min(1, Number(stats.transfer_confidence || 0.7)));
@@ -338,5 +360,5 @@ export async function recordTransferUsage(params: {
   if (params.action === "feedback_negative") {
     patch["usage_stats.feedback_negative_count"] = Number(stats.feedback_negative_count || 0) + 1;
   }
-  await collections.motifLibrary.updateOne({ _id: existing._id, userId: params.userId }, { $set: patch });
+  await collections.motifLibrary.updateOne({ _id: existing._id, userId: params.userId, locale }, { $set: patch });
 }

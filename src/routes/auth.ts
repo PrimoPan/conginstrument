@@ -2,10 +2,11 @@ import { Router } from "express";
 import { collections } from "../db/mongo.js";
 import { randomUUID } from "node:crypto";
 import { config } from "../server/config.js";
+import { asyncRoute } from "./asyncRoute.js";
 
 export const authRouter = Router();
 
-authRouter.post("/login", async (req, res) => {
+authRouter.post("/login", asyncRoute(async (req, res) => {
   const usernameRaw = String(req.body?.username ?? "").trim();
   if (!usernameRaw) return res.status(400).json({ error: "username required" });
 
@@ -46,4 +47,4 @@ authRouter.post("/login", async (req, res) => {
     username: user.username,
     sessionToken: token,
   });
-});
+}));

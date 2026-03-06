@@ -245,10 +245,10 @@ async function buildSignals(params: {
   let accumulatedHistorySignals: IntentSignals = {};
   for (const turnText of historyUserTexts) {
     const turnSignals = extractIntentSignals(turnText, { historyMode: true, locale: params.locale });
-    accumulatedHistorySignals = mergeIntentSignals(accumulatedHistorySignals, turnSignals);
+    accumulatedHistorySignals = mergeIntentSignals(accumulatedHistorySignals, turnSignals, params.locale);
   }
   const latestSignals = extractIntentSignals(params.userText, { locale: params.locale });
-  const textSignals = mergeIntentSignals(accumulatedHistorySignals, latestSignals);
+  const textSignals = mergeIntentSignals(accumulatedHistorySignals, latestSignals, params.locale);
   let signals = textSignals;
 
   if (USE_FUNCTION_SLOT_EXTRACTION) {
@@ -263,7 +263,7 @@ async function buildSignals(params: {
       });
       if (slotResult?.signals) {
         // deterministic parser优先处理冲突标量（例如总时长），function slots用于补齐缺失语义
-        signals = mergeIntentSignals(slotResult.signals, textSignals);
+        signals = mergeIntentSignals(slotResult.signals, textSignals, params.locale);
         const textDays = Number(textSignals.durationDays) || 0;
         const mergedDays = Number(signals.durationDays) || 0;
         const singleCityStable =
@@ -276,7 +276,10 @@ async function buildSignals(params: {
           (mergedDays <= 0 || mergedDays !== textDays);
         if (shouldPreferTextDuration) {
           signals.durationDays = textDays;
-          signals.durationEvidence = textSignals.durationEvidence || signals.durationEvidence || `${textDays}天`;
+          signals.durationEvidence =
+            textSignals.durationEvidence ||
+            signals.durationEvidence ||
+            (isEnglishLocale(params.locale) ? `${textDays} days` : `${textDays}天`);
           signals.durationStrength = Math.max(Number(textSignals.durationStrength) || 0.78, 0.78);
         }
       }

@@ -1,5 +1,6 @@
 import type { CDG } from "../../core/graph.js";
 import { extractIntentSignalsWithRecency, normalizeDestination } from "../graphUpdater/intentSignals.js";
+import { isEnglishLocale, type AppLocale } from "../../i18n/locale.js";
 
 const WEATHER_ENABLED = process.env.CI_WEATHER_EXTREME_ALERT !== "0";
 const WEATHER_TIMEOUT_MS = Math.max(800, Number(process.env.CI_WEATHER_TIMEOUT_MS || 3200));
@@ -9,9 +10,39 @@ const WEATHER_GEO_ENDPOINT =
 const WEATHER_FORECAST_ENDPOINT =
   String(process.env.CI_WEATHER_FORECAST_ENDPOINT || "https://api.open-meteo.com/v1/forecast").replace(/\/+$/, "");
 const DEBUG = process.env.CI_DEBUG_LLM === "1";
+const EN_MONTHS: Record<string, number> = {
+  january: 1,
+  jan: 1,
+  february: 2,
+  feb: 2,
+  march: 3,
+  mar: 3,
+  april: 4,
+  apr: 4,
+  may: 5,
+  june: 6,
+  jun: 6,
+  july: 7,
+  jul: 7,
+  august: 8,
+  aug: 8,
+  september: 9,
+  sep: 9,
+  sept: 9,
+  october: 10,
+  oct: 10,
+  november: 11,
+  nov: 11,
+  december: 12,
+  dec: 12,
+};
 
 function dlog(...args: any[]) {
   if (DEBUG) console.log("[LLM][weather]", ...args);
+}
+
+function t(locale: AppLocale | undefined, zh: string, en: string): string {
+  return isEnglishLocale(locale) ? en : zh;
 }
 
 type DateSpan = {
@@ -79,6 +110,11 @@ function addDays(base: Date, days: number): Date {
   return new Date(base.getTime() + days * 24 * 60 * 60 * 1000);
 }
 
+function monthTokenToNumber(token: string): number | null {
+  const key = clean(token, 16).toLowerCase();
+  return EN_MONTHS[key] || null;
+}
+
 function parseDateSpanCandidates(text: string): DateSpan[] {
   const out: DateSpan[] = [];
   const now = new Date();
@@ -116,6 +152,23 @@ function parseDateSpanCandidates(text: string): DateSpan[] {
     push(start, end, m[0] || "", Number(m.index));
   }
 
+  const englishCrossMonth =
+    /\b(January|Jan|February|Feb|March|Mar|April|Apr|May|June|Jun|July|Jul|August|Aug|September|Sep|Sept|October|Oct|November|Nov|December|Dec)\s+([0-9]{1,2})(?:st|nd|rd|th)?\s*(?:-|to|through|until)\s*(January|Jan|February|Feb|March|Mar|April|Apr|May|June|Jun|July|Jul|August|Aug|September|Sep|Sept|October|Oct|November|Nov|December|Dec)\s+([0-9]{1,2})(?:st|nd|rd|th)?\b/gi;
+  for (const m of text.matchAll(englishCrossMonth)) {
+    const start = fromMonthDay(monthTokenToNumber(String(m[1] || "")) || 0, Number(m[2]), now);
+    const end = fromMonthDay(monthTokenToNumber(String(m[3] || "")) || 0, Number(m[4]), now);
+    push(start, end, m[0] || "", Number(m.index));
+  }
+
+  const englishSameMonth =
+    /\b(January|Jan|February|Feb|March|Mar|April|Apr|May|June|Jun|July|Jul|August|Aug|September|Sep|Sept|October|Oct|November|Nov|December|Dec)\s+([0-9]{1,2})(?:st|nd|rd|th)?\s*(?:-|to|through|until)\s*([0-9]{1,2})(?:st|nd|rd|th)?\b/gi;
+  for (const m of text.matchAll(englishSameMonth)) {
+    const month = monthTokenToNumber(String(m[1] || "")) || 0;
+    const start = fromMonthDay(month, Number(m[2]), now);
+    const end = fromMonthDay(month, Number(m[3]), now);
+    push(start, end, m[0] || "", Number(m.index));
+  }
+
   return out
     .sort((a, b) => a.index - b.index)
     .filter((x, i, arr) => i === arr.findIndex((y) => y.index === x.index && toYmd(y.start) === toYmd(x.start) && toYmd(y.end) === toYmd(x.end)));
@@ -139,6 +192,14 @@ function parseSingleDates(text: string): Array<{ date: Date; index: number; evid
     out.push({ date: d, index: (Number(m.index) || 0) + String(m[1] || "").length, evidence: clean(`${m[2]}-${m[3]}`, 20) });
   }
 
+  const englishSingle =
+    /\b(January|Jan|February|Feb|March|Mar|April|Apr|May|June|Jun|July|Jul|August|Aug|September|Sep|Sept|October|Oct|November|Nov|December|Dec)\s+([0-9]{1,2})(?:st|nd|rd|th)?\b/gi;
+  for (const m of text.matchAll(englishSingle)) {
+    const d = fromMonthDay(monthTokenToNumber(String(m[1] || "")) || 0, Number(m[2]), now);
+    if (!d) continue;
+    out.push({ date: d, index: Number(m.index) || 0, evidence: clean(m[0] || "", 24) });
+  }
+
   return out;
 }
 
@@ -146,7 +207,7 @@ function parseDestinationsFromGraph(graph: CDG): string[] {
   const out: string[] = [];
   for (const n of graph.nodes || []) {
     const s = clean((n as any)?.statement || "", 100);
-    const dm = s.match(/^目的地[:：]\s*(.+)$/);
+    const dm = s.match(/^(?:目的地|destination)[:：]\s*(.+)$/i);
     if (!dm?.[1]) continue;
     const city = normalizeDestination(dm[1]);
     if (!city) continue;
@@ -172,6 +233,7 @@ function pickCityByContext(cities: string[], text: string, index: number): strin
 function inferTravelWindow(params: {
   text: string;
   durationDays?: number;
+  locale?: AppLocale;
 }): DateSpan | null {
   const spans = parseDateSpanCandidates(params.text);
   if (spans.length) return spans[spans.length - 1];
@@ -184,7 +246,7 @@ function inferTravelWindow(params: {
   return {
     start: latest.date,
     end: addDays(latest.date, days - 1),
-    evidence: `${latest.evidence} + ${days}天`,
+    evidence: isEnglishLocale(params.locale) ? `${latest.evidence} + ${days} days` : `${latest.evidence} + ${days}天`,
     index: latest.index,
   };
 }
@@ -220,7 +282,7 @@ async function fetchJson(url: string): Promise<any> {
   }
 }
 
-async function geocodeCity(city: string): Promise<GeoResult | null> {
+async function geocodeCity(city: string, locale?: AppLocale): Promise<GeoResult | null> {
   const key = normalizeDestination(city).toLowerCase();
   if (!key) return null;
 
@@ -231,7 +293,7 @@ async function geocodeCity(city: string): Promise<GeoResult | null> {
   const qs = new URLSearchParams({
     name: city,
     count: "5",
-    language: "zh",
+    language: isEnglishLocale(locale) ? "en" : "zh",
     format: "json",
   });
   const url = `${WEATHER_GEO_ENDPOINT}?${qs.toString()}`;
@@ -287,13 +349,17 @@ async function fetchDailyForecast(params: {
   };
 }
 
-function formatCnDate(ymd: string): string {
-  const m = ymd.match(/^(\d{4})-(\d{2})-(\d{2})$/);
-  if (!m) return ymd;
-  return `${Number(m[2])}月${Number(m[3])}日`;
+function formatDateLabel(ymd: string, locale?: AppLocale): string {
+  const ts = Date.parse(`${ymd}T00:00:00Z`);
+  if (!Number.isFinite(ts)) return ymd;
+  return new Intl.DateTimeFormat(isEnglishLocale(locale) ? "en-US" : "zh-CN", {
+    month: isEnglishLocale(locale) ? "short" : "numeric",
+    day: "numeric",
+    timeZone: "UTC",
+  }).format(new Date(ts));
 }
 
-function detectHazards(daily: DailyForecast): HazardHit[] {
+function detectHazards(daily: DailyForecast, locale?: AppLocale): HazardHit[] {
   const out: HazardHit[] = [];
   const severeWeatherCode = new Set([95, 96, 99, 75, 86]);
 
@@ -309,41 +375,44 @@ function detectHazards(daily: DailyForecast): HazardHit[] {
       const isThunder = code === 95 || code === 96 || code === 99;
       out.push({
         date,
-        label: isThunder ? "雷暴" : "强降雪",
+        label: isThunder ? t(locale, "雷暴", "thunderstorm") : t(locale, "强降雪", "heavy snow"),
         detail: isThunder ? undefined : undefined,
         severity: isThunder ? 4 : 3,
       });
     }
 
     if (Number.isFinite(rain) && rain >= 50) {
-      out.push({ date, label: "强降雨", detail: `${Math.round(rain)}mm`, severity: 4 });
+      out.push({ date, label: t(locale, "强降雨", "heavy rain"), detail: `${Math.round(rain)}mm`, severity: 4 });
     } else if (Number.isFinite(rain) && rain >= 30) {
-      out.push({ date, label: "中到大雨", detail: `${Math.round(rain)}mm`, severity: 3 });
+      out.push({ date, label: t(locale, "中到大雨", "rain"), detail: `${Math.round(rain)}mm`, severity: 3 });
     }
 
     if (Number.isFinite(gust) && gust >= 20) {
-      out.push({ date, label: "大风", detail: `${Math.round(gust)}m/s`, severity: 4 });
+      out.push({ date, label: t(locale, "大风", "severe wind"), detail: `${Math.round(gust)}m/s`, severity: 4 });
     } else if (Number.isFinite(gust) && gust >= 15) {
-      out.push({ date, label: "强风", detail: `${Math.round(gust)}m/s`, severity: 3 });
+      out.push({ date, label: t(locale, "强风", "strong wind"), detail: `${Math.round(gust)}m/s`, severity: 3 });
     }
 
     if (Number.isFinite(tmax) && tmax >= 37) {
-      out.push({ date, label: "高温", detail: `${Math.round(tmax)}°C`, severity: 4 });
+      out.push({ date, label: t(locale, "高温", "extreme heat"), detail: `${Math.round(tmax)}°C`, severity: 4 });
     } else if (Number.isFinite(tmax) && tmax >= 35) {
-      out.push({ date, label: "高温", detail: `${Math.round(tmax)}°C`, severity: 3 });
+      out.push({ date, label: t(locale, "高温", "heat"), detail: `${Math.round(tmax)}°C`, severity: 3 });
     }
 
     if (Number.isFinite(tmin) && tmin <= -10) {
-      out.push({ date, label: "严寒", detail: `${Math.round(tmin)}°C`, severity: 4 });
+      out.push({ date, label: t(locale, "严寒", "cold wave"), detail: `${Math.round(tmin)}°C`, severity: 4 });
     } else if (Number.isFinite(tmin) && tmin <= -5) {
-      out.push({ date, label: "低温", detail: `${Math.round(tmin)}°C`, severity: 3 });
+      out.push({ date, label: t(locale, "低温", "low temperature"), detail: `${Math.round(tmin)}°C`, severity: 3 });
     }
   }
 
   return out;
 }
 
-function mergeHazards(hits: HazardHit[]): { summary: string; details: string[]; maxSeverity: number } | null {
+function mergeHazards(
+  hits: HazardHit[],
+  locale?: AppLocale
+): { summary: string; details: string[]; maxSeverity: number } | null {
   if (!hits.length) return null;
 
   const byLabel = new Map<string, HazardHit[]>();
@@ -354,12 +423,20 @@ function mergeHazards(hits: HazardHit[]): { summary: string; details: string[]; 
     maxSeverity = Math.max(maxSeverity, h.severity);
   }
 
-  const summary = Array.from(byLabel.keys()).slice(0, 3).join("、");
+  const summary = Array.from(byLabel.keys())
+    .slice(0, 3)
+    .join(isEnglishLocale(locale) ? ", " : "、");
   const details: string[] = [];
   for (const [label, arr] of byLabel.entries()) {
     const top = arr.sort((a, b) => b.severity - a.severity)[0];
-    const day = formatCnDate(top.date);
-    const detail = top.detail ? `${label}（${day}，${top.detail}）` : `${label}（${day}）`;
+    const day = formatDateLabel(top.date, locale);
+    const detail = isEnglishLocale(locale)
+      ? top.detail
+        ? `${label} (${day}, ${top.detail})`
+        : `${label} (${day})`
+      : top.detail
+      ? `${label}（${day}，${top.detail}）`
+      : `${label}（${day}）`;
     details.push(detail);
     if (details.length >= 3) break;
   }
@@ -373,7 +450,7 @@ function recentlyMentionedWeather(city: string, recentTurns: Array<{ role: "user
   const recentAssistant = recentTurns.filter((x) => x.role === "assistant").slice(-3);
   return recentAssistant.some((x) => {
     const t = String(x.content || "");
-    return t.includes(c) && /天气风险|极端天气|暴雨|雷暴|高温|低温|强风|强降雨/i.test(t);
+    return t.includes(c) && /天气风险|极端天气|暴雨|雷暴|高温|低温|强风|强降雨|weather risk|forecast|thunderstorm|heavy rain|strong wind|heat/i.test(t);
   });
 }
 
@@ -389,6 +466,7 @@ export async function buildExtremeWeatherAdvisory(params: {
   graph: CDG;
   userText: string;
   recentTurns: Array<{ role: "user" | "assistant"; content: string }>;
+  locale?: AppLocale;
 }): Promise<string | null> {
   if (!WEATHER_ENABLED) return null;
 
@@ -398,7 +476,7 @@ export async function buildExtremeWeatherAdvisory(params: {
     .join("\n");
   const mergedUserText = [userHistory, params.userText].filter(Boolean).join("\n");
 
-  const signals = extractIntentSignalsWithRecency(userHistory, params.userText);
+  const signals = extractIntentSignalsWithRecency(userHistory, params.userText, { locale: params.locale });
   const graphCities = parseDestinationsFromGraph(params.graph);
   const signalCities = (signals.destinations || [])
     .map((x) => normalizeDestination(x))
@@ -406,7 +484,7 @@ export async function buildExtremeWeatherAdvisory(params: {
   const candidates = Array.from(new Set([...signalCities, ...graphCities])).slice(0, 6);
   if (!candidates.length) return null;
 
-  const spanRaw = inferTravelWindow({ text: mergedUserText, durationDays: signals.durationDays });
+  const spanRaw = inferTravelWindow({ text: mergedUserText, durationDays: signals.durationDays, locale: params.locale });
   if (!spanRaw) return null;
   if (!inForecastHorizon(spanRaw.start, spanRaw.end)) return null;
 
@@ -417,7 +495,7 @@ export async function buildExtremeWeatherAdvisory(params: {
   if (!city) return null;
   if (recentlyMentionedWeather(city, params.recentTurns || [])) return null;
 
-  const geo = await geocodeCity(city);
+  const geo = await geocodeCity(city, params.locale);
   if (!geo) return null;
 
   const startYmd = toYmd(span.start);
@@ -430,14 +508,21 @@ export async function buildExtremeWeatherAdvisory(params: {
   });
   if (!daily) return null;
 
-  const hazards = detectHazards(daily);
-  const merged = mergeHazards(hazards);
+  const hazards = detectHazards(daily, params.locale);
+  const merged = mergeHazards(hazards, params.locale);
   if (!merged || merged.maxSeverity < 3) return null;
 
-  const advisory =
-    `天气风险提醒：根据公开天气预报，${city}在${formatCnDate(startYmd)}至${formatCnDate(endYmd)}可能出现${merged.summary}。` +
-    `${merged.details.length ? `重点关注：${merged.details.join("；")}。` : ""}` +
-    `建议预留室内备选行程，并为交通与关键活动安排缓冲。`;
+  const advisory = isEnglishLocale(params.locale)
+    ? `Weather risk alert: public forecasts suggest ${city} may face ${merged.summary} from ${formatDateLabel(
+        startYmd,
+        params.locale
+      )} to ${formatDateLabel(endYmd, params.locale)}. ${
+        merged.details.length ? `Watch for ${merged.details.join("; ")}. ` : ""
+      }Keep indoor backup options and extra buffer around transport and critical activities.`
+    : `天气风险提醒：根据公开天气预报，${city}在${formatDateLabel(startYmd, params.locale)}至${formatDateLabel(
+        endYmd,
+        params.locale
+      )}可能出现${merged.summary}。${merged.details.length ? `重点关注：${merged.details.join("；")}。` : ""}建议预留室内备选行程，并为交通与关键活动安排缓冲。`;
 
   dlog("weather alert", { city, startYmd, endYmd, hazards: merged.details, source: geo.label });
   return advisory;

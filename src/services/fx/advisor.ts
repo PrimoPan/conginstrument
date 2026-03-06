@@ -1,6 +1,7 @@
 import axios from "axios";
 import type { CDG } from "../../core/graph.js";
 import { extractIntentSignalsWithRecency } from "../graphUpdater/intentSignals.js";
+import { isEnglishLocale, type AppLocale } from "../../i18n/locale.js";
 
 type FxCode = "CNY" | "EUR" | "USD" | "GBP" | "JPY" | "HKD" | "SGD" | "KRW";
 
@@ -14,6 +15,10 @@ const FX_TTL_MS = 10 * 60 * 1000;
 
 function cleanText(input: any): string {
   return String(input ?? "").replace(/\s+/g, " ").trim();
+}
+
+function t(locale: AppLocale | undefined, zh: string, en: string): string {
+  return isEnglishLocale(locale) ? en : zh;
 }
 
 function normalizeUtterance(input: any): string {
@@ -78,23 +83,23 @@ function readBudgetFromGraph(graph: CDG): number | null {
   return null;
 }
 
-function formatAmount(amount: number, ccy: FxCode): string {
+function formatAmount(amount: number, ccy: FxCode, locale?: AppLocale): string {
   const digits = ccy === "JPY" || ccy === "KRW" ? 0 : amount >= 1000 ? 0 : 2;
-  return new Intl.NumberFormat("zh-CN", {
+  return new Intl.NumberFormat(isEnglishLocale(locale) ? "en-US" : "zh-CN", {
     minimumFractionDigits: digits,
     maximumFractionDigits: digits,
   }).format(amount);
 }
 
-function currencyLabel(ccy: FxCode): string {
-  if (ccy === "CNY") return "人民币";
-  if (ccy === "EUR") return "欧元";
-  if (ccy === "USD") return "美元";
-  if (ccy === "GBP") return "英镑";
-  if (ccy === "JPY") return "日元";
-  if (ccy === "HKD") return "港币";
-  if (ccy === "SGD") return "新加坡元";
-  if (ccy === "KRW") return "韩元";
+function currencyLabel(ccy: FxCode, locale?: AppLocale): string {
+  if (ccy === "CNY") return t(locale, "人民币", "CNY");
+  if (ccy === "EUR") return t(locale, "欧元", "EUR");
+  if (ccy === "USD") return t(locale, "美元", "USD");
+  if (ccy === "GBP") return t(locale, "英镑", "GBP");
+  if (ccy === "JPY") return t(locale, "日元", "JPY");
+  if (ccy === "HKD") return t(locale, "港币", "HKD");
+  if (ccy === "SGD") return t(locale, "新加坡元", "SGD");
+  if (ccy === "KRW") return t(locale, "韩元", "KRW");
   return ccy;
 }
 
@@ -129,6 +134,7 @@ export async function buildFxRateAdvisory(params: {
   graph: CDG;
   userText: string;
   recentTurns: Array<{ role: "user" | "assistant"; content: string }>;
+  locale?: AppLocale;
 }): Promise<string | null> {
   const pair = pickPairFromText(params.userText);
   if (!pair) return null;
@@ -148,7 +154,7 @@ export async function buildFxRateAdvisory(params: {
   }
 
   const historyUserText = safeTail(historyUserTurns.join("\n"));
-  const mergedSignals = extractIntentSignalsWithRecency(historyUserText, params.userText);
+  const mergedSignals = extractIntentSignalsWithRecency(historyUserText, params.userText, { locale: params.locale });
 
   const amount =
     mergedSignals.budgetCny ||
@@ -160,9 +166,24 @@ export async function buildFxRateAdvisory(params: {
   if (!rateResp) return null;
 
   const converted = amount * rateResp.rate;
-  const dateSuffix = rateResp.date ? `（${rateResp.date}）` : "";
+  const dateSuffix = rateResp.date
+    ? isEnglishLocale(params.locale)
+      ? ` (${rateResp.date})`
+      : `（${rateResp.date}）`
+    : "";
 
-  return `实时汇率参考${dateSuffix}：${formatAmount(amount, pair.from)}${currencyLabel(
-    pair.from
-  )} ≈ ${formatAmount(converted, pair.to)}${currencyLabel(pair.to)}（1${pair.from} ≈ ${rateResp.rate.toFixed(4)}${pair.to}）`;
+  return isEnglishLocale(params.locale)
+    ? `Live FX reference${dateSuffix}: ${formatAmount(amount, pair.from, params.locale)} ${currencyLabel(
+        pair.from,
+        params.locale
+      )} ≈ ${formatAmount(converted, pair.to, params.locale)} ${currencyLabel(
+        pair.to,
+        params.locale
+      )} (1 ${pair.from} ≈ ${rateResp.rate.toFixed(4)} ${pair.to})`
+    : `实时汇率参考${dateSuffix}：${formatAmount(amount, pair.from, params.locale)}${currencyLabel(
+        pair.from,
+        params.locale
+      )} ≈ ${formatAmount(converted, pair.to, params.locale)}${currencyLabel(pair.to, params.locale)}（1${pair.from} ≈ ${rateResp.rate.toFixed(
+        4
+      )}${pair.to}）`;
 }

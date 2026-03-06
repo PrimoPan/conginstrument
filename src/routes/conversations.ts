@@ -9,7 +9,12 @@ import { config } from "../server/config.js";
 import { generateAssistantTextNonStreaming } from "../services/chatResponder.js";
 import { buildCognitiveModel } from "../services/cognitiveModel.js";
 import { buildConflictGatePayload } from "../services/motif/conflictGate.js";
-import { buildTravelPlanState, type TravelPlanState } from "../services/travelPlan/state.js";
+import {
+  buildTravelPlanState,
+  buildTravelPlanSourceMapKey,
+  type TravelPlanSourceMap,
+  type TravelPlanState,
+} from "../services/travelPlan/state.js";
 import {
   defaultTravelPlanFileName,
   renderPortfolioTravelPlanPdf,
@@ -52,6 +57,7 @@ import {
   annotateMotifExtractionMeta,
   normalizeMotifTransferState,
 } from "../services/motifTransfer/state.js";
+import { asyncRoute } from "./asyncRoute.js";
 
 export const convRouter = Router();
 convRouter.use(authMiddleware);
@@ -356,12 +362,16 @@ function defaultTravelPlanState(params: {
     ? "No travel plan yet. Start chatting to build one."
     : "暂无旅行计划，请先开始对话。";
   const summary = cleanInput(params.summary, 220) || defaultSummary;
-  const sourceMap: Record<string, string> = {};
+  const sourceMap: TravelPlanSourceMap = {};
   constraints.forEach((_, idx) => {
-    sourceMap[`constraints.${idx}`] = "transferred_pattern_based";
+    sourceMap[buildTravelPlanSourceMapKey("constraints", idx + 1)] = {
+      source_label: "transferred_pattern_based",
+    };
   });
   openQuestions.forEach((_, idx) => {
-    sourceMap[`open_questions.${idx}`] = "transferred_pattern_based";
+    sourceMap[buildTravelPlanSourceMapKey("open_questions", idx + 1)] = {
+      source_label: "transferred_pattern_based",
+    };
   });
 
   return {
@@ -795,7 +805,7 @@ type PersistedConversationSnapshot = PlanningStateBundle & {
   travelPlanState: TravelPlanState;
 };
 
-async function buildPlanningStateBundle(params: {
+type PlanningStateBundleParams = {
   conversationId: ObjectId;
   userId: ObjectId;
   locale: AppLocale;
@@ -807,10 +817,12 @@ async function buildPlanningStateBundle(params: {
   taskLifecycle?: TaskLifecycleState | null;
   latestUserText?: string;
   isNewConversation?: boolean;
-}): Promise<PlanningStateBundle> {
+};
+
+async function buildPlanningStateBundle(params: PlanningStateBundleParams): Promise<PlanningStateBundle> {
   const convs = await collections.conversations
-    .find({ userId: params.userId })
-    .project({ title: 1, travelPlanState: 1, updatedAt: 1 })
+    .find({ userId: params.userId, locale: params.locale })
+    .project({ title: 1, travelPlanState: 1, updatedAt: 1, locale: 1 })
     .sort({ updatedAt: -1 })
     .limit(80)
     .toArray();
@@ -819,6 +831,7 @@ async function buildPlanningStateBundle(params: {
     title: String((c as any)?.title || ""),
     travelPlanState: (c as any)?.travelPlanState || null,
     updatedAt: (c as any)?.updatedAt,
+    locale: normalizeLocale((c as any)?.locale),
   }));
   const currentId = String(params.conversationId);
   const idx = conversationRecords.findIndex((x) => x.conversationId === currentId);
@@ -834,6 +847,7 @@ async function buildPlanningStateBundle(params: {
       title: "",
       travelPlanState: params.travelPlanState,
       updatedAt: new Date(),
+      locale: params.locale,
     });
   }
 
@@ -882,6 +896,68 @@ async function buildPlanningStateBundle(params: {
   };
 }
 
+function buildPlanningStateBundleFallback(params: PlanningStateBundleParams): PlanningStateBundle {
+  const conversationRecords = [
+    {
+      conversationId: String(params.conversationId),
+      title: "",
+      travelPlanState: params.travelPlanState,
+      updatedAt: new Date(),
+      locale: params.locale,
+    },
+  ];
+  const currentDestinationScope =
+    (params.travelPlanState as any)?.destination_scope ||
+    params.travelPlanState.destinations ||
+    [];
+  const previousDestinationScope =
+    (params.previousTravelPlan as any)?.destination_scope ||
+    params.previousTravelPlan?.destinations ||
+    [];
+
+  return {
+    taskDetection: buildTaskDetection({
+      conversationId: String(params.travelPlanState.task_id || params.conversationId),
+      locale: params.locale,
+      currentDestinations: currentDestinationScope,
+      previousDestinations: previousDestinationScope,
+      isNewConversation: !!params.isNewConversation,
+      taskLifecycle: params.taskLifecycle || null,
+      latestUserText: params.latestUserText,
+      tripGoalSummary: clean(params.travelPlanState.trip_goal_summary || params.travelPlanState.summary, 220),
+      travelers: Array.isArray(params.travelPlanState.travelers) ? params.travelPlanState.travelers : [],
+      duration: clean(params.travelPlanState.travel_dates_or_duration, 80) || undefined,
+    }),
+    cognitiveState: buildCognitiveState({
+      conversationId: String(params.conversationId),
+      locale: params.locale,
+      model: params.model,
+      travelPlanState: params.travelPlanState,
+      conversations: conversationRecords,
+      motifTransferState: params.motifTransferState || null,
+      persistentMotifLibrary: params.persistentMotifLibrary || [],
+    }),
+    portfolioDocumentState: buildPortfolioDocumentState({
+      userId: String(params.userId),
+      locale: params.locale,
+      conversations: conversationRecords,
+    }),
+  };
+}
+
+async function safeBuildPlanningStateBundle(params: PlanningStateBundleParams): Promise<PlanningStateBundle> {
+  try {
+    return await buildPlanningStateBundle(params);
+  } catch (error) {
+    console.error("Failed to build planning state bundle; falling back to current conversation only.", {
+      conversationId: String(params.conversationId),
+      userId: String(params.userId),
+      error,
+    });
+    return buildPlanningStateBundleFallback(params);
+  }
+}
+
 async function persistConversationModel(params: {
   conversationId: ObjectId;
   userId: ObjectId;
@@ -922,8 +998,8 @@ async function persistConversationModel(params: {
     locale: params.locale,
     forceTaskSwitch: !!params.forceTaskSwitch,
   });
-  const persistentMotifLibrary = await listUserMotifLibrary(params.userId);
-  const planning = await buildPlanningStateBundle({
+  const persistentMotifLibrary = await listUserMotifLibrary(params.userId, params.locale);
+  const planning = await safeBuildPlanningStateBundle({
     conversationId: params.conversationId,
     userId: params.userId,
     locale: params.locale,
@@ -1055,7 +1131,7 @@ async function refreshConversationTransferProjection(params: {
       previous: null,
       locale: params.locale,
     }));
-  const planning = await buildPlanningStateBundle({
+  const planning = await safeBuildPlanningStateBundle({
     conversationId: params.oid,
     userId: params.userId,
     locale: params.locale,
@@ -1063,7 +1139,7 @@ async function refreshConversationTransferProjection(params: {
     travelPlanState,
     previousTravelPlan: (params.conv as any).travelPlanState || null,
     motifTransferState: params.motifTransferState,
-    persistentMotifLibrary: await listUserMotifLibrary(params.userId),
+    persistentMotifLibrary: await listUserMotifLibrary(params.userId, params.locale),
     taskLifecycle: params.taskLifecycle || null,
     latestUserText: params.latestUserText,
   });
@@ -1101,11 +1177,13 @@ async function refreshConversationTransferProjection(params: {
 // Conversations CRUD
 // ==========================
 
-convRouter.get("/", async (req: AuthedRequest, res) => {
+convRouter.get("/", asyncRoute(async (req: AuthedRequest, res) => {
   const userId = req.userId!;
+  const localeQuery = cleanInput((req.query as any)?.locale, 16);
+  const localeFilter = localeQuery ? normalizeLocale(localeQuery) : null;
   const list = await collections.conversations
-    .find({ userId })
-    .project({ title: 1, updatedAt: 1 })
+    .find(localeFilter ? { userId, locale: localeFilter } : { userId })
+    .project({ title: 1, updatedAt: 1, locale: 1 })
     .sort({ updatedAt: -1 })
     .toArray();
 
@@ -1117,9 +1195,9 @@ convRouter.get("/", async (req: AuthedRequest, res) => {
       locale: normalizeLocale((x as any).locale),
     }))
   );
-});
+}));
 
-convRouter.post("/", async (req: AuthedRequest, res) => {
+convRouter.post("/", asyncRoute(async (req: AuthedRequest, res) => {
   const userId = req.userId!;
   const locale = normalizeLocale(req.body?.locale);
   const planningBootstrap = parsePlanningBootstrap(req.body?.planningBootstrap);
@@ -1215,8 +1293,8 @@ convRouter.post("/", async (req: AuthedRequest, res) => {
     state: motifTransferState,
   });
   model.motifGraph = { ...(model.motifGraph || { motifs: [], motifLinks: [] }), motifs: model.motifs };
-  const persistentMotifLibrary = await listUserMotifLibrary(userId);
-  const planning = await buildPlanningStateBundle({
+  const persistentMotifLibrary = await listUserMotifLibrary(userId, locale);
+  const planning = await safeBuildPlanningStateBundle({
     conversationId: inserted.insertedId,
     userId,
     locale,
@@ -1264,9 +1342,9 @@ convRouter.post("/", async (req: AuthedRequest, res) => {
     motifTransferState,
     taskLifecycle,
   });
-});
+}));
 
-convRouter.get("/:id", async (req: AuthedRequest, res) => {
+convRouter.get("/:id", asyncRoute(async (req: AuthedRequest, res) => {
   const userId = req.userId!;
   const id = req.params.id;
 
@@ -1294,8 +1372,8 @@ convRouter.get("/:id", async (req: AuthedRequest, res) => {
     state: motifTransferState,
   });
   model.motifGraph = { ...(model.motifGraph || { motifs: [], motifLinks: [] }), motifs: model.motifs };
-  const persistentMotifLibrary = await listUserMotifLibrary(userId);
-  const planning = await buildPlanningStateBundle({
+  const persistentMotifLibrary = await listUserMotifLibrary(userId, locale);
+  const planning = await safeBuildPlanningStateBundle({
     conversationId: oid,
     userId,
     locale,
@@ -1320,9 +1398,9 @@ convRouter.get("/:id", async (req: AuthedRequest, res) => {
     motifTransferState,
     taskLifecycle,
   });
-});
+}));
 
-convRouter.post("/:id/task/resume", async (req: AuthedRequest, res) => {
+convRouter.post("/:id/task/resume", asyncRoute(async (req: AuthedRequest, res) => {
   const userId = req.userId!;
   const id = req.params.id;
   const oid = parseObjectId(id);
@@ -1363,7 +1441,7 @@ convRouter.post("/:id/task/resume", async (req: AuthedRequest, res) => {
     state: motifTransferState,
   });
   model.motifGraph = { ...(model.motifGraph || { motifs: [], motifLinks: [] }), motifs: model.motifs };
-  const planning = await buildPlanningStateBundle({
+  const planning = await safeBuildPlanningStateBundle({
     conversationId: oid,
     userId,
     locale,
@@ -1371,7 +1449,7 @@ convRouter.post("/:id/task/resume", async (req: AuthedRequest, res) => {
     travelPlanState,
     previousTravelPlan: (refreshedConv as any).travelPlanState || null,
     motifTransferState,
-    persistentMotifLibrary: await listUserMotifLibrary(userId),
+    persistentMotifLibrary: await listUserMotifLibrary(userId, locale),
     taskLifecycle: nextLifecycle,
   });
 
@@ -1400,9 +1478,9 @@ convRouter.post("/:id/task/resume", async (req: AuthedRequest, res) => {
     motifTransferState,
     taskLifecycle: nextLifecycle,
   });
-});
+}));
 
-convRouter.put("/:id/graph", async (req: AuthedRequest, res) => {
+convRouter.put("/:id/graph", asyncRoute(async (req: AuthedRequest, res) => {
   const userId = req.userId!;
   const id = req.params.id;
 
@@ -1471,7 +1549,7 @@ convRouter.put("/:id/graph", async (req: AuthedRequest, res) => {
     previous: (conv as any).travelPlanState || null,
     locale,
   });
-  const planning = await buildPlanningStateBundle({
+  const planning = await safeBuildPlanningStateBundle({
     conversationId: oid,
     userId,
     locale,
@@ -1479,7 +1557,7 @@ convRouter.put("/:id/graph", async (req: AuthedRequest, res) => {
     travelPlanState,
     previousTravelPlan: (conv as any).travelPlanState || null,
     motifTransferState,
-    persistentMotifLibrary: await listUserMotifLibrary(userId),
+    persistentMotifLibrary: await listUserMotifLibrary(userId, locale),
     taskLifecycle,
   });
 
@@ -1562,9 +1640,9 @@ convRouter.put("/:id/graph", async (req: AuthedRequest, res) => {
     adviceError,
     conflictGate,
   });
-});
+}));
 
-convRouter.put("/:id/concepts", async (req: AuthedRequest, res) => {
+convRouter.put("/:id/concepts", asyncRoute(async (req: AuthedRequest, res) => {
   const userId = req.userId!;
   const id = req.params.id;
   const oid = parseObjectId(id);
@@ -1610,7 +1688,7 @@ convRouter.put("/:id/concepts", async (req: AuthedRequest, res) => {
     previous: (conv as any).travelPlanState || null,
     locale,
   });
-  const planning = await buildPlanningStateBundle({
+  const planning = await safeBuildPlanningStateBundle({
     conversationId: oid,
     userId,
     locale,
@@ -1618,7 +1696,7 @@ convRouter.put("/:id/concepts", async (req: AuthedRequest, res) => {
     travelPlanState,
     previousTravelPlan: (conv as any).travelPlanState || null,
     motifTransferState,
-    persistentMotifLibrary: await listUserMotifLibrary(userId),
+    persistentMotifLibrary: await listUserMotifLibrary(userId, locale),
     taskLifecycle,
   });
 
@@ -1657,10 +1735,10 @@ convRouter.put("/:id/concepts", async (req: AuthedRequest, res) => {
     taskLifecycle,
     updatedAt: now,
   });
-});
+}));
 
 // 前端加载历史 turns（默认 30 条）
-convRouter.get("/:id/turns", async (req: AuthedRequest, res) => {
+convRouter.get("/:id/turns", asyncRoute(async (req: AuthedRequest, res) => {
   const userId = req.userId!;
   const id = req.params.id;
 
@@ -1684,7 +1762,7 @@ convRouter.get("/:id/turns", async (req: AuthedRequest, res) => {
       graphVersion: t.graphVersion,
     }))
   );
-});
+}));
 
 // 导出当前旅行计划 PDF（含中文自然语言与按天行程）
 async function handleTravelPlanPdfExport(req: AuthedRequest, res: any) {
@@ -1741,7 +1819,7 @@ async function handleTravelPlanPdfExport(req: AuthedRequest, res: any) {
     if (!travelPlanState) {
       return res.status(400).json({ error: "no travel plan state yet, cannot export plan" });
     }
-    const planning = await buildPlanningStateBundle({
+    const planning = await safeBuildPlanningStateBundle({
       conversationId: oid,
       userId,
       locale,
@@ -1749,7 +1827,7 @@ async function handleTravelPlanPdfExport(req: AuthedRequest, res: any) {
       travelPlanState,
       previousTravelPlan: (conv as any).travelPlanState || null,
       motifTransferState,
-      persistentMotifLibrary: await listUserMotifLibrary(userId),
+      persistentMotifLibrary: await listUserMotifLibrary(userId, locale),
       taskLifecycle,
     });
 
@@ -1801,16 +1879,16 @@ async function handleTravelPlanPdfExport(req: AuthedRequest, res: any) {
 
 // Keep both paths for compatibility. Prefer `/export` on frontend to avoid
 // static-server extension interception on some nginx setups.
-convRouter.get("/:id/travel-plan/export", handleTravelPlanPdfExport);
-convRouter.get("/:id/travel-plan/export.pdf", handleTravelPlanPdfExport);
-convRouter.post("/:id/travel-plan/export", handleTravelPlanPdfExport);
-convRouter.post("/:id/travel-plan/export.pdf", handleTravelPlanPdfExport);
+convRouter.get("/:id/travel-plan/export", asyncRoute(handleTravelPlanPdfExport));
+convRouter.get("/:id/travel-plan/export.pdf", asyncRoute(handleTravelPlanPdfExport));
+convRouter.post("/:id/travel-plan/export", asyncRoute(handleTravelPlanPdfExport));
+convRouter.post("/:id/travel-plan/export.pdf", asyncRoute(handleTravelPlanPdfExport));
 
 // ==========================
 // Turn - Non-stream (CLI/debug)
 // ==========================
 
-convRouter.post("/:id/turn", async (req: AuthedRequest, res) => {
+convRouter.post("/:id/turn", asyncRoute(async (req: AuthedRequest, res) => {
   const userId = req.userId!;
   const id = req.params.id;
 
@@ -1968,7 +2046,7 @@ convRouter.post("/:id/turn", async (req: AuthedRequest, res) => {
   }
 
   if (shouldEvaluateTransferRecommendations({ priorTurnCount: recent.length, motifTransferState })) {
-    const motifLibrary = await listUserMotifLibrary(userId);
+    const motifLibrary = await listUserMotifLibrary(userId, locale);
     const currentTaskIdForRetrieval = currentTaskId((conv as any).travelPlanState || null, String(oid));
     const previewTravelPlan = buildTransferEvaluationTravelPlan({
       locale,
@@ -2046,13 +2124,13 @@ convRouter.post("/:id/turn", async (req: AuthedRequest, res) => {
     motifTransferState,
     taskLifecycle,
   });
-});
+}));
 
 // ==========================
 // Turn - Stream (SSE for UX)
 // ==========================
 
-convRouter.post("/:id/turn/stream", async (req: AuthedRequest, res) => {
+convRouter.post("/:id/turn/stream", asyncRoute(async (req: AuthedRequest, res) => {
   const userId = req.userId!;
   const id = req.params.id;
 
@@ -2266,7 +2344,7 @@ convRouter.post("/:id/turn/stream", async (req: AuthedRequest, res) => {
     model.graph.version = merged.newGraph.version + (graphChanged(merged.newGraph, model.graph) ? 1 : 0);
 
     if (shouldEvaluateTransferRecommendations({ priorTurnCount: recent.length, motifTransferState })) {
-      const motifLibrary = await listUserMotifLibrary(userId);
+      const motifLibrary = await listUserMotifLibrary(userId, locale);
       const currentTaskIdForRetrieval = currentTaskId((conv as any).travelPlanState || null, String(oid));
       const previewTravelPlan = buildTransferEvaluationTravelPlan({
         locale,
@@ -2383,7 +2461,7 @@ convRouter.post("/:id/turn/stream", async (req: AuthedRequest, res) => {
         model2.graph.version = merged2.newGraph.version + (graphChanged(merged2.newGraph, model2.graph) ? 1 : 0);
 
         if (shouldEvaluateTransferRecommendations({ priorTurnCount: recent.length, motifTransferState })) {
-          const motifLibrary = await listUserMotifLibrary(userId);
+          const motifLibrary = await listUserMotifLibrary(userId, locale);
           const currentTaskIdForRetrieval = currentTaskId((conv as any).travelPlanState || null, String(oid));
           const previewTravelPlan = buildTransferEvaluationTravelPlan({
             locale,
@@ -2476,9 +2554,9 @@ convRouter.post("/:id/turn/stream", async (req: AuthedRequest, res) => {
       res.end();
     }
   }
-});
+}));
 
-convRouter.post("/:id/motif-transfer/decision", async (req: AuthedRequest, res) => {
+convRouter.post("/:id/motif-transfer/decision", asyncRoute(async (req: AuthedRequest, res) => {
   const userId = req.userId!;
   const oid = parseObjectId(req.params.id);
   if (!oid) return res.status(400).json({ error: "invalid conversation id" });
@@ -2542,6 +2620,7 @@ convRouter.post("/:id/motif-transfer/decision", async (req: AuthedRequest, res) 
   if (action === "adopt") {
     await recordTransferUsage({
       userId,
+      locale,
       motifTypeId: recommendation.motif_type_id,
       action: "adopt",
       confidenceDelta: 0.05,
@@ -2550,6 +2629,7 @@ convRouter.post("/:id/motif-transfer/decision", async (req: AuthedRequest, res) 
   if (action === "ignore") {
     await recordTransferUsage({
       userId,
+      locale,
       motifTypeId: recommendation.motif_type_id,
       action: "ignore",
       confidenceDelta: -0.03,
@@ -2578,9 +2658,9 @@ convRouter.post("/:id/motif-transfer/decision", async (req: AuthedRequest, res) 
     taskLifecycle,
     updatedAt: refreshed.updatedAt,
   });
-});
+}));
 
-convRouter.post("/:id/motif-transfer/feedback", async (req: AuthedRequest, res) => {
+convRouter.post("/:id/motif-transfer/feedback", asyncRoute(async (req: AuthedRequest, res) => {
   const userId = req.userId!;
   const oid = parseObjectId(req.params.id);
   if (!oid) return res.status(400).json({ error: "invalid conversation id" });
@@ -2613,6 +2693,7 @@ convRouter.post("/:id/motif-transfer/feedback", async (req: AuthedRequest, res) 
   if (feedback.event.motif_type_id) {
     await recordTransferUsage({
       userId,
+      locale,
       motifTypeId: feedback.event.motif_type_id,
       action: "feedback_negative",
       confidenceDelta: Number(feedback.event.delta || -0.08),
@@ -2641,9 +2722,9 @@ convRouter.post("/:id/motif-transfer/feedback", async (req: AuthedRequest, res) 
     taskLifecycle,
     updatedAt: refreshed.updatedAt,
   });
-});
+}));
 
-convRouter.post("/:id/motif-library/confirm", async (req: AuthedRequest, res) => {
+convRouter.post("/:id/motif-library/confirm", asyncRoute(async (req: AuthedRequest, res) => {
   const userId = req.userId!;
   const oid = parseObjectId(req.params.id);
   if (!oid) return res.status(400).json({ error: "invalid conversation id" });
@@ -2668,6 +2749,7 @@ convRouter.post("/:id/motif-library/confirm", async (req: AuthedRequest, res) =>
     : readTaskLifecycle((conv as any).taskLifecycle);
   const confirmResult = await confirmMotifLibraryEntries({
     userId,
+    locale,
     conversationId: String(oid),
     taskId,
     motifs: model.motifs || [],
@@ -2696,9 +2778,9 @@ convRouter.post("/:id/motif-library/confirm", async (req: AuthedRequest, res) =>
     taskLifecycle,
     updatedAt: refreshed.updatedAt,
   });
-});
+}));
 
-convRouter.post("/:id/motif-library/revise", async (req: AuthedRequest, res) => {
+convRouter.post("/:id/motif-library/revise", asyncRoute(async (req: AuthedRequest, res) => {
   const userId = req.userId!;
   const oid = parseObjectId(req.params.id);
   if (!oid) return res.status(400).json({ error: "invalid conversation id" });
@@ -2715,6 +2797,7 @@ convRouter.post("/:id/motif-library/revise", async (req: AuthedRequest, res) => 
 
   const revisedEntry = await reviseMotifLibraryEntry({
     userId,
+    locale,
     motifTypeId,
     choice,
     title: cleanInput(req.body?.title, 180) || undefined,
@@ -2767,4 +2850,4 @@ convRouter.post("/:id/motif-library/revise", async (req: AuthedRequest, res) => 
     taskLifecycle,
     updatedAt: refreshed.updatedAt,
   });
-});
+}));

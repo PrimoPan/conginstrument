@@ -108,6 +108,7 @@ export type MotifLibraryVersionPayload = {
 };
 
 export type MotifLibraryEntryPayload = {
+  locale: AppLocale;
   motif_type_id: string;
   motif_type_title: string;
   dependency: string;

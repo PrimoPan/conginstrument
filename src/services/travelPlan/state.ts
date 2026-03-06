@@ -118,6 +118,18 @@ export type TravelPlanState = {
   };
 };
 
+export function buildTravelPlanSourceMapKey(section: string, index?: number): string {
+  const safeSection =
+    clean(section, 80)
+      .replace(/[^a-zA-Z0-9_-]+/g, "_")
+      .replace(/_+/g, "_")
+      .replace(/^_+|_+$/g, "") || "field";
+  if (typeof index === "number" && Number.isFinite(index) && index > 0) {
+    return `${safeSection}__${Math.trunc(index)}`;
+  }
+  return safeSection;
+}
+
 function t(locale: AppLocale | undefined, zh: string, en: string): string {
   return isEnglishLocale(locale) ? en : zh;
 }
@@ -127,6 +139,10 @@ function clean(input: any, max = 200): string {
     .replace(/\s+/g, " ")
     .trim()
     .slice(0, max);
+}
+
+function formatDateLabel(locale: AppLocale | undefined, month: number, day: number): string {
+  return isEnglishLocale(locale) ? `${month}/${day}` : `${month}月${day}日`;
 }
 
 function parseCnInt(raw: string): number | null {
@@ -268,9 +284,9 @@ function parseDaysFromNodeStatement(node: ConceptNode | undefined, prefixes: str
 
 const DAY_HEADER_RE =
   /(第\s*[一二三四五六七八九十两0-9]{1,3}\s*天|day\s*[0-9]{1,2}|[0-9]{1,2}[\.、]\s*第\s*[一二三四五六七八九十两0-9]{1,3}\s*天|day\s*[0-9]{1,2}\s*[:：\-]?)/gi;
-const DATE_HEADER_RE = /([0-9]{1,2})\s*月\s*([0-9]{1,2})\s*日/g;
+const DATE_HEADER_RE = /([0-9]{1,2})\s*(?:月|\/)\s*([0-9]{1,2})\s*(?:日)?/g;
 const STRUCTURED_ITINERARY_RE =
-  /第\s*[一二三四五六七八九十两0-9]{1,3}\s*天|day\s*[0-9]{1,2}|[0-9]{1,2}\s*月\s*[0-9]{1,2}\s*日/i;
+  /第\s*[一二三四五六七八九十两0-9]{1,3}\s*天|day\s*[0-9]{1,2}|[0-9]{1,2}\s*(?:月|\/)\s*[0-9]{1,2}\s*(?:日)?/i;
 const CONFIRMATION_QUESTION_RE =
   /(请确认|是否是硬约束|是否为硬约束|还是可协商偏好|你希望优先满足哪一项|是否允许微调|这条信息是否是硬约束|please confirm|hard constraint|negotiable preference|which should be prioritized|allow adjustment)/i;
 
@@ -392,7 +408,7 @@ function parseDayBlocksFromText(text: string): TravelPlanDay[] {
     .filter((x, i, arr) => i === arr.findIndex((y) => y.day === x.day));
 }
 
-function parseDateBlocksFromText(text: string): TravelPlanDay[] {
+function parseDateBlocksFromText(text: string, locale?: AppLocale): TravelPlanDay[] {
   const src = String(text || "").replace(/\r/g, "");
   if (!src.trim()) return [];
 
@@ -404,7 +420,7 @@ function parseDateBlocksFromText(text: string): TravelPlanDay[] {
     const day = Number(m[2]);
     if (!Number.isFinite(month) || !Number.isFinite(day)) continue;
     if (month < 1 || month > 12 || day < 1 || day > 31) continue;
-    const dateLabel = `${month}月${day}日`;
+    const dateLabel = formatDateLabel(locale, month, day);
     const start = Number(m.index) || 0;
     const bodyStart = start + String(m[0]).length;
     headers.push({ dateLabel, start, bodyStart });
@@ -436,7 +452,7 @@ function parseDateBlocksFromText(text: string): TravelPlanDay[] {
         .replace(/^(上午|早上|中午|下午|傍晚|晚上|夜间|晚间|午后)\s*[：:]\s*/i, "")
         .trim(),
       48
-    ) || `${cur.dateLabel} 行程`;
+    ) || (isEnglishLocale(locale) ? `${cur.dateLabel} itinerary` : `${cur.dateLabel} 行程`);
     out.push({
       day: out.length + 1,
       dateLabel: cur.dateLabel,
@@ -570,6 +586,32 @@ function extractNarrativeText(text: string): string {
 function parseDateRangeFromTurns(
   turns: Array<{ userText: string }>
 ): { startMonth: number; startDay: number } | null {
+  const EN_MONTHS: Record<string, number> = {
+    jan: 1,
+    january: 1,
+    feb: 2,
+    february: 2,
+    mar: 3,
+    march: 3,
+    apr: 4,
+    april: 4,
+    may: 5,
+    jun: 6,
+    june: 6,
+    jul: 7,
+    july: 7,
+    aug: 8,
+    august: 8,
+    sep: 9,
+    sept: 9,
+    september: 9,
+    oct: 10,
+    october: 10,
+    nov: 11,
+    november: 11,
+    dec: 12,
+    december: 12,
+  };
   for (let i = turns.length - 1; i >= 0; i -= 1) {
     const text = String(turns[i]?.userText || "");
     if (!text) continue;
@@ -583,13 +625,48 @@ function parseDateRangeFromTurns(
     if (same?.[1] && same?.[2]) {
       return { startMonth: Number(same[1]), startDay: Number(same[2]) };
     }
+
+    const slashCross = text.match(/([0-9]{1,2})\/([0-9]{1,2})\s*(?:-|~|to)\s*([0-9]{1,2})\/([0-9]{1,2})/i);
+    if (slashCross?.[1] && slashCross?.[2]) {
+      return { startMonth: Number(slashCross[1]), startDay: Number(slashCross[2]) };
+    }
+
+    const slashSame = text.match(/([0-9]{1,2})\/([0-9]{1,2})\s*(?:-|~|to)\s*([0-9]{1,2})(?:\b|$)/i);
+    if (slashSame?.[1] && slashSame?.[2]) {
+      return { startMonth: Number(slashSame[1]), startDay: Number(slashSame[2]) };
+    }
+
+    const englishRange = text.match(
+      /\b(January|Jan|February|Feb|March|Mar|April|Apr|May|June|Jun|July|Jul|August|Aug|September|Sept|Sep|October|Oct|November|Nov|December|Dec)\s+([0-9]{1,2})\s*(?:-|to)\s*([0-9]{1,2})\b/i
+    );
+    if (englishRange?.[1] && englishRange?.[2]) {
+      const month = EN_MONTHS[String(englishRange[1]).toLowerCase()];
+      if (month) return { startMonth: month, startDay: Number(englishRange[2]) };
+    }
+
+    const englishCrossRange = text.match(
+      /\b(January|Jan|February|Feb|March|Mar|April|Apr|May|June|Jun|July|Jul|August|Aug|September|Sept|Sep|October|Oct|November|Nov|December|Dec)\s+([0-9]{1,2})\s*(?:-|to)\s*(January|Jan|February|Feb|March|Mar|April|Apr|May|June|Jun|July|Jul|August|Aug|September|Sept|Sep|October|Oct|November|Nov|December|Dec)\s+([0-9]{1,2})\b/i
+    );
+    if (englishCrossRange?.[1] && englishCrossRange?.[2]) {
+      const month = EN_MONTHS[String(englishCrossRange[1]).toLowerCase()];
+      if (month) return { startMonth: month, startDay: Number(englishCrossRange[2]) };
+    }
+
+    const englishSingle = text.match(
+      /\b(January|Jan|February|Feb|March|Mar|April|Apr|May|June|Jun|July|Jul|August|Aug|September|Sept|Sep|October|Oct|November|Nov|December|Dec)\s+([0-9]{1,2})\b/i
+    );
+    if (englishSingle?.[1] && englishSingle?.[2]) {
+      const month = EN_MONTHS[String(englishSingle[1]).toLowerCase()];
+      if (month) return { startMonth: month, startDay: Number(englishSingle[2]) };
+    }
   }
   return null;
 }
 
 function addDateLabelsToDayPlans(
   dayPlans: TravelPlanDay[],
-  dateAnchor: { startMonth: number; startDay: number } | null
+  dateAnchor: { startMonth: number; startDay: number } | null,
+  locale?: AppLocale
 ): TravelPlanDay[] {
   if (!dateAnchor || !dayPlans.length) return dayPlans;
   const start = new Date(2026, dateAnchor.startMonth - 1, dateAnchor.startDay);
@@ -598,7 +675,7 @@ function addDateLabelsToDayPlans(
     const offset = Math.max(0, (Number(d.day) || 1) - 1);
     const dt = new Date(start.getTime());
     dt.setDate(start.getDate() + offset);
-    const dateLabel = `${dt.getMonth() + 1}月${dt.getDate()}日`;
+    const dateLabel = formatDateLabel(locale, dt.getMonth() + 1, dt.getDate());
     return { ...d, dateLabel };
   });
 }
@@ -1088,23 +1165,49 @@ function buildSourceMap(params: {
       };
     }
   };
-  mark("trip_goal_summary", "assistant_proposed", params.tripGoalSummary);
-  mark("destination_scope", "assistant_proposed", params.destinationScope.join(" "));
-  mark("travel_dates_or_duration", "assistant_proposed", params.travelDatesOrDuration || "");
-  mark("travelers", "assistant_proposed", params.travelers.join(" "));
-  params.dayPlans.forEach((day, idx) =>
-    mark(`day_by_day_plan.${idx + 1}`, "assistant_proposed", `${day.title} ${(day.items || []).join(" ")}`)
+  mark(buildTravelPlanSourceMapKey("trip_goal_summary"), "assistant_proposed", params.tripGoalSummary);
+  mark(buildTravelPlanSourceMapKey("destination_scope"), "assistant_proposed", params.destinationScope.join(" "));
+  mark(
+    buildTravelPlanSourceMapKey("travel_dates_or_duration"),
+    "assistant_proposed",
+    params.travelDatesOrDuration || ""
   );
-  params.candidateOptions.forEach((x, idx) => mark(`candidate_options.${idx + 1}`, "assistant_proposed", x));
-  params.itineraryOutline.forEach((x, idx) => mark(`itinerary_outline.${idx + 1}`, "assistant_proposed", x));
-  params.transportPlan.forEach((x, idx) => mark(`transport_plan.${idx + 1}`, "assistant_proposed", x));
-  params.stayPlan.forEach((x, idx) => mark(`stay_plan.${idx + 1}`, "assistant_proposed", x));
-  params.foodPlan.forEach((x, idx) => mark(`food_plan.${idx + 1}`, "assistant_proposed", x));
-  params.riskNotes.forEach((x, idx) => mark(`risk_notes.${idx + 1}`, "assistant_proposed", x));
-  params.budgetNotes.forEach((x, idx) => mark(`budget_notes.${idx + 1}`, "assistant_proposed", x));
-  params.rationaleRefs.forEach((x, idx) => mark(`rationale_refs.${idx + 1}`, "transferred_pattern_based", x));
-  params.openQuestions.forEach((x, idx) => mark(`open_questions.${idx + 1}`, "co_authored", x));
-  mark("export_ready_text", "assistant_proposed", params.exportReadyText);
+  mark(buildTravelPlanSourceMapKey("travelers"), "assistant_proposed", params.travelers.join(" "));
+  params.dayPlans.forEach((day, idx) =>
+    mark(
+      buildTravelPlanSourceMapKey("day_by_day_plan", idx + 1),
+      "assistant_proposed",
+      `${day.title} ${(day.items || []).join(" ")}`
+    )
+  );
+  params.candidateOptions.forEach((x, idx) =>
+    mark(buildTravelPlanSourceMapKey("candidate_options", idx + 1), "assistant_proposed", x)
+  );
+  params.itineraryOutline.forEach((x, idx) =>
+    mark(buildTravelPlanSourceMapKey("itinerary_outline", idx + 1), "assistant_proposed", x)
+  );
+  params.transportPlan.forEach((x, idx) =>
+    mark(buildTravelPlanSourceMapKey("transport_plan", idx + 1), "assistant_proposed", x)
+  );
+  params.stayPlan.forEach((x, idx) =>
+    mark(buildTravelPlanSourceMapKey("stay_plan", idx + 1), "assistant_proposed", x)
+  );
+  params.foodPlan.forEach((x, idx) =>
+    mark(buildTravelPlanSourceMapKey("food_plan", idx + 1), "assistant_proposed", x)
+  );
+  params.riskNotes.forEach((x, idx) =>
+    mark(buildTravelPlanSourceMapKey("risk_notes", idx + 1), "assistant_proposed", x)
+  );
+  params.budgetNotes.forEach((x, idx) =>
+    mark(buildTravelPlanSourceMapKey("budget_notes", idx + 1), "assistant_proposed", x)
+  );
+  params.rationaleRefs.forEach((x, idx) =>
+    mark(buildTravelPlanSourceMapKey("rationale_refs", idx + 1), "transferred_pattern_based", x)
+  );
+  params.openQuestions.forEach((x, idx) =>
+    mark(buildTravelPlanSourceMapKey("open_questions", idx + 1), "co_authored", x)
+  );
+  mark(buildTravelPlanSourceMapKey("export_ready_text"), "assistant_proposed", params.exportReadyText);
   return map;
 }
 
@@ -1312,7 +1415,7 @@ export function buildTravelPlanState(params: {
   const narrativeText = dedupeParagraphs(extractNarrativeText(itineraryText), 4200);
   const parsedDayPlans = pickBestParsedDayPlans({
     byDayHeader: parseDayBlocksFromText(itineraryText),
-    byDateHeader: parseDateBlocksFromText(itineraryText),
+    byDateHeader: parseDateBlocksFromText(itineraryText, locale),
     expectedDays: totalDays,
   });
   let dayPlans = parsedDayPlans.dayPlans.slice();
@@ -1337,8 +1440,8 @@ export function buildTravelPlanState(params: {
   }
 
   const dateAnchor = parseDateRangeFromTurns(turns);
-  dayPlans = addDateLabelsToDayPlans(dayPlans, dateAnchor);
-  const assistantDayPlansWithDate = addDateLabelsToDayPlans(parsedDayPlans.dayPlans.slice(), dateAnchor);
+  dayPlans = addDateLabelsToDayPlans(dayPlans, dateAnchor, locale);
+  const assistantDayPlansWithDate = addDateLabelsToDayPlans(parsedDayPlans.dayPlans.slice(), dateAnchor, locale);
   const assistantPlan =
     itineraryPick.turnIndex >= 0 && itineraryText.trim()
       ? {

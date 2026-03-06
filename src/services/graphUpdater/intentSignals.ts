@@ -171,6 +171,45 @@ export function parseCnInt(raw: string): number | null {
   return null;
 }
 
+function formatDayCount(locale: AppLocale | undefined, days: number): string {
+  return isEnglishLocale(locale) ? `${days} days` : `${days}天`;
+}
+
+function t(locale: AppLocale | undefined, zh: string, en: string): string {
+  return isEnglishLocale(locale) ? en : zh;
+}
+
+function formatBudgetCny(locale: AppLocale | undefined, amount: number): string {
+  return isEnglishLocale(locale) ? `${amount} CNY` : `${amount}元`;
+}
+
+function formatApproxBudgetCny(locale: AppLocale | undefined, amount: number): string {
+  return isEnglishLocale(locale) ? `(~${amount} CNY)` : `（约${amount}元）`;
+}
+
+function formatDateLabel(locale: AppLocale | undefined, month: number, day: number): string {
+  return isEnglishLocale(locale) ? `${month}/${day}` : `${month}月${day}日`;
+}
+
+function formatDateRangeLabel(
+  locale: AppLocale | undefined,
+  monthA: number,
+  dayA: number,
+  monthB: number,
+  dayB: number
+): string {
+  if (monthA === monthB) {
+    return isEnglishLocale(locale) ? `${monthA}/${dayA}-${dayB}` : `${monthA}月${dayA}日-${dayB}日`;
+  }
+  return isEnglishLocale(locale)
+    ? `${monthA}/${dayA}-${monthB}/${dayB}`
+    : `${monthA}月${dayA}日-${monthB}月${dayB}日`;
+}
+
+function formatCriticalEvidence(locale: AppLocale | undefined, reason: string, days: number): string {
+  return isEnglishLocale(locale) ? `${reason} for ${days} days (hard constraint)` : `${reason} ${days}天（硬约束）`;
+}
+
 function parseCnCompositeInt(raw: string): number | null {
   const s = String(raw || "").trim();
   if (!s) return null;
@@ -694,7 +733,7 @@ function pickBudgetFromText(text: string): { value: number; evidence: string } |
   return { value: best.value, evidence: best.evidence };
 }
 
-function pickBudgetDeltaFromText(text: string): { delta: number; evidence: string } | null {
+function pickBudgetDeltaFromText(text: string, locale?: AppLocale): { delta: number; evidence: string } | null {
   const t = String(text || "").replace(/,/g, "");
   if (!t) return null;
   const foreignUnitRe =
@@ -788,7 +827,7 @@ function pickBudgetDeltaFromText(text: string): { delta: number; evidence: strin
         const converted = fxToCny(value, foreignUnit);
         if (!converted || converted <= 0) continue;
         value = converted;
-        evidence = cleanStatement(`${matched}${foreignUnit}（约${Math.round(value)}元）`, 64);
+        evidence = cleanStatement(`${matched}${foreignUnit} ${formatApproxBudgetCny(locale, Math.round(value))}`, 64);
       }
       const cand: BudgetDeltaMatch = {
         delta: Math.round(value) * def.sign,
@@ -808,7 +847,7 @@ function pickBudgetDeltaFromText(text: string): { delta: number; evidence: strin
   return { delta: best.delta, evidence: best.evidence };
 }
 
-function pickBudgetSpentDeltaFromText(text: string): { delta: number; evidence: string } | null {
+function pickBudgetSpentDeltaFromText(text: string, locale?: AppLocale): { delta: number; evidence: string } | null {
   const t = String(text || "").replace(/,/g, "");
   if (!t) return null;
   const looksLikeQuestion = (ctx: string) => {
@@ -860,7 +899,7 @@ function pickBudgetSpentDeltaFromText(text: string): { delta: number; evidence: 
     if (looksLikeQuestion(near)) continue;
     const cand: BudgetDeltaMatch = {
       delta: Math.round(cny),
-      evidence: cleanStatement(`${m[0]}（约${Math.round(cny)}元）`, 64),
+      evidence: cleanStatement(`${m[0]} ${formatApproxBudgetCny(locale, Math.round(cny))}`, 64),
       index,
     };
     if (!best || cand.index >= best.index) best = cand;
@@ -887,7 +926,7 @@ function pickBudgetSpentDeltaFromText(text: string): { delta: number; evidence: 
       evidence: cleanStatement(
         /(元|块|人民币|rmb|cny)/i.test(unit)
           ? `${m[0]}`
-          : `${m[0]}（约${Math.round(cny)}元）`,
+          : `${m[0]} ${formatApproxBudgetCny(locale, Math.round(cny))}`,
         64
       ),
       index: idx,
@@ -915,7 +954,7 @@ function pickBudgetSpentDeltaFromText(text: string): { delta: number; evidence: 
       evidence: cleanStatement(
         /(元|块|人民币|rmb|cny)/i.test(unit)
           ? `${m[0]}`
-          : `${m[0]}（约${Math.round(cny)}元）`,
+          : `${m[0]} ${formatApproxBudgetCny(locale, Math.round(cny))}`,
         64
       ),
       index: idx,
@@ -925,7 +964,7 @@ function pickBudgetSpentDeltaFromText(text: string): { delta: number; evidence: 
   return best ? { delta: best.delta, evidence: best.evidence } : null;
 }
 
-function pickBudgetSpentAbsoluteFromText(text: string): { spent: number; evidence: string } | null {
+function pickBudgetSpentAbsoluteFromText(text: string, locale?: AppLocale): { spent: number; evidence: string } | null {
   const t = String(text || "").replace(/,/g, "");
   if (!t) return null;
 
@@ -971,7 +1010,7 @@ function pickBudgetSpentAbsoluteFromText(text: string): { spent: number; evidenc
   return { spent: best.value, evidence: best.evidence };
 }
 
-function parseDateMentions(text: string): DateMention[] {
+function parseDateMentions(text: string, locale?: AppLocale): DateMention[] {
   const out: DateMention[] = [];
   const re = /([0-9]{1,2})月([0-9]{1,2})日/g;
   for (const m of text.matchAll(re)) {
@@ -1007,14 +1046,14 @@ function parseDateMentions(text: string): DateMention[] {
       day: day1,
       ordinal: ordinalA,
       index,
-      evidence: cleanStatement(`${month}月${day1}日`, 24),
+      evidence: cleanStatement(formatDateLabel(locale, month, day1), 24),
     });
     out.push({
       month,
       day: day2,
       ordinal: ordinalB,
       index: index + String(m[0] || "").length - 1,
-      evidence: cleanStatement(`${month}月${day2}日`, 24),
+      evidence: cleanStatement(formatDateLabel(locale, month, day2), 24),
     });
   }
 
@@ -1114,7 +1153,7 @@ function calcRangeDays(
   return inclusiveDays;
 }
 
-function extractDateRangeDurations(text: string): DateRangeCandidate[] {
+function extractDateRangeDurations(text: string, locale?: AppLocale): DateRangeCandidate[] {
   const out: DateRangeCandidate[] = [];
 
   const sameMonthRe = /([0-9]{1,2})月([0-9]{1,2})日?\s*[-~到至]\s*([0-9]{1,2})日?/g;
@@ -1139,7 +1178,7 @@ function extractDateRangeDurations(text: string): DateRangeCandidate[] {
     if (days <= 0 || days > 62) continue;
     out.push({
       days,
-      evidence: cleanStatement(m[0] || `${month}月${dayA}日-${dayB}日`, 36),
+      evidence: cleanStatement(m[0] || formatDateRangeLabel(locale, month, dayA, month, dayB), 36),
       index: idx,
       isMeetingLike,
     });
@@ -1169,7 +1208,7 @@ function extractDateRangeDurations(text: string): DateRangeCandidate[] {
     if (days <= 0 || days > 62) continue;
     out.push({
       days,
-      evidence: cleanStatement(m[0] || `${monthA}月${dayA}日-${monthB}月${dayB}日`, 42),
+      evidence: cleanStatement(m[0] || formatDateRangeLabel(locale, monthA, dayA, monthB, dayB), 42),
       index: idx,
       isMeetingLike,
     });
@@ -1238,7 +1277,7 @@ function extractDurationCandidates(text: string): DurationCandidate[] {
 
 function inferDurationFromText(
   text: string,
-  opts?: { historyMode?: boolean }
+  opts?: { historyMode?: boolean; locale?: AppLocale }
 ): {
   days: number;
   evidence: string;
@@ -1248,8 +1287,8 @@ function inferDurationFromText(
 } | null {
   const historyMode = !!opts?.historyMode;
   const durationCandidates = extractDurationCandidates(text);
-  const dateRangeCandidates = extractDateRangeDurations(text);
-  const dateMentions = parseDateMentions(text);
+  const dateRangeCandidates = extractDateRangeDurations(text, opts?.locale);
+  const dateMentions = parseDateMentions(text, opts?.locale);
   const uniqueDateMentions = dateMentions.filter(
     (d, i, arr) => i === arr.findIndex((x) => x.month === d.month && x.day === d.day)
   );
@@ -1333,7 +1372,9 @@ function inferDurationFromText(
       const exclusive = Math.max(1, inclusive - 1);
       if (inclusive !== exclusive) {
         boundaryAmbiguous = true;
-        boundaryQuestion = `你说的“${rangeLatest.evidence}”是按含首尾（${inclusive}天）还是净停留（${exclusive}天）？`;
+        boundaryQuestion = isEnglishLocale(opts?.locale)
+          ? `For "${rangeLatest.evidence}", do you mean ${inclusive} days inclusive or ${exclusive} net stay days?`
+          : `你说的“${rangeLatest.evidence}”是按含首尾（${inclusive}天）还是净停留（${exclusive}天）？`;
       }
     }
   }
@@ -1392,7 +1433,14 @@ function inferDurationFromText(
       if (offset < 0 || offset > 60) continue;
       if (!hasBeforeCue && offset > 0) continue;
       const totalLowerBound = offset + confDays;
-      consider(totalLowerBound, cleanStatement(m[0] || `${m[1]}月${m[2]}日 ${confDays}天会议`, 60), 0.9);
+      consider(
+        totalLowerBound,
+        cleanStatement(
+          m[0] || `${formatDateLabel(opts?.locale, Number(m[1]), Number(m[2]))} ${isEnglishLocale(opts?.locale) ? `${confDays}-day conference` : `${confDays}天会议`}`,
+          60
+        ),
+        0.9
+      );
     }
   }
 
@@ -1599,7 +1647,10 @@ function extractDestinationList(text: string): Array<{ city: string; evidence: s
   return dedup.slice(0, 4);
 }
 
-function extractCityDurationSegments(text: string): Array<{ city: string; days: number; evidence: string; kind: "travel" | "meeting"; index: number }> {
+function extractCityDurationSegments(
+  text: string,
+  locale?: AppLocale
+): Array<{ city: string; days: number; evidence: string; kind: "travel" | "meeting"; index: number }> {
   const out: Array<{ city: string; days: number; evidence: string; kind: "travel" | "meeting"; index: number }> = [];
   const scanText = text.replace(
     /在此之前|在此之后|此前|此后|之前|之后|然后|再从|再去|再到|(前|后)\s*[0-9一二三四五六七八九十两]{1,2}\s*天/g,
@@ -1632,7 +1683,7 @@ function extractCityDurationSegments(text: string): Array<{ city: string; days: 
     if (!isLikelyDestinationCandidate(city)) continue;
     if (/^(所以|因此|然后|另外|此外|这|那|此次|本次)/.test(city)) continue;
     const idx = Number(m.index) || 0;
-    const snippet = cleanStatement(m[0] || `${city}${days}天`, 80);
+    const snippet = cleanStatement(m[0] || `${city} ${formatDayCount(locale, days)}`, 80);
     if (hasRelativeDayOffset(snippet, city)) continue;
     if (hasHardDayReservationSignal(snippet) && days <= 2) continue;
     const kind: "travel" | "meeting" =
@@ -1669,7 +1720,7 @@ function extractCityDurationSegments(text: string): Array<{ city: string; days: 
     out.push({
       city,
       days,
-      evidence: cleanStatement(m[0] || `${city}${days}天`, 50),
+      evidence: cleanStatement(m[0] || `${city} ${formatDayCount(locale, days)}`, 50),
       kind,
       index: idx,
     });
@@ -1705,7 +1756,7 @@ function extractCityDurationSegments(text: string): Array<{ city: string; days: 
     out.push({
       city,
       days,
-      evidence: cleanStatement(m[0] || `${city}${days}天`, 52),
+      evidence: cleanStatement(m[0] || `${city} ${formatDayCount(locale, days)}`, 52),
       kind,
       index: Number(m.index) || 0,
     });
@@ -1748,7 +1799,7 @@ function extractCityDurationSegments(text: string): Array<{ city: string; days: 
       out.push({
         city: nearest.city,
         days: d.days,
-        evidence: cleanStatement(`${nearest.city}${d.days}天`, 50),
+        evidence: cleanStatement(`${nearest.city} ${formatDayCount(locale, d.days)}`, 50),
         kind: d.kind === "meeting" ? "meeting" : "travel",
         index: d.index,
       });
@@ -1768,7 +1819,8 @@ function extractCityDurationSegments(text: string): Array<{ city: string; days: 
 }
 
 function dedupeCityDurationSegments(
-  list: Array<{ city: string; days: number; evidence: string; kind: "travel" | "meeting"; index?: number }>
+  list: Array<{ city: string; days: number; evidence: string; kind: "travel" | "meeting"; index?: number }>,
+  locale?: AppLocale
 ): Array<{ city: string; days: number; evidence: string; kind: "travel" | "meeting"; index: number }> {
   const map = new Map<string, { city: string; days: number; evidence: string; kind: "travel" | "meeting"; index: number }>();
   for (const seg of list || []) {
@@ -1779,7 +1831,7 @@ function dedupeCityDurationSegments(
     const cand = {
       city,
       days,
-      evidence: cleanStatement(seg?.evidence || `${city}${days}天`, 60),
+      evidence: cleanStatement(seg?.evidence || `${city} ${formatDayCount(locale, days)}`, 60),
       kind: seg?.kind === "meeting" ? "meeting" : "travel",
       index: Number(seg?.index) || 0,
     };
@@ -2438,7 +2490,10 @@ function mergeGenericConstraintsWithRevocation(params: {
   };
 }
 
-export function extractCriticalPresentationRequirement(text: string): { days: number; reason: string; evidence: string; city?: string } | null {
+export function extractCriticalPresentationRequirement(
+  text: string,
+  locale?: AppLocale
+): { days: number; reason: string; evidence: string; city?: string } | null {
   const s = String(text || "");
   if (!s) return null;
   const candidates = sentenceParts(s).filter((x) => hasHardDayReservationSignal(x));
@@ -2469,8 +2524,12 @@ export function extractCriticalPresentationRequirement(text: string): { days: nu
     const p2 = target.match(/(见[^，。；;]{1,20}|拜访[^，。；;]{1,20}|会见[^，。；;]{1,20}|参加[^，。；;]{1,20}|办理[^，。；;]{1,20}|处理[^，。；;]{1,20}|汇报[^，。；;]{1,20}|发表[^，。；;]{1,20})/);
     if (p2?.[1]) reason = cleanStatement(p2[1], 24);
   }
-  if (!reason && CRITICAL_PRESENTATION_RE.test(target)) reason = "论文/报告汇报";
-  if (!reason && HARD_DAY_ACTION_RE.test(target)) reason = "关键事项处理";
+  if (!reason && CRITICAL_PRESENTATION_RE.test(target)) {
+    reason = isEnglishLocale(locale) ? "paper/report presentation" : "论文/报告汇报";
+  }
+  if (!reason && HARD_DAY_ACTION_RE.test(target)) {
+    reason = isEnglishLocale(locale) ? "critical task handling" : "关键事项处理";
+  }
   if (!reason) return null;
 
   let city: string | undefined;
@@ -2481,7 +2540,7 @@ export function extractCriticalPresentationRequirement(text: string): { days: nu
   return {
     days,
     reason,
-    evidence: cleanStatement(`${reason} ${days}天（硬约束）`, 60),
+    evidence: cleanStatement(formatCriticalEvidence(locale, reason, days), 60),
     city,
   };
 }
@@ -2560,7 +2619,7 @@ export function extractIntentSignals(userText: string, opts?: { historyMode?: bo
     }
   }
 
-  const duration = inferDurationFromText(text, { historyMode: !!opts?.historyMode });
+  const duration = inferDurationFromText(text, { historyMode: !!opts?.historyMode, locale: opts?.locale });
   if (duration?.days) {
     out.durationDays = duration.days;
     out.durationEvidence = duration.evidence;
@@ -2569,7 +2628,7 @@ export function extractIntentSignals(userText: string, opts?: { historyMode?: bo
     out.durationBoundaryQuestion = duration.boundaryQuestion;
   }
 
-  const citySegments = dedupeCityDurationSegments(extractCityDurationSegments(text));
+  const citySegments = dedupeCityDurationSegments(extractCityDurationSegments(text, opts?.locale), opts?.locale);
   if (citySegments.length) {
     out.cityDurations = citySegments.map((x) => ({
       city: remapBySubLocationParent(x.city, out.subLocations),
@@ -2610,7 +2669,7 @@ export function extractIntentSignals(userText: string, opts?: { historyMode?: bo
     }
   }
 
-  const criticalPresentation = extractCriticalPresentationRequirement(text);
+  const criticalPresentation = extractCriticalPresentationRequirement(text, opts?.locale);
   if (criticalPresentation) {
     out.criticalPresentation = criticalPresentation;
   }
@@ -2663,21 +2722,21 @@ export function extractIntentSignals(userText: string, opts?: { historyMode?: bo
     out.durationUnknownEvidence = du?.[0] || (isEnglishLocale(opts?.locale) ? "duration pending confirmation" : "时长待确认");
   }
 
-  const budgetDelta = pickBudgetDeltaFromText(text);
+  const budgetDelta = pickBudgetDeltaFromText(text, opts?.locale);
   if (budgetDelta) {
     out.budgetDeltaCny = budgetDelta.delta;
     out.budgetEvidence = budgetDelta.evidence;
     out.budgetImportance = clampImportance(0.9, out.budgetImportance || 0.86);
   }
 
-  const budgetSpentDelta = pickBudgetSpentDeltaFromText(text);
+  const budgetSpentDelta = pickBudgetSpentDeltaFromText(text, opts?.locale);
   if (budgetSpentDelta) {
     out.budgetSpentDeltaCny = budgetSpentDelta.delta;
     out.budgetSpentEvidence = budgetSpentDelta.evidence;
     out.budgetImportance = clampImportance(0.9, out.budgetImportance || 0.86);
   }
 
-  const budgetSpent = pickBudgetSpentAbsoluteFromText(text);
+  const budgetSpent = pickBudgetSpentAbsoluteFromText(text, opts?.locale);
   if (budgetSpent) {
     out.budgetSpentCny = budgetSpent.spent;
     out.budgetSpentEvidence = budgetSpent.evidence;
@@ -2784,7 +2843,7 @@ export function extractIntentSignals(userText: string, opts?: { historyMode?: bo
       }
       if (TRANSPORT_CONVENIENCE_RE.test(s) || /换乘|转机|地铁|公交|交通|出行方便|transfer|transit|metro/i.test(s)) {
         pushDerivedGenericConstraint({
-          text: "交通衔接需便利、少换乘",
+          text: t(opts?.locale, "交通衔接需便利、少换乘", "Transit should be convenient with minimal transfers"),
           kind: "logistics",
           evidence: c.evidence,
           hard: c.hard,
@@ -2793,7 +2852,7 @@ export function extractIntentSignals(userText: string, opts?: { historyMode?: bo
       }
       if (LOW_HASSLE_TRAVEL_RE.test(s)) {
         pushDerivedGenericConstraint({
-          text: "行程需低强度、减少体力负担",
+          text: t(opts?.locale, "行程需低强度、减少体力负担", "Trip should be low-intensity with reduced physical burden"),
           kind: "mobility",
           evidence: c.evidence,
           hard: c.hard,
@@ -2824,7 +2883,7 @@ export function extractIntentSignals(userText: string, opts?: { historyMode?: bo
       });
       if (c.kind === "logistics" && LOW_HASSLE_TRAVEL_RE.test(s)) {
         pushDerivedGenericConstraint({
-          text: "行程需低强度、减少体力负担",
+          text: t(opts?.locale, "行程需低强度、减少体力负担", "Trip should be low-intensity with reduced physical burden"),
           kind: "mobility",
           evidence: c.evidence,
           hard: c.hard,
@@ -2833,7 +2892,7 @@ export function extractIntentSignals(userText: string, opts?: { historyMode?: bo
       }
       if (c.kind === "mobility" && TRANSPORT_CONVENIENCE_RE.test(s)) {
         pushDerivedGenericConstraint({
-          text: "交通衔接需便利、少换乘",
+          text: t(opts?.locale, "交通衔接需便利、少换乘", "Transit should be convenient with minimal transfers"),
           kind: "logistics",
           evidence: c.evidence,
           hard: c.hard,
@@ -2905,7 +2964,7 @@ function clearPreferenceStateForAxis(signals: IntentSignals, axis: PreferenceAxi
   signals.activityPreferenceImportance = undefined;
 }
 
-function mergeSignalsWithLatest(history: IntentSignals, latest: IntentSignals): IntentSignals {
+function mergeSignalsWithLatest(history: IntentSignals, latest: IntentSignals, locale?: AppLocale): IntentSignals {
   const out: IntentSignals = { ...history };
   // delta 是“事件”，不是“状态”：避免历史增量在后续轮次被重复叠加。
   out.budgetDeltaCny = undefined;
@@ -2946,7 +3005,7 @@ function mergeSignalsWithLatest(history: IntentSignals, latest: IntentSignals): 
       const cand = {
         city,
         days,
-        evidence: cleanStatement(seg?.evidence || `${city}${days}天`, 40),
+        evidence: cleanStatement(seg?.evidence || `${city} ${formatDayCount(locale, days)}`, 40),
         kind,
       };
       const shouldReplace =
@@ -3141,7 +3200,7 @@ function mergeSignalsWithLatest(history: IntentSignals, latest: IntentSignals): 
         ((Number(out.durationStrength) || 0) <= 0.78 && Math.abs(segSum - (out.durationDays || 0)) <= 2));
     if (shouldTakeSeg) {
       out.durationDays = segSum;
-      out.durationEvidence = out.cityDurations.map((x) => `${x.city}${x.days}天`).join(" + ");
+      out.durationEvidence = out.cityDurations.map((x) => `${x.city} ${formatDayCount(locale, x.days)}`).join(" + ");
       out.durationStrength = Math.max(Number(out.durationStrength) || 0.55, segStrength);
       out.durationUnknown = false;
       out.durationUnknownEvidence = undefined;
@@ -3158,9 +3217,10 @@ function mergeSignalsWithLatest(history: IntentSignals, latest: IntentSignals): 
     if (Number.isFinite(baseBudget) && baseBudget > 0) {
       const merged = Math.max(100, Math.round(baseBudget + Number(latest.budgetDeltaCny)));
       out.budgetCny = merged;
+      const deltaText = `${latest.budgetDeltaCny > 0 ? "+" : "-"}${formatBudgetCny(locale, Math.abs(latest.budgetDeltaCny))}`;
       out.budgetEvidence =
         latest.budgetEvidence ||
-        cleanStatement(`${baseBudget}元 + ${latest.budgetDeltaCny > 0 ? "+" : ""}${latest.budgetDeltaCny}元`, 48);
+        cleanStatement(`${formatBudgetCny(locale, baseBudget)} ${deltaText}`, 48);
     } else if (latest.budgetCny != null) {
       out.budgetCny = latest.budgetCny;
       out.budgetEvidence = latest.budgetEvidence || out.budgetEvidence;
@@ -3180,7 +3240,7 @@ function mergeSignalsWithLatest(history: IntentSignals, latest: IntentSignals): 
     out.budgetSpentEvidence =
       latest.budgetSpentEvidence ||
       cleanStatement(
-        `${out.budgetSpentEvidence || "已花"} + ${latest.budgetSpentDeltaCny}元`,
+        `${out.budgetSpentEvidence || t(locale, "已花", "Spent")} + ${formatBudgetCny(locale, latest.budgetSpentDeltaCny)}`,
         80
       );
   }
@@ -3326,15 +3386,15 @@ export function extractIntentSignalsWithRecency(
   if (chunks.length) {
     for (const chunk of chunks) {
       const turnSignals = extractIntentSignals(chunk, { historyMode: true, locale: opts?.locale });
-      fromHistory = mergeSignalsWithLatest(fromHistory, turnSignals);
+      fromHistory = mergeSignalsWithLatest(fromHistory, turnSignals, opts?.locale);
     }
   } else {
     fromHistory = extractIntentSignals(historyText, { historyMode: true, locale: opts?.locale });
   }
   const fromLatest = extractIntentSignals(latestUserText, { locale: opts?.locale });
-  return mergeSignalsWithLatest(fromHistory, fromLatest);
+  return mergeSignalsWithLatest(fromHistory, fromLatest, opts?.locale);
 }
 
-export function mergeIntentSignals(base: IntentSignals, incoming: IntentSignals): IntentSignals {
-  return mergeSignalsWithLatest(base, incoming);
+export function mergeIntentSignals(base: IntentSignals, incoming: IntentSignals, locale?: AppLocale): IntentSignals {
+  return mergeSignalsWithLatest(base, incoming, locale);
 }

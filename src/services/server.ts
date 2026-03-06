@@ -2,6 +2,7 @@ import "dotenv/config";
 import express from "express";
 import cors from "cors";
 import helmet from "helmet";
+import type { NextFunction, Request, Response } from "express";
 
 import { config } from "../server/config.js";
 import { connectMongo } from "../db/mongo.js";
@@ -47,6 +48,23 @@ async function main() {
 
   app.use("/api/auth", authRouter);
   app.use("/api/conversations", convRouter);
+
+  app.use((err: any, _req: Request, res: Response, next: NextFunction) => {
+    const isCorsError =
+      typeof err?.message === "string" && err.message.toLowerCase().startsWith("cors blocked origin:");
+    const statusRaw = Number(err?.status || err?.statusCode);
+    const status =
+      Number.isInteger(statusRaw) && statusRaw >= 400 && statusRaw < 600
+        ? statusRaw
+        : isCorsError
+        ? 403
+        : 500;
+    console.error("Unhandled API error:", err);
+    if (res.headersSent) return next(err);
+    return res.status(status).json({
+      error: typeof err?.message === "string" && err.message ? err.message : "internal server error",
+    });
+  });
 
   app.listen(config.port, () => {
     console.log(`API listening on http://localhost:${config.port}`);
