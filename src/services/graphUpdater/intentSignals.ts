@@ -1698,7 +1698,7 @@ function expandCompoundDestinations(raw: string): string[] {
   return out;
 }
 
-function extractRemovedDestinations(text: string): string[] {
+export function extractRemovedDestinations(text: string): string[] {
   const out: string[] = [];
   const add = (raw: string) => {
     for (const city of expandCompoundDestinations(raw)) {

@@ -1,5 +1,10 @@
 import type { IntentSignals } from "./intentSignals.js";
-import { buildTravelIntentStatement, isLikelyDestinationCandidate, normalizeDestination } from "./intentSignals.js";
+import {
+  buildTravelIntentStatement,
+  extractRemovedDestinations,
+  isLikelyDestinationCandidate,
+  normalizeDestination,
+} from "./intentSignals.js";
 import {
   HEALTH_STRATEGY_ACTIVITY_RE,
   HEALTH_STRATEGY_DIET_RE,
@@ -874,7 +879,7 @@ export function buildSlotStateMachine(params: {
 
   const destinationMap = new Map<string, string>();
   const removedDestinationSet = new Set(
-    (params.signals.removedDestinations || [])
+    [...(params.signals.removedDestinations || []), ...extractRemovedDestinations(latestUserText)]
       .map((x) => normalizeDestination(x))
       .filter(Boolean)
   );
@@ -1009,6 +1014,8 @@ export function buildSlotStateMachine(params: {
   }
 
   for (const seg of durationState.cityDurations) {
+    const normalizedSegCity = normalizeDestination(seg.city);
+    if (normalizedSegCity && removedDestinationSet.has(normalizedSegCity)) continue;
     const cityKey = slug(seg.city);
     if (!durationState.emitCityDurationSlots.has(cityKey)) continue;
     const slotKey = `slot:duration_city:${cityKey}`;
