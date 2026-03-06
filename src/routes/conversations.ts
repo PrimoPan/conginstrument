@@ -868,9 +868,9 @@ async function buildPlanningStateBundle(params: PlanningStateBundleParams): Prom
     isNewConversation: !!params.isNewConversation,
     taskLifecycle: params.taskLifecycle || null,
     latestUserText: params.latestUserText,
-    tripGoalSummary: clean(params.travelPlanState.trip_goal_summary || params.travelPlanState.summary, 220),
+    tripGoalSummary: cleanInput(params.travelPlanState.trip_goal_summary || params.travelPlanState.summary, 220),
     travelers: Array.isArray(params.travelPlanState.travelers) ? params.travelPlanState.travelers : [],
-    duration: clean(params.travelPlanState.travel_dates_or_duration, 80) || undefined,
+    duration: cleanInput(params.travelPlanState.travel_dates_or_duration, 80) || undefined,
   });
 
   const cognitiveState = buildCognitiveState({
@@ -924,9 +924,9 @@ function buildPlanningStateBundleFallback(params: PlanningStateBundleParams): Pl
       isNewConversation: !!params.isNewConversation,
       taskLifecycle: params.taskLifecycle || null,
       latestUserText: params.latestUserText,
-      tripGoalSummary: clean(params.travelPlanState.trip_goal_summary || params.travelPlanState.summary, 220),
+      tripGoalSummary: cleanInput(params.travelPlanState.trip_goal_summary || params.travelPlanState.summary, 220),
       travelers: Array.isArray(params.travelPlanState.travelers) ? params.travelPlanState.travelers : [],
-      duration: clean(params.travelPlanState.travel_dates_or_duration, 80) || undefined,
+      duration: cleanInput(params.travelPlanState.travel_dates_or_duration, 80) || undefined,
     }),
     cognitiveState: buildCognitiveState({
       conversationId: String(params.conversationId),
