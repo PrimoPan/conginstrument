@@ -555,6 +555,21 @@ const cases: Case[] = [
     },
   },
   {
+    name: "lodging-led city duration phrasing should normalize to clean city names",
+    run: () => {
+      const s = extractIntentSignals("那就按京都为主住6晚，大阪最后1晚，整体还是7天。");
+      assert.deepEqual(s.destinations, ["京都", "大阪"]);
+      assert.deepEqual(
+        (s.cityDurations || []).map((x) => [x.city, x.days]),
+        [
+          ["京都", 6],
+          ["大阪", 1],
+        ]
+      );
+      assert.equal(s.durationDays, 7);
+    },
+  },
+  {
     name: "transit city mention should extract city instead of a transit phrase",
     run: () => {
       const s = extractIntentSignals(
