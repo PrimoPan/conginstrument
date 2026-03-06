@@ -124,6 +124,16 @@ type TaskLifecycleState = {
   endedTaskId?: string;
   reopenedAt?: string;
   updatedAt?: string;
+  resumable?: boolean;
+  resume_required?: boolean;
+};
+
+type PlanningBootstrapHints = {
+  sourceConversationId?: string;
+  destination?: string;
+  keepConsistentText?: string;
+  carryHealthReligion?: boolean;
+  carryStableProfile?: boolean;
 };
 
 type ManualReferenceInput = {
@@ -135,12 +145,15 @@ type ManualReferenceInput = {
 function readTaskLifecycle(raw: any): TaskLifecycleState {
   const statusRaw = cleanInput(raw?.status, 24).toLowerCase();
   const status: "active" | "closed" = statusRaw === "closed" ? "closed" : "active";
+  const resumable = status === "closed";
   return {
     status,
     endedAt: cleanInput(raw?.endedAt, 40) || undefined,
     endedTaskId: cleanInput(raw?.endedTaskId, 120) || undefined,
     reopenedAt: cleanInput(raw?.reopenedAt, 40) || undefined,
     updatedAt: cleanInput(raw?.updatedAt, 40) || undefined,
+    resumable,
+    resume_required: status === "closed",
   };
 }
 
@@ -151,6 +164,8 @@ function closeTaskLifecycle(currentTaskId: string): TaskLifecycleState {
     endedAt: now,
     endedTaskId: cleanInput(currentTaskId, 120) || undefined,
     updatedAt: now,
+    resumable: true,
+    resume_required: true,
   };
 }
 
@@ -162,6 +177,41 @@ function reopenTaskLifecycle(previous: TaskLifecycleState): TaskLifecycleState {
     endedTaskId: previous.endedTaskId,
     reopenedAt: now,
     updatedAt: now,
+    resumable: false,
+    resume_required: false,
+  };
+}
+
+function readPlanningBootstrapHints(raw: any): PlanningBootstrapHints | null {
+  if (!raw || typeof raw !== "object") return null;
+  const sourceConversationId = cleanInput(raw?.sourceConversationId, 80);
+  const destination = cleanInput(raw?.destination, 80);
+  const keepConsistentText = cleanInput(raw?.keepConsistentText, 400);
+  const hasHealthReligion =
+    raw?.carryHealthReligion == null ? true : parseBoolFlag(raw?.carryHealthReligion);
+  const hasStableProfile =
+    raw?.carryStableProfile == null ? hasHealthReligion : parseBoolFlag(raw?.carryStableProfile);
+  if (!sourceConversationId && !destination && !keepConsistentText && hasHealthReligion && hasStableProfile) {
+    return null;
+  }
+  return {
+    sourceConversationId: sourceConversationId || undefined,
+    destination: destination || undefined,
+    keepConsistentText: keepConsistentText || undefined,
+    carryHealthReligion: hasHealthReligion,
+    carryStableProfile: hasStableProfile,
+  };
+}
+
+function taskClosedErrorPayload(taskLifecycle: TaskLifecycleState) {
+  return {
+    error: "task_closed",
+    message: "task_closed",
+    ended_at: taskLifecycle.endedAt,
+    ended_task_id: taskLifecycle.endedTaskId,
+    suggested_actions: ["start_new_task", "resume_task"],
+    resumable: taskLifecycle.resumable !== false,
+    resume_required: true,
   };
 }
 
@@ -588,76 +638,7 @@ async function buildBootstrapGraphAndPlan(params: {
   }
 
   const destination = cleanInput(params.bootstrap.destination, 80);
-  const keepConsistentText = cleanInput(params.bootstrap.keepConsistentText, 420);
-  const keepTextLower = keepConsistentText.toLowerCase();
-  const keepTokens = tokenize(keepConsistentText);
-
-  let sourceConcepts: ConceptItem[] = [];
-  if (params.bootstrap.sourceConversationId) {
-    const sourceOid = parseObjectId(params.bootstrap.sourceConversationId);
-    if (sourceOid) {
-      const sourceConv = await collections.conversations.findOne({
-        _id: sourceOid,
-        userId: params.userId,
-      });
-      if (sourceConv && Array.isArray((sourceConv as any)?.concepts)) {
-        sourceConcepts = ((sourceConv as any).concepts || []) as ConceptItem[];
-      }
-    }
-  }
-
-  const autoCarryConcepts: Array<{ concept: ConceptItem; origin: "explicit" | "auto" }> = [];
-  const softCarryConcepts: Array<{ concept: ConceptItem; reason: string }> = [];
-  const seenAutoCarry = new Set<string>();
-  const seenSoftCarry = new Set<string>();
-  const carryStableProfile = params.bootstrap.carryStableProfile !== false;
-  const carryHealthReligion = params.bootstrap.carryHealthReligion !== false;
-
-  const conceptIdentity = (concept: ConceptItem): string => {
-    const semantic = conceptSemanticKey(concept);
-    const id = cleanInput(concept?.id, 120);
-    return semantic || id || cleanInput(concept?.title, 120);
-  };
-  const pushAuto = (concept: ConceptItem, origin: "explicit" | "auto") => {
-    const key = conceptIdentity(concept);
-    if (!key || seenAutoCarry.has(key)) return;
-    seenAutoCarry.add(key);
-    autoCarryConcepts.push({ concept, origin });
-  };
-  const pushSoft = (concept: ConceptItem, reason: string) => {
-    const key = conceptIdentity(concept);
-    if (!key || seenSoftCarry.has(key) || seenAutoCarry.has(key)) return;
-    seenSoftCarry.add(key);
-    softCarryConcepts.push({ concept, reason });
-  };
-
-  for (const concept of sourceConcepts) {
-    const explicitMatched = keepConsistentText && carriesByKeepText(concept, keepTokens, keepTextLower);
-    if (explicitMatched) {
-      pushAuto(concept, "explicit");
-      continue;
-    }
-
-    if (shouldExcludeCrossTripCarry(concept)) continue;
-
-    if (!carryStableProfile) {
-      if (carryHealthReligion && isCarryHealthReligionConcept(concept)) {
-        pushAuto(concept, "auto");
-      }
-      continue;
-    }
-
-    const policy = inferStableCarryPolicy(concept);
-    if (!policy) continue;
-    if (policy.level === "hard_auto") {
-      pushAuto(concept, "auto");
-    } else {
-      pushSoft(concept, policy.reason);
-    }
-  }
-
   const nodes: CDG["nodes"] = [];
-  const edges: CDG["edges"] = [];
   let destinationNodeId = "";
   if (destination) {
     destinationNodeId = stableGraphItemId("n_dest", destination);
@@ -682,127 +663,20 @@ async function buildBootstrapGraphAndPlan(params: {
     } as any);
   }
 
-  autoCarryConcepts.slice(0, 12).forEach((carry, idx) => {
-    const concept = carry.concept;
-    const semantic = cleanInput((concept as any)?.semanticKey, 180);
-    const title = cleanInput((concept as any)?.title, 120);
-    const nodeId = stableGraphItemId("n_carry", `${semantic || title || "constraint"}_${idx}`);
-    const type = mapConceptKind((concept as any)?.kind);
-    const explicit = carry.origin === "explicit";
-    nodes.push({
-      id: nodeId,
-      type,
-      layer: defaultLayerForType(type) as any,
-      strength: defaultStrengthForType(type) as any,
-      statement: explicit
-        ? title || cleanInput((concept as any)?.description, 120) || `Carry ${idx + 1}`
-        : isEnglishLocale(params.locale)
-        ? `Carry-over candidate: ${title || cleanInput((concept as any)?.description, 100) || `Item ${idx + 1}`}`
-        : `待确认沿用:${title || cleanInput((concept as any)?.description, 100) || `条目${idx + 1}`}`,
-      status: explicit ? "confirmed" : "proposed",
-      confidence: explicit
-        ? Math.max(0.56, Math.min(0.98, Number((concept as any)?.score) || 0.82))
-        : Math.max(0.5, Math.min(0.88, Number((concept as any)?.score) || 0.74)),
-      importance: explicit
-        ? Math.max(0.56, Math.min(0.98, Number((concept as any)?.score) || 0.82))
-        : Math.max(0.5, Math.min(0.88, Number((concept as any)?.score) || 0.74)),
-      key: semantic || `slot:freeform:${type}:${slugToken(title || `carry_${idx + 1}`)}`,
-      sourceMsgIds: uniqValues(
-        explicit
-          ? [
-              "manual_user_bootstrap",
-              "planning_bootstrap",
-              `transfer_from:${cleanInput(params.bootstrap?.sourceConversationId, 24) || "history"}`,
-            ]
-          : [
-              "transfer_pattern_candidate",
-              "planning_bootstrap",
-              `transfer_from:${cleanInput(params.bootstrap?.sourceConversationId, 24) || "history"}`,
-            ],
-        8
-      ),
-      validation_status: explicit ? "resolved" : "pending",
-      value: {
-        provenance: "planning_bootstrap",
-        transfer_from: cleanInput(params.bootstrap?.sourceConversationId, 80) || undefined,
-        transfer_reason: explicit ? "explicit_user_keep_consistency" : "transferred_pattern_based",
-        conceptState: {
-          validation_status: explicit ? "resolved" : "pending",
-        },
-      },
-    } as any);
-    if (destinationNodeId) {
-      edges.push({
-        id: stableGraphItemId("e_boot", `${nodeId}->${destinationNodeId}:constraint`),
-        from: nodeId,
-        to: destinationNodeId,
-        type: "constraint",
-        confidence: 0.84,
-      });
-    }
-  });
-
-  if (keepConsistentText && !autoCarryConcepts.length) {
-    const nodeId = stableGraphItemId("n_keep", keepConsistentText);
-    nodes.push({
-      id: nodeId,
-      type: "constraint",
-      layer: "requirement",
-      strength: "soft",
-      statement: isEnglishLocale(params.locale)
-        ? `Keep consistent: ${keepConsistentText}`
-        : `保持一致:${keepConsistentText}`,
-      status: "confirmed",
-      confidence: 0.8,
-      importance: 0.78,
-      key: `slot:constraint:limiting:other:${slugToken(keepConsistentText, 40) || "carry"}`,
-      sourceMsgIds: ["manual_user_bootstrap", "planning_bootstrap"],
-      validation_status: "resolved",
-      value: {
-        provenance: "planning_bootstrap",
-        conceptState: {
-          validation_status: "resolved",
-        },
-      },
-    } as any);
-    if (destinationNodeId) {
-      edges.push({
-        id: stableGraphItemId("e_boot", `${nodeId}->${destinationNodeId}:constraint`),
-        from: nodeId,
-        to: destinationNodeId,
-        type: "constraint",
-        confidence: 0.78,
-      });
-    }
-  }
-
   const graph: CDG = {
     id: params.conversationId,
     version: 0,
-    nodes: nodes.slice(0, 32),
-    edges: edges.slice(0, 48),
+    nodes: nodes.slice(0, 8),
+    edges: [],
   };
-
-  const carryTitles = autoCarryConcepts
-    .map((x) => cleanInput((x.concept as any)?.title, 120))
-    .filter(Boolean)
-    .slice(0, 8);
-  const constraints = carryTitles;
-  if (keepConsistentText && !carryTitles.length) constraints.push(keepConsistentText);
-  const softCarryQuestions = uniqValues(
-    softCarryConcepts
-      .slice(0, 8)
-      .map((x) => buildSoftCarryQuestion({ locale: params.locale, concept: x.concept })),
-    8
-  );
 
   const summary = destination
     ? isEnglishLocale(params.locale)
-      ? `New trip to ${destination}. Reusable baseline constraints are preloaded, with additional carry-over items pending confirmation.`
-      : `已创建前往${destination}的新旅行规划，并预置可复用约束；部分跨行程信息待你确认后沿用。`
+      ? `New trip to ${destination}. Start the first turn to establish current-task rules before reviewing past motifs.`
+      : `已创建前往${destination}的新旅行规划。请先开始第一轮对话，再评审历史规则建议。`
     : isEnglishLocale(params.locale)
-    ? "A new trip planning session is created with reusable constraints preloaded."
-    : "已创建新的旅行规划会话，并预置可复用约束。";
+    ? "A new trip planning session is created. Start chatting to establish the current task."
+    : "已创建新的旅行规划会话，请先开始对话以建立当前任务语义。";
   const autoTitle = destination
     ? isEnglishLocale(params.locale)
       ? `Trip Plan · ${destination}`
@@ -813,8 +687,6 @@ async function buildBootstrapGraphAndPlan(params: {
     taskId: params.conversationId,
     nowIso,
     destinationScope: destination ? [destination] : [],
-    constraints,
-    openQuestions: softCarryQuestions,
     summary,
   });
 
@@ -884,6 +756,35 @@ async function computeTravelPlanState(params: {
   });
 }
 
+function buildTransferEvaluationTravelPlan(params: {
+  locale: AppLocale;
+  conversationId: string;
+  graph: CDG;
+  concepts?: any[];
+  motifs?: any[];
+  previous?: TravelPlanState | null;
+  recentTurns: Array<{ createdAt?: Date | string; userText: string; assistantText: string }>;
+  currentUserText: string;
+  currentAssistantText: string;
+}): TravelPlanState {
+  return buildTravelPlanState({
+    locale: params.locale,
+    graph: params.graph,
+    concepts: Array.isArray(params.concepts) ? params.concepts : [],
+    motifs: Array.isArray(params.motifs) ? params.motifs : [],
+    taskId: params.conversationId,
+    turns: [
+      ...(params.recentTurns || []),
+      {
+        createdAt: new Date().toISOString(),
+        userText: params.currentUserText,
+        assistantText: params.currentAssistantText,
+      },
+    ],
+    previous: params.previous || null,
+  });
+}
+
 type PlanningStateBundle = {
   taskDetection: TaskDetection;
   cognitiveState: CognitiveState;
@@ -903,6 +804,9 @@ async function buildPlanningStateBundle(params: {
   previousTravelPlan?: TravelPlanState | null;
   motifTransferState?: MotifTransferState | null;
   persistentMotifLibrary?: Awaited<ReturnType<typeof listUserMotifLibrary>>;
+  taskLifecycle?: TaskLifecycleState | null;
+  latestUserText?: string;
+  isNewConversation?: boolean;
 }): Promise<PlanningStateBundle> {
   const convs = await collections.conversations
     .find({ userId: params.userId })
@@ -947,6 +851,12 @@ async function buildPlanningStateBundle(params: {
     locale: params.locale,
     currentDestinations: currentDestinationScope,
     previousDestinations: previousDestinationScope,
+    isNewConversation: !!params.isNewConversation,
+    taskLifecycle: params.taskLifecycle || null,
+    latestUserText: params.latestUserText,
+    tripGoalSummary: clean(params.travelPlanState.trip_goal_summary || params.travelPlanState.summary, 220),
+    travelers: Array.isArray(params.travelPlanState.travelers) ? params.travelPlanState.travelers : [],
+    duration: clean(params.travelPlanState.travel_dates_or_duration, 80) || undefined,
   });
 
   const cognitiveState = buildCognitiveState({
@@ -984,6 +894,7 @@ async function persistConversationModel(params: {
   forceTaskSwitch?: boolean;
   previousMotifs?: any[];
   turnNumber?: number;
+  latestUserText?: string;
 }): Promise<PersistedConversationSnapshot> {
   const motifsWithTransfer = applyTransferStateToMotifs({
     motifs: annotateMotifExtractionMeta({
@@ -1021,6 +932,8 @@ async function persistConversationModel(params: {
     previousTravelPlan: params.previousTravelPlan || null,
     motifTransferState: params.motifTransferState || null,
     persistentMotifLibrary,
+    taskLifecycle: params.taskLifecycle || null,
+    latestUserText: params.latestUserText,
   });
   await collections.conversations.updateOne(
     { _id: params.conversationId, userId: params.userId },
@@ -1114,6 +1027,7 @@ async function refreshConversationTransferProjection(params: {
   conv: any;
   motifTransferState: MotifTransferState;
   taskLifecycle?: TaskLifecycleState;
+  latestUserText?: string;
 }) {
   const model = buildCognitiveModel({
     graph: params.conv.graph,
@@ -1150,6 +1064,8 @@ async function refreshConversationTransferProjection(params: {
     previousTravelPlan: (params.conv as any).travelPlanState || null,
     motifTransferState: params.motifTransferState,
     persistentMotifLibrary: await listUserMotifLibrary(params.userId),
+    taskLifecycle: params.taskLifecycle || null,
+    latestUserText: params.latestUserText,
   });
   const now = new Date();
   await collections.conversations.updateOne(
@@ -1207,6 +1123,7 @@ convRouter.post("/", async (req: AuthedRequest, res) => {
   const userId = req.userId!;
   const locale = normalizeLocale(req.body?.locale);
   const planningBootstrap = parsePlanningBootstrap(req.body?.planningBootstrap);
+  const planningBootstrapHints = readPlanningBootstrapHints(planningBootstrap);
   const defaultTitle = isEnglishLocale(locale) ? "New Conversation" : "新对话";
   const requestedTitle = cleanInput(req.body?.title || defaultTitle, 80) || defaultTitle;
   const now = new Date();
@@ -1230,6 +1147,7 @@ convRouter.post("/", async (req: AuthedRequest, res) => {
     validationStatus: "unasked",
     motifTransferState: readMotifTransferState(null),
     taskLifecycle: readTaskLifecycle(null),
+    planningBootstrapHints,
     travelPlanState: defaultTravelPlanState({
       locale,
       taskId: "temp",
@@ -1263,6 +1181,7 @@ convRouter.post("/", async (req: AuthedRequest, res) => {
         validationStatus: "unasked",
         motifTransferState: readMotifTransferState(null),
         taskLifecycle: readTaskLifecycle(null),
+        planningBootstrapHints,
         travelPlanState: bootstrap.travelPlanState,
       },
     }
@@ -1306,6 +1225,8 @@ convRouter.post("/", async (req: AuthedRequest, res) => {
     previousTravelPlan: null,
     motifTransferState,
     persistentMotifLibrary,
+    taskLifecycle,
+    isNewConversation: true,
   });
   await collections.conversations.updateOne(
     { _id: inserted.insertedId, userId },
@@ -1383,6 +1304,7 @@ convRouter.get("/:id", async (req: AuthedRequest, res) => {
     previousTravelPlan: (conv as any).travelPlanState || null,
     motifTransferState,
     persistentMotifLibrary,
+    taskLifecycle,
   });
 
   res.json({
@@ -1397,6 +1319,86 @@ convRouter.get("/:id", async (req: AuthedRequest, res) => {
     portfolioDocumentState: (conv as any).portfolioDocumentState || planning.portfolioDocumentState,
     motifTransferState,
     taskLifecycle,
+  });
+});
+
+convRouter.post("/:id/task/resume", async (req: AuthedRequest, res) => {
+  const userId = req.userId!;
+  const id = req.params.id;
+  const oid = parseObjectId(id);
+  if (!oid) return res.status(400).json({ error: "invalid conversation id" });
+
+  const conv = await collections.conversations.findOne({ _id: oid, userId });
+  if (!conv) return res.status(404).json({ error: "conversation not found" });
+  const locale = normalizeLocale((conv as any).locale);
+  const nextLifecycle = reopenTaskLifecycle(readTaskLifecycle((conv as any).taskLifecycle));
+  const now = new Date();
+
+  await collections.conversations.updateOne(
+    { _id: oid, userId },
+    {
+      $set: {
+        taskLifecycle: nextLifecycle,
+        updatedAt: now,
+      },
+    }
+  );
+
+  const refreshedConv = await collections.conversations.findOne({ _id: oid, userId });
+  if (!refreshedConv) return res.status(500).json({ error: "conversation refresh failed" });
+
+  const model = buildCognitiveModel({
+    graph: refreshedConv.graph,
+    prevConcepts: refreshedConv.concepts || [],
+    baseConcepts: refreshedConv.concepts || [],
+    baseMotifs: (refreshedConv as any).motifs || [],
+    baseMotifLinks: (refreshedConv as any).motifLinks || [],
+    baseContexts: (refreshedConv as any).contexts || [],
+    locale,
+  });
+  const travelPlanState = (refreshedConv as any).travelPlanState as TravelPlanState;
+  const motifTransferState = readMotifTransferState((refreshedConv as any).motifTransferState);
+  model.motifs = applyTransferStateToMotifs({
+    motifs: model.motifs || [],
+    state: motifTransferState,
+  });
+  model.motifGraph = { ...(model.motifGraph || { motifs: [], motifLinks: [] }), motifs: model.motifs };
+  const planning = await buildPlanningStateBundle({
+    conversationId: oid,
+    userId,
+    locale,
+    model,
+    travelPlanState,
+    previousTravelPlan: (refreshedConv as any).travelPlanState || null,
+    motifTransferState,
+    persistentMotifLibrary: await listUserMotifLibrary(userId),
+    taskLifecycle: nextLifecycle,
+  });
+
+  await collections.conversations.updateOne(
+    { _id: oid, userId },
+    {
+      $set: {
+        taskDetection: planning.taskDetection,
+        cognitiveState: planning.cognitiveState,
+        portfolioDocumentState: planning.portfolioDocumentState,
+        updatedAt: now,
+      },
+    }
+  );
+
+  res.json({
+    conversationId: id,
+    title: refreshedConv.title,
+    locale,
+    systemPrompt: refreshedConv.systemPrompt,
+    ...modelPayload(model),
+    travelPlanState,
+    taskDetection: planning.taskDetection,
+    cognitiveState: planning.cognitiveState,
+    portfolioDocumentState: planning.portfolioDocumentState,
+    motifTransferState,
+    taskLifecycle: nextLifecycle,
   });
 });
 
@@ -1478,6 +1480,7 @@ convRouter.put("/:id/graph", async (req: AuthedRequest, res) => {
     previousTravelPlan: (conv as any).travelPlanState || null,
     motifTransferState,
     persistentMotifLibrary: await listUserMotifLibrary(userId),
+    taskLifecycle,
   });
 
   const now = new Date();
@@ -1616,6 +1619,7 @@ convRouter.put("/:id/concepts", async (req: AuthedRequest, res) => {
     previousTravelPlan: (conv as any).travelPlanState || null,
     motifTransferState,
     persistentMotifLibrary: await listUserMotifLibrary(userId),
+    taskLifecycle,
   });
 
   const now = new Date();
@@ -1746,6 +1750,7 @@ async function handleTravelPlanPdfExport(req: AuthedRequest, res: any) {
       previousTravelPlan: (conv as any).travelPlanState || null,
       motifTransferState,
       persistentMotifLibrary: await listUserMotifLibrary(userId),
+      taskLifecycle,
     });
 
     const now = new Date();
@@ -1822,10 +1827,10 @@ convRouter.post("/:id/turn", async (req: AuthedRequest, res) => {
   const locale = normalizeLocale((conv as any).locale);
   let motifTransferState = readMotifTransferState((conv as any).motifTransferState);
   let taskLifecycle = readTaskLifecycle((conv as any).taskLifecycle);
+  const retrievalHints = readPlanningBootstrapHints((conv as any).planningBootstrapHints);
   const manualReferences = parseManualReferences(req.body?.manualReferences);
-  const reopenFromClosed = taskLifecycle.status === "closed";
-  if (reopenFromClosed) {
-    taskLifecycle = reopenTaskLifecycle(taskLifecycle);
+  if (taskLifecycle.status === "closed") {
+    return res.status(409).json(taskClosedErrorPayload(taskLifecycle));
   }
 
   // recent turns：取最近 10 轮（更像“有记忆”）
@@ -1911,9 +1916,9 @@ convRouter.post("/:id/turn", async (req: AuthedRequest, res) => {
       locale,
       motifTransferState,
       taskLifecycle,
-      forceTaskSwitch: reopenFromClosed,
       previousMotifs: (conv as any).motifs || [],
       turnNumber,
+      latestUserText: userText,
     });
 
     return res.json({
@@ -1965,11 +1970,30 @@ convRouter.post("/:id/turn", async (req: AuthedRequest, res) => {
   if (shouldEvaluateTransferRecommendations({ priorTurnCount: recent.length, motifTransferState })) {
     const motifLibrary = await listUserMotifLibrary(userId);
     const currentTaskIdForRetrieval = currentTaskId((conv as any).travelPlanState || null, String(oid));
+    const previewTravelPlan = buildTransferEvaluationTravelPlan({
+      locale,
+      conversationId: String(oid),
+      graph: model.graph,
+      concepts: model.concepts,
+      motifs: model.motifs,
+      previous: (conv as any).travelPlanState || null,
+      recentTurns: recent
+        .slice()
+        .reverse()
+        .map((t) => ({
+          createdAt: t.createdAt,
+          userText: t.userText,
+          assistantText: t.assistantText,
+        })),
+      currentUserText: userText,
+      currentAssistantText: out.assistant_text,
+    });
     const recommendations = buildTransferRecommendations({
       locale,
       conversationId: String(oid),
       currentTaskId: currentTaskIdForRetrieval,
-      travelPlanState: (conv as any).travelPlanState || null,
+      travelPlanState: previewTravelPlan,
+      retrievalHints,
       motifLibrary,
       existingState: motifTransferState,
       maxCount: 4,
@@ -2006,9 +2030,9 @@ convRouter.post("/:id/turn", async (req: AuthedRequest, res) => {
     locale,
     motifTransferState,
     taskLifecycle,
-    forceTaskSwitch: reopenFromClosed,
     previousMotifs: (conv as any).motifs || [],
     turnNumber,
+    latestUserText: userText,
   });
 
   res.json({
@@ -2045,10 +2069,10 @@ convRouter.post("/:id/turn/stream", async (req: AuthedRequest, res) => {
   const locale = normalizeLocale((conv as any).locale);
   let motifTransferState = readMotifTransferState((conv as any).motifTransferState);
   let taskLifecycle = readTaskLifecycle((conv as any).taskLifecycle);
+  const retrievalHints = readPlanningBootstrapHints((conv as any).planningBootstrapHints);
   const manualReferences = parseManualReferences(req.body?.manualReferences);
-  const reopenFromClosed = taskLifecycle.status === "closed";
-  if (reopenFromClosed) {
-    taskLifecycle = reopenTaskLifecycle(taskLifecycle);
+  if (taskLifecycle.status === "closed") {
+    return res.status(409).json(taskClosedErrorPayload(taskLifecycle));
   }
 
   // recent turns：取最近 10 轮
@@ -2135,9 +2159,9 @@ convRouter.post("/:id/turn/stream", async (req: AuthedRequest, res) => {
       locale,
       motifTransferState,
       taskLifecycle,
-      forceTaskSwitch: reopenFromClosed,
       previousMotifs: (conv as any).motifs || [],
       turnNumber,
+      latestUserText: userText,
     });
 
     res.status(200);
@@ -2244,11 +2268,30 @@ convRouter.post("/:id/turn/stream", async (req: AuthedRequest, res) => {
     if (shouldEvaluateTransferRecommendations({ priorTurnCount: recent.length, motifTransferState })) {
       const motifLibrary = await listUserMotifLibrary(userId);
       const currentTaskIdForRetrieval = currentTaskId((conv as any).travelPlanState || null, String(oid));
+      const previewTravelPlan = buildTransferEvaluationTravelPlan({
+        locale,
+        conversationId: String(oid),
+        graph: model.graph,
+        concepts: model.concepts,
+        motifs: model.motifs,
+        previous: (conv as any).travelPlanState || null,
+        recentTurns: recent
+          .slice()
+          .reverse()
+          .map((t) => ({
+            createdAt: t.createdAt,
+            userText: t.userText,
+            assistantText: t.assistantText,
+          })),
+        currentUserText: userText,
+        currentAssistantText: out.assistant_text,
+      });
       const recommendations = buildTransferRecommendations({
         locale,
         conversationId: String(oid),
         currentTaskId: currentTaskIdForRetrieval,
-        travelPlanState: (conv as any).travelPlanState || null,
+        travelPlanState: previewTravelPlan,
+        retrievalHints,
         motifLibrary,
         existingState: motifTransferState,
         maxCount: 4,
@@ -2285,9 +2328,9 @@ convRouter.post("/:id/turn/stream", async (req: AuthedRequest, res) => {
       locale,
       motifTransferState,
       taskLifecycle,
-      forceTaskSwitch: reopenFromClosed,
       previousMotifs: (conv as any).motifs || [],
       turnNumber,
+      latestUserText: userText,
     });
 
     sseSend(res, "done", {
@@ -2342,11 +2385,30 @@ convRouter.post("/:id/turn/stream", async (req: AuthedRequest, res) => {
         if (shouldEvaluateTransferRecommendations({ priorTurnCount: recent.length, motifTransferState })) {
           const motifLibrary = await listUserMotifLibrary(userId);
           const currentTaskIdForRetrieval = currentTaskId((conv as any).travelPlanState || null, String(oid));
+          const previewTravelPlan = buildTransferEvaluationTravelPlan({
+            locale,
+            conversationId: String(oid),
+            graph: model2.graph,
+            concepts: model2.concepts,
+            motifs: model2.motifs,
+            previous: (conv as any).travelPlanState || null,
+            recentTurns: recent
+              .slice()
+              .reverse()
+              .map((t) => ({
+                createdAt: t.createdAt,
+                userText: t.userText,
+                assistantText: t.assistantText,
+              })),
+            currentUserText: userText,
+            currentAssistantText: out2.assistant_text,
+          });
           const recommendations = buildTransferRecommendations({
             locale,
             conversationId: String(oid),
             currentTaskId: currentTaskIdForRetrieval,
-            travelPlanState: (conv as any).travelPlanState || null,
+            travelPlanState: previewTravelPlan,
+            retrievalHints,
             motifLibrary,
             existingState: motifTransferState,
             maxCount: 4,
@@ -2383,9 +2445,9 @@ convRouter.post("/:id/turn/stream", async (req: AuthedRequest, res) => {
           locale,
           motifTransferState,
           taskLifecycle,
-          forceTaskSwitch: reopenFromClosed,
           previousMotifs: (conv as any).motifs || [],
           turnNumber,
+          latestUserText: userText,
         });
 
         sseSend(res, "done", {

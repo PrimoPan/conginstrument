@@ -12,7 +12,8 @@
     "test:motif-transfer-e2e": "tsx src/services/__tests__/motifTransfer.e2e.ts",
     "test:planning-alignment": "tsx src/services/__tests__/planningAlignment.regression.ts",
     "test:travel-plan-pdf": "tsx src/services/__tests__/travelPlanPdf.regression.ts",
-    "test:algorithm-v3": "tsx src/services/__tests__/algorithmV3.regression.ts"
+    "test:algorithm-v3": "tsx src/services/__tests__/algorithmV3.regression.ts",
+    "test:new-task-boundary": "tsx src/services/__tests__/newTaskBoundary.regression.ts"
   },
   "dependencies": {
     "axios": "^1.13.5",

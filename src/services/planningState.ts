@@ -9,6 +9,23 @@ export type TaskDetection = {
   reason: string;
   signals: string[];
   mode: "single_conversation" | "new_task_detected";
+  confidence: number;
+  switch_reason_code:
+    | "closed_task"
+    | "new_conversation"
+    | "explicit_restart"
+    | "destination_switch"
+    | "continuous";
+};
+
+export type PlanningTaskLifecycle = {
+  status: "active" | "closed";
+  endedAt?: string;
+  endedTaskId?: string;
+  reopenedAt?: string;
+  updatedAt?: string;
+  resumable?: boolean;
+  resume_required?: boolean;
 };
 
 export type CognitiveStateConcept = {
@@ -422,22 +439,96 @@ export function buildTaskDetection(params: {
   locale: AppLocale;
   currentDestinations: string[];
   previousDestinations?: string[];
+  isNewConversation?: boolean;
+  taskLifecycle?: PlanningTaskLifecycle | null;
+  latestUserText?: string;
+  tripGoalSummary?: string;
+  travelers?: string[];
+  duration?: string;
 }): TaskDetection {
   const current = uniqStrings(params.currentDestinations || [], 10);
   const previous = uniqStrings(params.previousDestinations || [], 10);
   const overlap = current.filter((d) => previous.includes(d));
+  const latestUserText = clean(params.latestUserText, 220).toLowerCase();
+  const restartText = [latestUserText, clean(params.tripGoalSummary, 220).toLowerCase()]
+    .filter(Boolean)
+    .join(" ");
+  const explicitRestart =
+    /(重新规划|新任务|下一趟|再规划一趟|another trip|new task|start over|plan a new trip)/i.test(restartText);
   const switched = previous.length > 0 && current.length > 0 && overlap.length === 0;
+
+  if (params.taskLifecycle?.status === "closed") {
+    return {
+      current_task_id: params.conversationId,
+      is_task_switch: true,
+      reason: tr(
+        params.locale,
+        "当前任务已结束，继续操作应显式恢复或创建新任务。",
+        "The current task is closed. Continuing requires an explicit resume or a new task."
+      ),
+      signals: [tr(params.locale, "任务已结束", "Task is closed")],
+      mode: "new_task_detected",
+      confidence: 1,
+      switch_reason_code: "closed_task",
+    };
+  }
+
+  if (params.isNewConversation) {
+    return {
+      current_task_id: params.conversationId,
+      is_task_switch: true,
+      reason: tr(
+        params.locale,
+        "当前会话刚建立，视为一个新的任务起点。",
+        "This conversation was just created and is treated as a new task entry point."
+      ),
+      signals: [tr(params.locale, "新建会话", "New conversation")],
+      mode: "new_task_detected",
+      confidence: 1,
+      switch_reason_code: "new_conversation",
+    };
+  }
+
+  if (explicitRestart) {
+    return {
+      current_task_id: params.conversationId,
+      is_task_switch: true,
+      reason: tr(
+        params.locale,
+        "用户表达了重新开始或规划下一任务的语义。",
+        "The user explicitly indicated a restart or a next task."
+      ),
+      signals: [tr(params.locale, "显式重启语义", "Explicit restart intent")],
+      mode: "new_task_detected",
+      confidence: 0.95,
+      switch_reason_code: "explicit_restart",
+    };
+  }
+
+  if (switched) {
+    return {
+      current_task_id: params.conversationId,
+      is_task_switch: true,
+      reason: tr(
+        params.locale,
+        "目的地集合已切换，当前更像新的任务上下文。",
+        "The destination set changed with no overlap, so this now looks like a new task context."
+      ),
+      signals: [tr(params.locale, "目的地无重叠", "No destination overlap")],
+      mode: "new_task_detected",
+      confidence: 0.82,
+      switch_reason_code: "destination_switch",
+    };
+  }
 
   return {
     current_task_id: params.conversationId,
-    is_task_switch: switched,
-    reason: switched
-      ? tr(params.locale, "目的地集合已切换，可能进入新任务。", "Destination set changed with no overlap, likely a new task.")
-      : tr(params.locale, "当前仍按单会话任务持续更新。", "Task continues within the same conversation."),
-    signals: switched
-      ? [tr(params.locale, "目的地无重叠", "No destination overlap")]
-      : [tr(params.locale, "会话上下文连续", "Conversation context remains continuous")],
-    mode: switched ? "new_task_detected" : "single_conversation",
+    is_task_switch: false,
+    reason: tr(params.locale, "当前仍按单会话任务持续更新。", "Task continues within the same conversation."),
+    signals: [tr(params.locale, "会话上下文连续", "Conversation context remains continuous")],
+    mode: "single_conversation",
+    confidence: 0.36,
+    switch_reason_code: "continuous",
   };
 }
 

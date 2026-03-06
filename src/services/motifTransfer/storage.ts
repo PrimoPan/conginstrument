@@ -99,6 +99,40 @@ function buildVersionId(motifTypeId: string, version: number) {
   return `mv_${safe || "motif"}_${version}`;
 }
 
+export function motifVersionMeaningfullyChanged(params: {
+  existing?: {
+    title?: string;
+    dependency?: string;
+    reusable_description?: string;
+    abstraction_levels?: {
+      L1?: string;
+      L2?: string;
+      L3?: string;
+    };
+  } | null;
+  next: {
+    title?: string;
+    dependency?: string;
+    reusable_description?: string;
+    abstraction_levels?: {
+      L1?: string;
+      L2?: string;
+      L3?: string;
+    };
+  };
+}) {
+  const current = params.existing || null;
+  const next = params.next;
+  return (
+    clean(current?.title, 180) !== clean(next?.title, 180) ||
+    clean(current?.dependency, 40) !== clean(next?.dependency, 40) ||
+    clean(current?.reusable_description, 260) !== clean(next?.reusable_description, 260) ||
+    clean(current?.abstraction_levels?.L1, 180) !== clean(next?.abstraction_levels?.L1, 180) ||
+    clean(current?.abstraction_levels?.L2, 180) !== clean(next?.abstraction_levels?.L2, 180) ||
+    clean(current?.abstraction_levels?.L3, 180) !== clean(next?.abstraction_levels?.L3, 180)
+  );
+}
+
 export async function listUserMotifLibrary(userId: ObjectId): Promise<MotifLibraryEntryPayload[]> {
   const docs = await collections.motifLibrary
     .find({ userId })
@@ -168,6 +202,10 @@ export async function confirmMotifLibraryEntries(params: {
       created_at: nowText,
       updated_at: nowText,
     };
+    const shouldAppendVersion = motifVersionMeaningfullyChanged({
+      existing: prevVersion,
+      next: version,
+    });
 
     if (!existing) {
       await collections.motifLibrary.insertOne({
@@ -194,7 +232,7 @@ export async function confirmMotifLibraryEntries(params: {
         [...(Array.isArray(existing.source_task_ids) ? existing.source_task_ids : []), clean(params.taskId, 80)].filter(Boolean),
         20
       );
-      const nextVersions = [...(existing.versions || []), version].slice(-60);
+      const nextVersions = shouldAppendVersion ? [...(existing.versions || []), version].slice(-60) : existing.versions || [];
       await collections.motifLibrary.updateOne(
         { _id: existing._id, userId: params.userId },
         {
@@ -203,7 +241,7 @@ export async function confirmMotifLibraryEntries(params: {
             dependency: clean((motif as any)?.dependencyClass || motif.relation, 40) || "enable",
             abstraction_levels: chosenLevels,
             status: version.status,
-            current_version_id: version.version_id,
+            current_version_id: shouldAppendVersion ? version.version_id : clean(existing.current_version_id, 120),
             versions: nextVersions,
             source_task_ids: mergedTaskIds,
             updatedAt: now,

@@ -61,6 +61,10 @@ function activeTaskText(plan: TravelPlanState | null | undefined): string {
   return parts.join(" ");
 }
 
+function hintText(input: any): string {
+  return clean(input, 220);
+}
+
 function taskStructureSignals(plan: TravelPlanState | null | undefined): string[] {
   const text = activeTaskText(plan);
   const out: string[] = [];
@@ -71,6 +75,10 @@ function taskStructureSignals(plan: TravelPlanState | null | undefined): string[
   if (/安全|safety|治安|risk|危险/i.test(text)) out.push("safety");
   if (/交通|metro|subway|logistics|换乘|transfer/i.test(text)) out.push("logistics");
   if (/饮食|diet|halal|kosher|vegan|vegetarian/i.test(text)) out.push("diet");
+  if (/健康|health|身体|无障碍|mobility|行动|轮椅/i.test(text)) out.push("health");
+  if (/宗教|religion|礼拜|church|mosque|temple/i.test(text)) out.push("religion");
+  if (/语言|language|英文|中文|translation|翻译/i.test(text)) out.push("language");
+  if (/行动不便|mobility|stairs|步行距离|wheelchair/i.test(text)) out.push("mobility");
   return Array.from(new Set(out));
 }
 
@@ -91,6 +99,10 @@ function entryStructureSignals(params: {
   if (/安全|safety|治安|risk|危险/i.test(text)) out.push("safety");
   if (/交通|metro|subway|logistics|换乘|transfer/i.test(text)) out.push("logistics");
   if (/饮食|diet|halal|kosher|vegan|vegetarian/i.test(text)) out.push("diet");
+  if (/健康|health|身体|无障碍|行动不便|mobility|轮椅/i.test(text)) out.push("health");
+  if (/宗教|religion|礼拜|church|mosque|temple/i.test(text)) out.push("religion");
+  if (/语言|language|英文|中文|translation|翻译/i.test(text)) out.push("language");
+  if (/行动不便|mobility|stairs|步行距离|wheelchair/i.test(text)) out.push("mobility");
   if (clean(params.versionUpdatedAt, 40)) out.push("has_recent_version");
   return Array.from(new Set(out));
 }
@@ -147,15 +159,24 @@ export function buildTransferRecommendations(params: {
   conversationId: string;
   currentTaskId: string;
   travelPlanState?: TravelPlanState | null;
+  retrievalHints?: {
+    keepConsistentText?: string;
+    carryHealthReligion?: boolean;
+    carryStableProfile?: boolean;
+  };
   motifLibrary: MotifLibraryEntryPayload[];
   existingState?: MotifTransferState;
   maxCount?: number;
 }): MotifTransferRecommendation[] {
   const now = new Date().toISOString();
   const algoV3 = isAlgoV3Enabled();
-  const activeText = activeTaskText(params.travelPlanState || null);
+  const activeText = [activeTaskText(params.travelPlanState || null), hintText(params.retrievalHints?.keepConsistentText)]
+    .filter(Boolean)
+    .join(" ");
   const activeTokens = toTokens(activeText);
   const taskSignals = taskStructureSignals(params.travelPlanState || null);
+  const carryStableProfile = params.retrievalHints?.carryStableProfile !== false;
+  const carryHealthReligion = params.retrievalHints?.carryHealthReligion !== false;
   const maxCount = Math.max(1, Math.min(Number(params.maxCount || 4), 6));
   const scoredCandidates = (params.motifLibrary || [])
     .map((entry) => {
@@ -177,6 +198,18 @@ export function buildTransferRecommendations(params: {
         entryText,
         versionUpdatedAt: version?.updated_at,
       });
+      const stableProfilePenalty =
+        !carryStableProfile &&
+        structureSignals.some((signal) =>
+          ["health", "religion", "language", "mobility", "diet", "safety"].includes(signal)
+        )
+          ? 0.18
+          : 0;
+      const healthReligionPenalty =
+        !carryHealthReligion &&
+        structureSignals.some((signal) => signal === "health" || signal === "religion")
+          ? 0.18
+          : 0;
       const structuralMatch = overlapScoreArray(taskSignals, structureSignals);
       const adopted = Number(entry.usage_stats?.adopted_count || 0);
       const ignored = Number(entry.usage_stats?.ignored_count || 0);
@@ -196,6 +229,8 @@ export function buildTransferRecommendations(params: {
                 structuralMatch * 0.2 +
                 usagePrior * 0.18 -
                 stalenessPenalty * 0.1 -
+                stableProfilePenalty -
+                healthReligionPenalty -
                 statusPenalty
             )
           )
@@ -203,9 +238,11 @@ export function buildTransferRecommendations(params: {
             0,
             Math.min(
               1,
-              semanticMatch * 0.62 +
+                semanticMatch * 0.62 +
                 Number(entry?.usage_stats?.transfer_confidence || 0.7) * 0.32 +
                 (entry.usage_stats?.adopted_count || 0) * 0.01 -
+                stableProfilePenalty -
+                healthReligionPenalty -
                 statusPenalty
             )
           );
