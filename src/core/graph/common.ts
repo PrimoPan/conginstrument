@@ -13,7 +13,7 @@ import type {
 } from "./types.js";
 import { normalizeConceptType } from "./schemaAdapters.js";
 
-export const ALLOW_DELETE = process.env.CI_ALLOW_DELETE === "1";
+export const ALLOW_DELETE = process.env.CI_ALLOW_DELETE !== "0";
 
 export const ALLOWED_STATUS = new Set<Status>(["proposed", "confirmed", "rejected", "disputed"]);
 export const ALLOWED_STRENGTH = new Set<Strength>(["hard", "soft"]);

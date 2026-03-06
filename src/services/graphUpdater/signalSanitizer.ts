@@ -374,7 +374,7 @@ export function sanitizeIntentSignals(input: IntentSignals): IntentSignals {
     const travelSum = travelSegments.reduce((acc, x) => acc + (Number(x.days) || 0), 0);
     const hasMeetingOnly = travelSegments.length === 0 && out.cityDurations.some((x) => x.kind === "meeting");
     const hasDurationUpdateCue = !!out.hasDurationUpdateCue;
-    if (!hasMeetingOnly && travelCityCount >= 2 && travelSum > 0) {
+    if (!out.hasPartialDurationAllocation && !hasMeetingOnly && travelCityCount >= 2 && travelSum > 0) {
       if (!out.durationDays || (!hasDurationUpdateCue && out.durationDays < travelSum)) {
         out.durationDays = travelSum;
         out.durationEvidence = travelSegments.map((x) => `${x.city}${x.days}天`).join(" + ");

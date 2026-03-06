@@ -114,7 +114,7 @@ function compactCityDurations(
     (x) =>
       x !== maxSeg &&
       x.days <= 2 &&
-      (isDetailLikeDurationEvidence(x.evidence) || x.kind === "travel")
+      isDetailLikeDurationEvidence(x.evidence)
   );
   if (maxSeg && detailSegments.length && maxSeg.days >= sumAll - 2) {
     return [maxSeg];
@@ -222,6 +222,11 @@ function buildDurationState(signals: IntentSignals, locale?: AppLocale): Duratio
   let totalDays = consensus?.days;
   let totalEvidence = consensus?.evidence;
 
+  if (signals.hasPartialDurationAllocation && explicitTotal) {
+    totalDays = explicitTotal;
+    totalEvidence = cleanStatement(signals.durationEvidence || formatDays(locale, explicitTotal), 80);
+  }
+
   // 会议日期区间常出现“含首尾”的 1 天偏差（如 4/13-4/18 vs 5天）。
   // 若用户显式总时长存在且仅有单一会议段，优先采用显式总时长。
   if (
@@ -248,7 +253,7 @@ function buildDurationState(signals: IntentSignals, locale?: AppLocale): Duratio
   }
 
   // 多城市且至少有一个“旅行段”时，优先满足分段总和，避免漏算“会议+旅行”这类组合行程。
-  if (cityDurations.length >= 2 && hasTravelSegment && citySum > 0) {
+  if (!signals.hasPartialDurationAllocation && cityDurations.length >= 2 && hasTravelSegment && citySum > 0) {
     const explicitStrong =
       !!explicitTotal &&
       (signals.hasExplicitTotalCue || clamp01(signals.durationStrength, 0.55) >= 0.88);
@@ -868,9 +873,15 @@ export function buildSlotStateMachine(params: {
   nodes.push(goal);
 
   const destinationMap = new Map<string, string>();
+  const removedDestinationSet = new Set(
+    (params.signals.removedDestinations || [])
+      .map((x) => normalizeDestination(x))
+      .filter(Boolean)
+  );
   const pushDestination = (raw?: string) => {
     const city = normalizeDestination(raw || "");
     if (!city || !isLikelyDestinationCandidate(city)) return;
+    if (removedDestinationSet.has(city)) return;
     const key = slug(city);
     if (!key || destinationMap.has(key)) return;
     destinationMap.set(key, city);

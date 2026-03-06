@@ -11,6 +11,7 @@ import { buildTravelPlanState } from "../../travelPlan/state.js";
 import { buildSlotStateMachine } from "../slotStateMachine.js";
 import { compileSlotStateToPatch } from "../slotGraphCompiler.js";
 import { generateGraphPatch } from "../../graphUpdater.js";
+import { applyPatchWithGuards } from "../../../core/graph/patchApply.js";
 import { planUncertaintyQuestion } from "../../uncertainty/questionPlanner.js";
 import { reconcileConceptsWithGraph, stableConceptIdFromSemanticKey } from "../../concepts.js";
 import {
@@ -510,6 +511,136 @@ const cases: Case[] = [
     },
   },
   {
+    name: "budget parser should ignore lodging-base count ranges near a real budget",
+    run: () => {
+      const s = extractIntentSignals(
+        "想去冰岛环岛9天，两个人，10月出发但日期还没定，每人预算2万元，想看冰河湖和瀑布，不想每天换酒店，最多两到三个基地。"
+      );
+      assert.equal(s.budgetCny, 20000);
+      assert.equal((s.destinations || []).includes("三个基地"), false);
+    },
+  },
+  {
+    name: "budget total phrasing should not set explicit duration-total cue",
+    run: () => {
+      const s = extractIntentSignals("想带妈妈去摩洛哥7到8天，预算总共3万元，语言不太通，希望别太折腾。");
+      assert.equal(s.hasExplicitTotalCue, false);
+      assert.equal(s.durationDays, 8);
+    },
+  },
+  {
+    name: "cross-country pair should split instead of collapsing to a connector-prefixed destination",
+    run: () => {
+      const s = extractIntentSignals(
+        "想和父母去西班牙加葡萄牙10天，总预算3万元，父亲膝盖不好，不想爬太多台阶，也不想频繁换酒店。"
+      );
+      assert.equal((s.destinations || []).includes("加葡萄牙"), false);
+      assert.deepEqual(s.destinations, ["西班牙", "葡萄牙"]);
+    },
+  },
+  {
+    name: "bare city-night list should be parsed without explicit travel verb",
+    run: () => {
+      const s = extractIntentSignals(
+        "可以，那就先以马拉喀什4晚、非斯2晚来想，卡萨布兰卡最多留半天过渡；另外妈妈不会法语和阿拉伯语。"
+      );
+      assert.deepEqual(
+        (s.cityDurations || []).map((x) => [x.city, x.days]),
+        [
+          ["马拉喀什", 4],
+          ["非斯", 2],
+        ]
+      );
+      assert.deepEqual(s.destinations, ["马拉喀什", "非斯"]);
+    },
+  },
+  {
+    name: "transit city mention should extract city instead of a transit phrase",
+    run: () => {
+      const s = extractIntentSignals(
+        "想带妈妈去摩洛哥7到8天，卡萨可以作为落地中转，法语和阿拉伯语都不会，希望节奏松一点。"
+      );
+      assert.equal((s.destinations || []).includes("卡萨"), true);
+      assert.equal((s.destinations || []).some((x) => /作为|不会/.test(x)), false);
+    },
+  },
+  {
+    name: "removed destination should disappear from merged destinations and city durations",
+    run: () => {
+      const merged = extractIntentSignalsWithRecency(
+        "想带妈妈第一次去摩洛哥，7到8天，想去马拉喀什和非斯，卡萨布兰卡不确定要不要去。",
+        "再纠正一下，卡萨布兰卡先完全去掉，不去卡萨了。"
+      );
+      assert.equal((merged.destinations || []).some((x) => /卡萨/.test(x)), false);
+      assert.equal((merged.cityDurations || []).some((x) => x.city === "卡萨布兰卡"), false);
+    },
+  },
+  {
+    name: "partial city allocation should preserve prior overall duration",
+    run: () => {
+      const merged = extractIntentSignalsWithRecency(
+        "我们想带妈妈第一次去摩洛哥，7到8天，预算总共3万元，想先看老城和花园，卡萨可以作为落地中转，法语阿拉伯语都不会，希望别太折腾。",
+        "那就先以马拉喀什4晚、非斯2晚，卡萨最多半天过渡，其他先别塞满。"
+      );
+      assert.equal(merged.durationDays, 8);
+      assert.deepEqual(
+        (merged.cityDurations || []).map((x) => [x.city, x.days]),
+        [
+          ["马拉喀什", 4],
+          ["非斯", 2],
+        ]
+      );
+    },
+  },
+  {
+    name: "meta total phrase should not become a destination or city duration",
+    run: () => {
+      const merged = extractIntentSignalsWithRecency(
+        [
+          "我们一家三口第一次去日本关西，7天，想轻松一点，不要每天暴走，京都和大阪都想去。",
+          "那就按京都6晚、大阪1晚来想，关西这个大区不用单独算。",
+        ].join("\n"),
+        "我们想留半天机动，整体还是7天，不想再加别的城市。"
+      );
+      assert.equal((merged.destinations || []).includes("整体还是"), false);
+      assert.equal((merged.cityDurations || []).some((x) => x.city === "整体还是"), false);
+      assert.equal(merged.durationDays, 7);
+    },
+  },
+  {
+    name: "remaining buffer should not become a destination and should keep total duration",
+    run: () => {
+      const merged = extractIntentSignalsWithRecency(
+        "我想10天去西班牙和葡萄牙，主要想待里斯本和塞维利亚，马德里不是必须，西语葡语都不会。",
+        "那就按里斯本4晚、塞维利亚4晚，剩下2天机动，马德里先不要。"
+      );
+      assert.equal(merged.durationDays, 10);
+      assert.equal((merged.destinations || []).includes("剩下"), false);
+      assert.equal((merged.cityDurations || []).some((x) => x.city === "剩下"), false);
+      assert.deepEqual(
+        (merged.cityDurations || []).map((x) => [x.city, x.days]),
+        [
+          ["里斯本", 4],
+          ["塞维利亚", 4],
+        ]
+      );
+    },
+  },
+  {
+    name: "later neutral turn should not collapse preserved total duration to partial city sum",
+    run: () => {
+      const merged = extractIntentSignalsWithRecency(
+        [
+          "我想10天去西班牙和葡萄牙，主要想待里斯本和塞维利亚，马德里不是必须，西语葡语都不会。",
+          "那就按里斯本4晚、塞维利亚4晚，剩下2天机动，马德里先不要。",
+        ].join("\n"),
+        "语言还是问题，但葡萄牙和西班牙这两个国家都保留。"
+      );
+      assert.equal(merged.durationDays, 10);
+      assert.equal((merged.destinations || []).includes("语言还是问题"), false);
+    },
+  },
+  {
     name: "budget ledger replay: set + adjust + commit should produce stable total/spent/remaining",
     run: () => {
       const ledger = buildBudgetLedgerFromUserTurns([
@@ -601,6 +732,133 @@ const cases: Case[] = [
       });
       const removeOps = patch.ops.filter((x) => x.op === "remove_node");
       assert.equal(removeOps.length >= 1, true);
+    },
+  },
+  {
+    name: "slot state should keep 6+1 city snapshot and preserve 7-day total",
+    run: () => {
+      const signals = extractIntentSignalsWithRecency(
+        "我们一家三口第一次去日本关西，7天，想轻松一点，不要每天暴走，京都和大阪都想去。",
+        "那就按京都6晚、大阪1晚来想，关西这个大区不用单独算。"
+      );
+      const state = buildSlotStateMachine({
+        userText: "那就按京都6晚、大阪1晚来想，关西这个大区不用单独算。",
+        recentTurns: [
+          { role: "user", content: "我们一家三口第一次去日本关西，7天，想轻松一点，不要每天暴走，京都和大阪都想去。" },
+          { role: "assistant", content: "收到" },
+          { role: "user", content: "那就按京都6晚、大阪1晚来想，关西这个大区不用单独算。" },
+        ],
+        signals,
+      });
+      const totalNode = state.nodes.find((n: any) => n.slotKey === "slot:duration_total");
+      const cityStatements = state.nodes
+        .filter((n: any) => String(n.slotKey || "").startsWith("slot:duration_city:"))
+        .map((n: any) => String(n.statement || ""));
+      assert.equal(totalNode?.statement, "总行程时长: 7天");
+      assert.equal(cityStatements.some((x) => /京都 6天/.test(x)), true);
+      assert.equal(cityStatements.some((x) => /大阪 1天/.test(x)), true);
+    },
+  },
+  {
+    name: "slot state should preserve explicit total over partial city allocation",
+    run: () => {
+      const signals = extractIntentSignalsWithRecency(
+        "我们想带妈妈第一次去摩洛哥，7到8天，预算总共3万元，想先看老城和花园，卡萨可以作为落地中转，法语阿拉伯语都不会，希望别太折腾。",
+        "那就先以马拉喀什4晚、非斯2晚，卡萨最多半天过渡，其他先别塞满。"
+      );
+      const state = buildSlotStateMachine({
+        userText: "那就先以马拉喀什4晚、非斯2晚，卡萨最多半天过渡，其他先别塞满。",
+        recentTurns: [
+          { role: "user", content: "我们想带妈妈第一次去摩洛哥，7到8天，预算总共3万元，想先看老城和花园，卡萨可以作为落地中转，法语阿拉伯语都不会，希望别太折腾。" },
+          { role: "assistant", content: "收到" },
+          { role: "user", content: "那就先以马拉喀什4晚、非斯2晚，卡萨最多半天过渡，其他先别塞满。" },
+        ],
+        signals,
+      });
+      const totalNode = state.nodes.find((n: any) => n.slotKey === "slot:duration_total");
+      const cityStatements = state.nodes
+        .filter((n: any) => String(n.slotKey || "").startsWith("slot:duration_city:"))
+        .map((n: any) => String(n.statement || ""));
+      assert.equal(totalNode?.statement, "总行程时长: 8天");
+      assert.equal(cityStatements.some((x) => /马拉喀什 4天/.test(x)), true);
+      assert.equal(cityStatements.some((x) => /非斯 2天/.test(x)), true);
+    },
+  },
+  {
+    name: "slot state should drop removed destinations so compiler can clean stale graph nodes",
+    run: () => {
+      const signals = extractIntentSignalsWithRecency(
+        [
+          "我们想带妈妈第一次去摩洛哥，7到8天，预算总共3万元，卡萨可以作为落地中转，想去马拉喀什和非斯。",
+          "那就先以马拉喀什4晚、非斯2晚，卡萨最多半天过渡。",
+        ].join("\n"),
+        "再纠正一下，卡萨先完全去掉，总时长还是按8天。"
+      );
+      const state = buildSlotStateMachine({
+        userText: "再纠正一下，卡萨先完全去掉，总时长还是按8天。",
+        recentTurns: [
+          { role: "user", content: "我们想带妈妈第一次去摩洛哥，7到8天，预算总共3万元，卡萨可以作为落地中转，想去马拉喀什和非斯。" },
+          { role: "assistant", content: "收到" },
+          { role: "user", content: "那就先以马拉喀什4晚、非斯2晚，卡萨最多半天过渡。" },
+          { role: "assistant", content: "收到" },
+          { role: "user", content: "再纠正一下，卡萨先完全去掉，总时长还是按8天。" },
+        ],
+        signals,
+      });
+      assert.equal(state.nodes.some((n: any) => String(n.slotKey) === "slot:destination:卡萨"), false);
+    },
+  },
+  {
+    name: "apply patch should remove stale destination slot when deletion is compiled",
+    run: () => {
+      const signals = extractIntentSignalsWithRecency(
+        [
+          "我们想带妈妈第一次去摩洛哥，7到8天，预算总共3万元，卡萨可以作为落地中转，想去马拉喀什和非斯。",
+          "那就先以马拉喀什4晚、非斯2晚，卡萨最多半天过渡。",
+        ].join("\n"),
+        "再纠正一下，卡萨先完全去掉，总时长还是按8天。"
+      );
+      const state = buildSlotStateMachine({
+        userText: "再纠正一下，卡萨先完全去掉，总时长还是按8天。",
+        recentTurns: [
+          { role: "user", content: "我们想带妈妈第一次去摩洛哥，7到8天，预算总共3万元，卡萨可以作为落地中转，想去马拉喀什和非斯。" },
+          { role: "assistant", content: "收到" },
+          { role: "user", content: "那就先以马拉喀什4晚、非斯2晚，卡萨最多半天过渡。" },
+          { role: "assistant", content: "收到" },
+          { role: "user", content: "再纠正一下，卡萨先完全去掉，总时长还是按8天。" },
+        ],
+        signals,
+      });
+      const graph = {
+        id: "g_remove_destination",
+        version: 1,
+        nodes: [
+          {
+            id: "n_kasa",
+            type: "factual_assertion",
+            layer: "requirement",
+            statement: "目的地: 卡萨",
+            status: "confirmed",
+            confidence: 0.9,
+            importance: 0.8,
+            key: "slot:destination:卡萨",
+          },
+          {
+            id: "n_morocco",
+            type: "factual_assertion",
+            layer: "requirement",
+            statement: "目的地: 摩洛哥",
+            status: "confirmed",
+            confidence: 0.9,
+            importance: 0.8,
+            key: "slot:destination:摩洛哥",
+          },
+        ],
+        edges: [],
+      } as any;
+      const patch = compileSlotStateToPatch({ graph, state });
+      const applied = applyPatchWithGuards(graph, patch).newGraph;
+      assert.equal(applied.nodes.some((n: any) => n.key === "slot:destination:卡萨"), false);
     },
   },
   {
