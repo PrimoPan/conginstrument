@@ -24,6 +24,7 @@ import {
   buildTaskDetection,
   buildCognitiveState,
   buildPortfolioDocumentState,
+  detectTaskSwitchFromLatestUserTurn,
   type TaskDetection,
   type CognitiveState,
   type PortfolioDocumentState,
@@ -776,6 +777,7 @@ function buildTransferEvaluationTravelPlan(params: {
   recentTurns: Array<{ createdAt?: Date | string; userText: string; assistantText: string }>;
   currentUserText: string;
   currentAssistantText: string;
+  forceTaskSwitch?: boolean;
 }): TravelPlanState {
   return buildTravelPlanState({
     locale: params.locale,
@@ -792,6 +794,7 @@ function buildTransferEvaluationTravelPlan(params: {
       },
     ],
     previous: params.previous || null,
+    forceTaskSwitch: !!params.forceTaskSwitch,
   });
 }
 
@@ -800,6 +803,77 @@ type PlanningStateBundle = {
   cognitiveState: CognitiveState;
   portfolioDocumentState: PortfolioDocumentState;
 };
+
+type TurnRuntimeBase = {
+  graph: CDG;
+  concepts: any[];
+  motifs: any[];
+  motifLinks: any[];
+  contexts: any[];
+  recentDocs: any[];
+  recentTurns: Array<{ role: "user" | "assistant"; content: string }>;
+  stateContextUserTurns: string[];
+  forceTaskSwitch: boolean;
+};
+
+function shouldResetTurnBaseline(taskDetection: TaskDetection): boolean {
+  return (
+    !!taskDetection?.is_task_switch &&
+    (taskDetection.switch_reason_code === "explicit_restart" ||
+      taskDetection.switch_reason_code === "destination_switch")
+  );
+}
+
+async function buildTurnRuntimeBase(params: {
+  conversationId: ObjectId;
+  userId: ObjectId;
+  conv: any;
+  locale: AppLocale;
+  userText: string;
+  taskLifecycle?: TaskLifecycleState | null;
+}): Promise<TurnRuntimeBase> {
+  const taskDetection = detectTaskSwitchFromLatestUserTurn({
+    conversationId: String(params.conversationId),
+    locale: params.locale,
+    latestUserText: params.userText,
+    previousTravelPlan: (params.conv as any).travelPlanState || null,
+    taskLifecycle: params.taskLifecycle || null,
+  });
+  const forceTaskSwitch = shouldResetTurnBaseline(taskDetection);
+  const recent = forceTaskSwitch
+    ? []
+    : await collections.turns
+        .find({ conversationId: params.conversationId, userId: params.userId })
+        .sort({ createdAt: -1 })
+        .limit(10)
+        .toArray();
+  const recentTurns = recent
+    .slice()
+    .reverse()
+    .flatMap((t) => [
+      { role: "user" as const, content: t.userText },
+      { role: "assistant" as const, content: t.assistantText },
+    ]);
+  const stateContextUserTurns = forceTaskSwitch
+    ? []
+    : await loadRecentUserTextsForState({
+        conversationId: params.conversationId,
+        userId: params.userId,
+        limit: 140,
+      });
+
+  return {
+    graph: forceTaskSwitch ? emptyGraph(String(params.conversationId)) : params.conv.graph,
+    concepts: forceTaskSwitch ? [] : params.conv.concepts || [],
+    motifs: forceTaskSwitch ? [] : (params.conv as any).motifs || [],
+    motifLinks: forceTaskSwitch ? [] : (params.conv as any).motifLinks || [],
+    contexts: forceTaskSwitch ? [] : (params.conv as any).contexts || [],
+    recentDocs: recent,
+    recentTurns,
+    stateContextUserTurns,
+    forceTaskSwitch,
+  };
+}
 
 type PersistedConversationSnapshot = PlanningStateBundle & {
   travelPlanState: TravelPlanState;
@@ -1901,7 +1975,6 @@ convRouter.post("/:id/turn", asyncRoute(async (req: AuthedRequest, res) => {
   const conv = await collections.conversations.findOne({ _id: oid, userId });
   if (!conv) return res.status(404).json({ error: "conversation not found" });
 
-  const graph: CDG = conv.graph;
   const locale = normalizeLocale((conv as any).locale);
   let motifTransferState = readMotifTransferState((conv as any).motifTransferState);
   let taskLifecycle = readTaskLifecycle((conv as any).taskLifecycle);
@@ -1911,25 +1984,22 @@ convRouter.post("/:id/turn", asyncRoute(async (req: AuthedRequest, res) => {
     return res.status(409).json(taskClosedErrorPayload(taskLifecycle));
   }
 
-  // recent turns：取最近 10 轮（更像“有记忆”）
-  const recent = await collections.turns
-    .find({ conversationId: oid, userId })
-    .sort({ createdAt: -1 })
-    .limit(10)
-    .toArray();
-
-  const recentTurns = recent
-    .reverse()
-    .flatMap((t) => [
-      { role: "user" as const, content: t.userText },
-      { role: "assistant" as const, content: t.assistantText },
-    ]);
-  const stateContextUserTurns = await loadRecentUserTextsForState({
+  const turnBase = await buildTurnRuntimeBase({
     conversationId: oid,
     userId,
-    limit: 140,
+    conv,
+    locale,
+    userText,
+    taskLifecycle,
   });
-  const turnNumber = Number(recent.length || 0) + 1;
+  const graph: CDG = turnBase.graph;
+  const recentTurns = turnBase.recentTurns;
+  const stateContextUserTurns = turnBase.stateContextUserTurns;
+  const baseConcepts = turnBase.concepts;
+  const baseMotifs = turnBase.motifs;
+  const baseMotifLinks = turnBase.motifLinks;
+  const baseContexts = turnBase.contexts;
+  const turnNumber = Number(turnBase.recentDocs.length || 0) + 1;
 
   const revisionProbe = registerRevisionRequestFromUtterance({
     locale,
@@ -1959,11 +2029,11 @@ convRouter.post("/:id/turn", asyncRoute(async (req: AuthedRequest, res) => {
 
   const preModel = buildCognitiveModel({
     graph,
-    prevConcepts: conv.concepts || [],
-    baseConcepts: conv.concepts || [],
-    baseMotifs: (conv as any).motifs || [],
-    baseMotifLinks: (conv as any).motifLinks || [],
-    baseContexts: (conv as any).contexts || [],
+    prevConcepts: baseConcepts,
+    baseConcepts,
+    baseMotifs,
+    baseMotifLinks,
+    baseContexts,
     locale,
   });
   preModel.motifs = applyTransferStateToMotifs({
@@ -1994,7 +2064,8 @@ convRouter.post("/:id/turn", asyncRoute(async (req: AuthedRequest, res) => {
       locale,
       motifTransferState,
       taskLifecycle,
-      previousMotifs: (conv as any).motifs || [],
+      forceTaskSwitch: turnBase.forceTaskSwitch,
+      previousMotifs: baseMotifs,
       turnNumber,
       latestUserText: userText,
     });
@@ -2032,11 +2103,11 @@ convRouter.post("/:id/turn", asyncRoute(async (req: AuthedRequest, res) => {
   const merged = applyPatchWithGuards(graph, out.graph_patch);
   const model = buildCognitiveModel({
     graph: merged.newGraph,
-    prevConcepts: conv.concepts || [],
-    baseConcepts: conv.concepts || [],
-    baseMotifs: (conv as any).motifs || [],
-    baseMotifLinks: (conv as any).motifLinks || [],
-    baseContexts: (conv as any).contexts || [],
+    prevConcepts: baseConcepts,
+    baseConcepts,
+    baseMotifs,
+    baseMotifLinks,
+    baseContexts,
     locale,
   });
   model.graph.version = merged.newGraph.version + (graphChanged(merged.newGraph, model.graph) ? 1 : 0);
@@ -2045,7 +2116,7 @@ convRouter.post("/:id/turn", asyncRoute(async (req: AuthedRequest, res) => {
     out.assistant_text = `${String(out.assistant_text || "").trim()}\n${revisionProbe.followupQuestion}`.trim();
   }
 
-  if (shouldEvaluateTransferRecommendations({ priorTurnCount: recent.length, motifTransferState })) {
+  if (shouldEvaluateTransferRecommendations({ priorTurnCount: turnBase.recentDocs.length, motifTransferState })) {
     const motifLibrary = await listUserMotifLibrary(userId, locale);
     const currentTaskIdForRetrieval = currentTaskId((conv as any).travelPlanState || null, String(oid));
     const previewTravelPlan = buildTransferEvaluationTravelPlan({
@@ -2055,21 +2126,24 @@ convRouter.post("/:id/turn", asyncRoute(async (req: AuthedRequest, res) => {
       concepts: model.concepts,
       motifs: model.motifs,
       previous: (conv as any).travelPlanState || null,
-      recentTurns: recent
-        .slice()
-        .reverse()
-        .map((t) => ({
-          createdAt: t.createdAt,
-          userText: t.userText,
-          assistantText: t.assistantText,
-        })),
+      recentTurns: turnBase.forceTaskSwitch
+        ? []
+        : turnBase.recentDocs
+            .slice()
+            .reverse()
+            .map((t) => ({
+              createdAt: t.createdAt,
+              userText: t.userText,
+              assistantText: t.assistantText,
+            })),
       currentUserText: userText,
       currentAssistantText: out.assistant_text,
+      forceTaskSwitch: turnBase.forceTaskSwitch,
     });
     const recommendations = buildTransferRecommendations({
       locale,
       conversationId: String(oid),
-      currentTaskId: currentTaskIdForRetrieval,
+      currentTaskId: previewTravelPlan.task_id || currentTaskIdForRetrieval,
       travelPlanState: previewTravelPlan,
       retrievalHints,
       motifLibrary,
@@ -2108,7 +2182,8 @@ convRouter.post("/:id/turn", asyncRoute(async (req: AuthedRequest, res) => {
     locale,
     motifTransferState,
     taskLifecycle,
-    previousMotifs: (conv as any).motifs || [],
+    forceTaskSwitch: turnBase.forceTaskSwitch,
+    previousMotifs: baseMotifs,
     turnNumber,
     latestUserText: userText,
   });
@@ -2143,7 +2218,6 @@ convRouter.post("/:id/turn/stream", asyncRoute(async (req: AuthedRequest, res) =
   const conv = await collections.conversations.findOne({ _id: oid, userId });
   if (!conv) return res.status(404).json({ error: "conversation not found" });
 
-  const graph: CDG = conv.graph;
   const locale = normalizeLocale((conv as any).locale);
   let motifTransferState = readMotifTransferState((conv as any).motifTransferState);
   let taskLifecycle = readTaskLifecycle((conv as any).taskLifecycle);
@@ -2153,25 +2227,22 @@ convRouter.post("/:id/turn/stream", asyncRoute(async (req: AuthedRequest, res) =
     return res.status(409).json(taskClosedErrorPayload(taskLifecycle));
   }
 
-  // recent turns：取最近 10 轮
-  const recent = await collections.turns
-    .find({ conversationId: oid, userId })
-    .sort({ createdAt: -1 })
-    .limit(10)
-    .toArray();
-
-  const recentTurns = recent
-    .reverse()
-    .flatMap((t) => [
-      { role: "user" as const, content: t.userText },
-      { role: "assistant" as const, content: t.assistantText },
-    ]);
-  const stateContextUserTurns = await loadRecentUserTextsForState({
+  const turnBase = await buildTurnRuntimeBase({
     conversationId: oid,
     userId,
-    limit: 140,
+    conv,
+    locale,
+    userText,
+    taskLifecycle,
   });
-  const turnNumber = Number(recent.length || 0) + 1;
+  const graph: CDG = turnBase.graph;
+  const recentTurns = turnBase.recentTurns;
+  const stateContextUserTurns = turnBase.stateContextUserTurns;
+  const baseConcepts = turnBase.concepts;
+  const baseMotifs = turnBase.motifs;
+  const baseMotifLinks = turnBase.motifLinks;
+  const baseContexts = turnBase.contexts;
+  const turnNumber = Number(turnBase.recentDocs.length || 0) + 1;
 
   const revisionProbe = registerRevisionRequestFromUtterance({
     locale,
@@ -2201,11 +2272,11 @@ convRouter.post("/:id/turn/stream", asyncRoute(async (req: AuthedRequest, res) =
 
   const preModel = buildCognitiveModel({
     graph,
-    prevConcepts: conv.concepts || [],
-    baseConcepts: conv.concepts || [],
-    baseMotifs: (conv as any).motifs || [],
-    baseMotifLinks: (conv as any).motifLinks || [],
-    baseContexts: (conv as any).contexts || [],
+    prevConcepts: baseConcepts,
+    baseConcepts,
+    baseMotifs,
+    baseMotifLinks,
+    baseContexts,
     locale,
   });
   preModel.motifs = applyTransferStateToMotifs({
@@ -2237,7 +2308,8 @@ convRouter.post("/:id/turn/stream", asyncRoute(async (req: AuthedRequest, res) =
       locale,
       motifTransferState,
       taskLifecycle,
-      previousMotifs: (conv as any).motifs || [],
+      forceTaskSwitch: turnBase.forceTaskSwitch,
+      previousMotifs: baseMotifs,
       turnNumber,
       latestUserText: userText,
     });
@@ -2334,16 +2406,16 @@ convRouter.post("/:id/turn/stream", asyncRoute(async (req: AuthedRequest, res) =
     const merged = applyPatchWithGuards(graph, out.graph_patch);
     const model = buildCognitiveModel({
       graph: merged.newGraph,
-      prevConcepts: conv.concepts || [],
-      baseConcepts: conv.concepts || [],
-      baseMotifs: (conv as any).motifs || [],
-      baseMotifLinks: (conv as any).motifLinks || [],
-      baseContexts: (conv as any).contexts || [],
+      prevConcepts: baseConcepts,
+      baseConcepts,
+      baseMotifs,
+      baseMotifLinks,
+      baseContexts,
       locale,
     });
     model.graph.version = merged.newGraph.version + (graphChanged(merged.newGraph, model.graph) ? 1 : 0);
 
-    if (shouldEvaluateTransferRecommendations({ priorTurnCount: recent.length, motifTransferState })) {
+    if (shouldEvaluateTransferRecommendations({ priorTurnCount: turnBase.recentDocs.length, motifTransferState })) {
       const motifLibrary = await listUserMotifLibrary(userId, locale);
       const currentTaskIdForRetrieval = currentTaskId((conv as any).travelPlanState || null, String(oid));
       const previewTravelPlan = buildTransferEvaluationTravelPlan({
@@ -2353,21 +2425,24 @@ convRouter.post("/:id/turn/stream", asyncRoute(async (req: AuthedRequest, res) =
         concepts: model.concepts,
         motifs: model.motifs,
         previous: (conv as any).travelPlanState || null,
-        recentTurns: recent
-          .slice()
-          .reverse()
-          .map((t) => ({
-            createdAt: t.createdAt,
-            userText: t.userText,
-            assistantText: t.assistantText,
-          })),
+        recentTurns: turnBase.forceTaskSwitch
+          ? []
+          : turnBase.recentDocs
+              .slice()
+              .reverse()
+              .map((t) => ({
+                createdAt: t.createdAt,
+                userText: t.userText,
+                assistantText: t.assistantText,
+              })),
         currentUserText: userText,
         currentAssistantText: out.assistant_text,
+        forceTaskSwitch: turnBase.forceTaskSwitch,
       });
       const recommendations = buildTransferRecommendations({
         locale,
         conversationId: String(oid),
-        currentTaskId: currentTaskIdForRetrieval,
+        currentTaskId: previewTravelPlan.task_id || currentTaskIdForRetrieval,
         travelPlanState: previewTravelPlan,
         retrievalHints,
         motifLibrary,
@@ -2406,7 +2481,8 @@ convRouter.post("/:id/turn/stream", asyncRoute(async (req: AuthedRequest, res) =
       locale,
       motifTransferState,
       taskLifecycle,
-      previousMotifs: (conv as any).motifs || [],
+      forceTaskSwitch: turnBase.forceTaskSwitch,
+      previousMotifs: baseMotifs,
       turnNumber,
       latestUserText: userText,
     });
@@ -2451,16 +2527,16 @@ convRouter.post("/:id/turn/stream", asyncRoute(async (req: AuthedRequest, res) =
         const merged2 = applyPatchWithGuards(graph, out2.graph_patch);
         const model2 = buildCognitiveModel({
           graph: merged2.newGraph,
-          prevConcepts: conv.concepts || [],
-          baseConcepts: conv.concepts || [],
-          baseMotifs: (conv as any).motifs || [],
-          baseMotifLinks: (conv as any).motifLinks || [],
-          baseContexts: (conv as any).contexts || [],
+          prevConcepts: baseConcepts,
+          baseConcepts,
+          baseMotifs,
+          baseMotifLinks,
+          baseContexts,
           locale,
         });
         model2.graph.version = merged2.newGraph.version + (graphChanged(merged2.newGraph, model2.graph) ? 1 : 0);
 
-        if (shouldEvaluateTransferRecommendations({ priorTurnCount: recent.length, motifTransferState })) {
+        if (shouldEvaluateTransferRecommendations({ priorTurnCount: turnBase.recentDocs.length, motifTransferState })) {
           const motifLibrary = await listUserMotifLibrary(userId, locale);
           const currentTaskIdForRetrieval = currentTaskId((conv as any).travelPlanState || null, String(oid));
           const previewTravelPlan = buildTransferEvaluationTravelPlan({
@@ -2470,21 +2546,24 @@ convRouter.post("/:id/turn/stream", asyncRoute(async (req: AuthedRequest, res) =
             concepts: model2.concepts,
             motifs: model2.motifs,
             previous: (conv as any).travelPlanState || null,
-            recentTurns: recent
-              .slice()
-              .reverse()
-              .map((t) => ({
-                createdAt: t.createdAt,
-                userText: t.userText,
-                assistantText: t.assistantText,
-              })),
+            recentTurns: turnBase.forceTaskSwitch
+              ? []
+              : turnBase.recentDocs
+                  .slice()
+                  .reverse()
+                  .map((t) => ({
+                    createdAt: t.createdAt,
+                    userText: t.userText,
+                    assistantText: t.assistantText,
+                  })),
             currentUserText: userText,
             currentAssistantText: out2.assistant_text,
+            forceTaskSwitch: turnBase.forceTaskSwitch,
           });
           const recommendations = buildTransferRecommendations({
             locale,
             conversationId: String(oid),
-            currentTaskId: currentTaskIdForRetrieval,
+            currentTaskId: previewTravelPlan.task_id || currentTaskIdForRetrieval,
             travelPlanState: previewTravelPlan,
             retrievalHints,
             motifLibrary,
@@ -2523,7 +2602,8 @@ convRouter.post("/:id/turn/stream", asyncRoute(async (req: AuthedRequest, res) =
           locale,
           motifTransferState,
           taskLifecycle,
-          previousMotifs: (conv as any).motifs || [],
+          forceTaskSwitch: turnBase.forceTaskSwitch,
+          previousMotifs: baseMotifs,
           turnNumber,
           latestUserText: userText,
         });

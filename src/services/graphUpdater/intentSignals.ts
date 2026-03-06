@@ -688,17 +688,35 @@ function pickBudgetFromText(text: string): { value: number; evidence: string } |
     const left = t.slice(Math.max(0, idx - 10), idx);
     const right = t.slice(idx, Math.min(t.length, idx + hitLen + 14));
     const near = `${left}${right}`;
-    const hasBudgetCue = GLOBAL_BUDGET_CUE_RE.test(near);
-    const hasRemainingCue = /(剩余预算|可用预算|余额|还剩)/i.test(near);
+    const leftBoundary = Math.max(
+      t.lastIndexOf("，", idx - 1),
+      t.lastIndexOf("。", idx - 1),
+      t.lastIndexOf("；", idx - 1),
+      t.lastIndexOf(",", idx - 1),
+      t.lastIndexOf(";", idx - 1),
+      t.lastIndexOf("!", idx - 1),
+      t.lastIndexOf("！", idx - 1),
+      t.lastIndexOf("?", idx - 1),
+      t.lastIndexOf("？", idx - 1)
+    );
+    let rightBoundary = t.length;
+    for (const ch of ["，", "。", "；", ",", ";", "!", "！", "?", "？"]) {
+      const next = t.indexOf(ch, idx + hitLen);
+      if (next >= 0) rightBoundary = Math.min(rightBoundary, next);
+    }
+    const clause = t.slice(leftBoundary + 1, rightBoundary);
     const hasSpendCue =
       /(花了|花费了|用了|消费了|支出|支付|付了|已花|开销|打车花了|酒店花了|机票花了)/i.test(near);
+    const clauseHasBudgetCue = GLOBAL_BUDGET_CUE_RE.test(clause);
+    const clauseHasRemainingCue = /(剩余预算|可用预算|余额|还剩)/i.test(clause);
     const immediateSpendLeft = /(?:花了?|花费了?|用了?|消费了?|支出了?|支付了?|付了?|已花|已用)\s*$/i.test(left);
     const budgetCueClose =
       /(?:总预算|预算(?:上限)?|经费|费用|上限|可用预算|剩余预算)\s*[:：]?\s*$/i.test(left) ||
       /^\s*(?:元|块|人民币)?\s*(?:预算|总预算|经费|费用|上限)/i.test(right);
 
-    if ((immediateSpendLeft || hasSpendCue) && !budgetCueClose && !hasRemainingCue) return false;
-    if (hasBudgetCue || hasRemainingCue || budgetCueClose) return true;
+    if ((immediateSpendLeft || hasSpendCue) && !budgetCueClose && !clauseHasRemainingCue) return false;
+    if (budgetCueClose) return true;
+    if (clauseHasBudgetCue || clauseHasRemainingCue) return true;
     return false;
   };
 
@@ -1328,7 +1346,7 @@ function extractDurationCandidates(text: string): DurationCandidate[] {
     const isMeeting = /(学术会议|会议|开会|chi|conference|workshop|forum|summit|参会)/i.test(ctx);
     const isCriticalEvent = hasHardDayReservationSignal(ctx);
     const isSegment =
-      /(停留|经过|先去|再去|之后去|前往|飞到|抵达|转机|行程段|逛|游|玩|旅行|旅游|度假|city|stay|flight|arrive|depart|before|after)/i.test(
+      /(停留|经过|先去|再去|之后去|前往|飞到|抵达|转机|行程段|安排|规划|计划|逛|游|玩|旅行|旅游|度假|city|stay|flight|arrive|depart|before|after)/i.test(
         ctx
       );
 
@@ -1561,7 +1579,7 @@ export function normalizeDestination(raw: string): string {
   s = s.replace(/^(那就先以|那就先按|那就按|就先以|先以|以|就按|先按|按|改成|改为|改到)\s*/i, "");
   s = s.replace(/^(和|与|及|加)\s*/i, "");
   s = s.replace(/^(在|于|到|去|从|飞到|前往|抵达)\s*/i, "");
-  s = s.replace(/^(我想|想|想去|想到|想逛|逛一逛|逛逛|逛|游览|游玩|探索|体验|顺带|顺便|顺路|顺道)\s*/i, "");
+  s = s.replace(/^(我想|想|想去|想到|想逛|想安排|安排|规划|计划|逛一逛|逛逛|逛|游览|游玩|探索|体验|顺带|顺便|顺路|顺道)\s*/i, "");
   s = s.replace(
     /^(?:我|我们)?\s*(?:一个人|两个人|三个人|[0-9一二三四五六七八九十两]{1,2}\s*个?人|独自|单人|solo|一家[三四五六七八九十0-9]*口|全家)(?:一起)?\s*去\s*/i,
     ""
@@ -1793,7 +1811,7 @@ function extractDestinationList(text: string): Array<{ city: string; evidence: s
   }
 
   const pairRe =
-    /(?:去|到|在|前往|飞到|抵达)\s*([^\s，。,；;！!？?\d]{2,16})\s*(?:和|与|及|、|,|，)\s*([^\s，。,；;！!？?\d]{2,16})(?:旅游|旅行|出行|玩|度假|开会|会议|chi|conference|$)/gi;
+    /(?:去|到|在|前往|飞到|抵达|安排|规划|计划)\s*([^\s，。,；;！!？?\d]{2,16})\s*(?:和|与|及|、|,|，)\s*([^\s，。,；;！!？?\d]{2,16})(?:旅游|旅行|出行|玩|度假|开会|会议|chi|conference|$)/gi;
   for (const m of scanText.matchAll(pairRe)) {
     if (!m?.[1] || !m?.[2]) continue;
     const idx = Number(m.index) || 0;
@@ -1802,7 +1820,7 @@ function extractDestinationList(text: string): Array<{ city: string; evidence: s
   }
 
   const preferencePairRe =
-    /(?:想去|优先|先以|以|先按|按)\s*([^\s，。,；;！!？?\d]{2,16})\s*(?:和|与|及|加|、|,|，)\s*([^\s，。,；;！!？?\d]{2,16})(?=[0-9一二三四五六七八九十两]{0,3}\s*(?:天|晚|夜)?|[，。,；;！!？?\s]|$)/gi;
+    /(?:想去|想安排|安排|规划|计划|优先|先以|以|先按|按)\s*([^\s，。,；;！!？?\d]{2,16})\s*(?:和|与|及|加|、|,|，)\s*([^\s，。,；;！!？?\d]{2,16})(?=[0-9一二三四五六七八九十两]{0,3}\s*(?:天|晚|夜)?|[，。,；;！!？?\s]|$)/gi;
   for (const m of scanText.matchAll(preferencePairRe)) {
     if (!m?.[1] || !m?.[2]) continue;
     const idx = Number(m.index) || 0;
@@ -2920,6 +2938,17 @@ export function extractIntentSignals(userText: string, opts?: { historyMode?: bo
           .join(" + ");
         out.durationStrength = Math.max(out.durationStrength || 0, segmentStrength);
       }
+    }
+
+    const looksLikeCompoundTripEnvelope =
+      citySegments.length === 1 &&
+      (out.destinations || []).length >= 2 &&
+      /(?:和|与|及|、|,|，)/.test(String(citySegments[0]?.evidence || "")) &&
+      /(?:安排|规划|计划|旅行|旅游|出行|行程|玩)/i.test(text);
+    if (!out.durationDays && sumDays > 0 && looksLikeCompoundTripEnvelope) {
+      out.durationDays = sumDays;
+      out.durationEvidence = citySegments[0]?.evidence || out.durationEvidence;
+      out.durationStrength = Math.max(out.durationStrength || 0, 0.76);
     }
   }
 

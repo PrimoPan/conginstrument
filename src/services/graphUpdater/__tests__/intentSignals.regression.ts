@@ -62,6 +62,14 @@ const cases: Case[] = [
     },
   },
   {
+    name: "budget should not be overwritten by later base-count range in another clause",
+    run: () => {
+      const s = extractIntentSignals("预算每人2万元，最多两到三个基地");
+      assert.equal(s.budgetCny, 20000);
+      assert.equal(s.budgetEvidence, "2万元");
+    },
+  },
+  {
     name: "budget delta merge: 10000 + 5000 => 15000",
     run: () => {
       const merged = extractIntentSignalsWithRecency(
@@ -755,6 +763,15 @@ const cases: Case[] = [
       assert.equal(s.destination, "冰岛");
       assert.equal((s.destinations || []).includes("冰岛环岛"), false);
       assert.equal((s.destinations || []).includes("三个基地"), false);
+    },
+  },
+  {
+    name: "arrange phrasing should still extract paired country destinations",
+    run: () => {
+      const s = extractIntentSignals("我想安排西班牙和葡萄牙10天，爸爸膝盖不好，不要每天换酒店。");
+      assert.deepEqual(s.destinations, ["西班牙", "葡萄牙"]);
+      assert.equal(s.destination, "西班牙");
+      assert.equal(s.durationDays, 10);
     },
   },
   {

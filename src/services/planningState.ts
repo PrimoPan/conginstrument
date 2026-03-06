@@ -2,6 +2,7 @@ import type { CognitiveModel } from "./cognitiveModel.js";
 import type { TravelPlanState, TravelPlanTaskHistorySegment } from "./travelPlan/state.js";
 import { isEnglishLocale, type AppLocale } from "../i18n/locale.js";
 import type { MotifLibraryEntryPayload, MotifTransferState } from "./motifTransfer/types.js";
+import { extractIntentSignals } from "./graphUpdater/intentSignals.js";
 
 export type TaskDetection = {
   current_task_id: string;
@@ -530,6 +531,47 @@ export function buildTaskDetection(params: {
     confidence: 0.36,
     switch_reason_code: "continuous",
   };
+}
+
+export function detectTaskSwitchFromLatestUserTurn(params: {
+  conversationId: string;
+  locale: AppLocale;
+  latestUserText?: string;
+  previousTravelPlan?: TravelPlanState | null;
+  taskLifecycle?: PlanningTaskLifecycle | null;
+}): TaskDetection {
+  const latestUserText = clean(params.latestUserText, 320);
+  const signals = latestUserText ? extractIntentSignals(latestUserText, { locale: params.locale }) : {};
+  const currentDestinations = uniqStrings(
+    [
+      ...((signals.destinations || []) as string[]),
+      clean((signals as any).destination, 80),
+      ...(!signals.destinations?.length && !(signals as any).destination
+        ? ((signals.cityDurations || []) as Array<{ city?: string }>).map((x) => clean(x?.city, 80))
+        : []),
+    ].filter(Boolean),
+    12
+  );
+  const previousDestinations = uniqStrings(
+    [
+      ...(((params.previousTravelPlan?.destination_scope || params.previousTravelPlan?.destinations || []) as string[])
+        .map((x) => clean(x, 80))),
+    ].filter(Boolean),
+    12
+  );
+
+  return buildTaskDetection({
+    conversationId: clean(params.previousTravelPlan?.task_id, 80) || clean(params.conversationId, 80),
+    locale: params.locale,
+    currentDestinations,
+    previousDestinations,
+    taskLifecycle: params.taskLifecycle || null,
+    latestUserText,
+    tripGoalSummary:
+      latestUserText || clean(params.previousTravelPlan?.trip_goal_summary || params.previousTravelPlan?.summary, 220),
+    travelers: Array.isArray(params.previousTravelPlan?.travelers) ? params.previousTravelPlan?.travelers : [],
+    duration: clean(params.previousTravelPlan?.travel_dates_or_duration, 80) || undefined,
+  });
 }
 
 export function buildCognitiveState(params: {

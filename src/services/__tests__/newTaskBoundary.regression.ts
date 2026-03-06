@@ -1,6 +1,10 @@
 import assert from "node:assert/strict";
 
-import { buildTaskDetection, type PlanningTaskLifecycle } from "../planningState.js";
+import {
+  buildTaskDetection,
+  detectTaskSwitchFromLatestUserTurn,
+  type PlanningTaskLifecycle,
+} from "../planningState.js";
 import { buildTransferRecommendations } from "../motifTransfer/retrieval.js";
 import { motifVersionMeaningfullyChanged } from "../motifTransfer/storage.js";
 import type { TravelPlanState } from "../travelPlan/state.js";
@@ -146,6 +150,20 @@ run("explicit restart wording should produce explicit_restart", () => {
     latestUserText: "帮我重新规划一趟新的旅行任务",
   });
   assert.equal(out.switch_reason_code, "explicit_restart");
+  assert.equal(out.is_task_switch, true);
+});
+
+run("latest-user-text detector should trigger destination switch for a different paired-country trip", () => {
+  const prev = makePlan("冰岛七天旅行");
+  prev.destinations = ["冰岛"];
+  prev.destination_scope = ["冰岛"];
+  const out = detectTaskSwitchFromLatestUserTurn({
+    conversationId: "conv_2",
+    locale,
+    previousTravelPlan: prev,
+    latestUserText: "我想安排西班牙和葡萄牙10天，爸爸膝盖不好，不要每天换酒店。",
+  });
+  assert.equal(out.switch_reason_code, "destination_switch");
   assert.equal(out.is_task_switch, true);
 });
 
