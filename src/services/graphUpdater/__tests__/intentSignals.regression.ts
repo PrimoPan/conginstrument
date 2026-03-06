@@ -787,8 +787,44 @@ const cases: Case[] = [
     run: () => {
       const s = extractIntentSignals("不是必须环岛，南岸多住一点也可以，斯奈山半岛先不去，整体还是9天。");
       assert.equal((s.destinations || []).includes("南岸"), true);
+      assert.equal(s.destination, undefined);
       assert.equal((s.removedDestinations || []).includes("斯奈山半岛"), true);
       assert.equal(s.durationDays, 9);
+    },
+  },
+  {
+    name: "lodging focus refinement should keep country anchor and add focused region in graph patch",
+    run: async () => {
+      const turn1 = "我想去冰岛环岛9天，预算每人2万元，最多两到三个基地，想看冰河湖和黑沙滩，但不要太赶。";
+      const turn2 = "不是必须环岛，南岸多住一点也可以，斯奈山半岛先不去，整体还是9天。";
+      let graph: any = { id: "g_iceland_focus", version: 1, nodes: [], edges: [] };
+      const patch1 = await generateGraphPatch({
+        graph,
+        userText: turn1,
+        recentTurns: [{ role: "user", content: turn1 }],
+        stateContextUserTurns: [turn1],
+        assistantText: "收到",
+        locale: "zh-CN",
+      });
+      graph = applyPatchWithGuards(graph, patch1).newGraph;
+      const patch2 = await generateGraphPatch({
+        graph,
+        userText: turn2,
+        recentTurns: [
+          { role: "user", content: turn1 },
+          { role: "assistant", content: "收到" },
+          { role: "user", content: turn2 },
+        ],
+        stateContextUserTurns: [turn1, turn2],
+        assistantText: "收到",
+        locale: "zh-CN",
+      });
+      graph = applyPatchWithGuards(graph, patch2).newGraph;
+      const destinationKeys = graph.nodes
+        .filter((n: any) => String(n.key || "").startsWith("slot:destination:"))
+        .map((n: any) => n.key)
+        .sort();
+      assert.deepEqual(destinationKeys, ["slot:destination:冰岛", "slot:destination:南岸"]);
     },
   },
   {

@@ -2884,6 +2884,12 @@ export function extractIntentSignals(userText: string, opts?: { historyMode?: bo
       }
     }
   }
+  const destinationLooksLikeLodgingFocus =
+    /(多住一点|住久一点|多待一点|多留一点|重点住|优先住|主要住)/.test(out.destinationEvidence || "");
+  if (destinationLooksLikeLodgingFocus) {
+    out.destination = undefined;
+    out.destinationEvidence = undefined;
+  }
   if (removedDestinations.length) {
     out.removedDestinations = removedDestinations;
     out.destinations = (out.destinations || []).filter((city) => !removedDestinations.includes(city));
