@@ -33,9 +33,19 @@ function isResolved(m: ConceptMotif): boolean {
   return reason.startsWith("user_resolved");
 }
 
+function isBlockingDeprecatedReason(reason: string): boolean {
+  const r = cleanText(reason, 180).toLowerCase();
+  if (!r) return false;
+  if (r.startsWith("relation_conflict_with:")) return true;
+  if (r === "relation_conflicts_with") return true;
+  if (r.startsWith("explicit_negation")) return true;
+  return false;
+}
+
 export function listUnresolvedDeprecatedMotifs(motifs: ConceptMotif[]): ConflictGateItem[] {
   return (motifs || [])
     .filter((m) => m.status === "deprecated" && !isResolved(m))
+    .filter((m) => isBlockingDeprecatedReason(String((m as any)?.statusReason || "")))
     .slice()
     .sort((a, b) => b.confidence - a.confidence || a.id.localeCompare(b.id))
     .map((m) => ({

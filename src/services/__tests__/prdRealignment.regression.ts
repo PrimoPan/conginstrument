@@ -533,7 +533,7 @@ run("manual user motif should not be cancelled when still supported by concepts"
   assert.equal(kept?.statusReason?.startsWith("not_supported_by_current_graph"), false);
 });
 
-run("conflict gate payload should block only unresolved deprecated motifs", () => {
+run("conflict gate payload should block only unresolved hard conflicts", () => {
   const blocked = buildConflictGatePayload(
     [
       {
@@ -564,6 +564,29 @@ run("conflict gate payload should block only unresolved deprecated motifs", () =
     "zh-CN" as any
   );
   assert.equal(cleared, null);
+
+  const lowConfidence = buildConflictGatePayload(
+    [
+      {
+        id: "m_low_conf",
+        title: "低置信度关系",
+        status: "deprecated",
+        confidence: 0.74,
+        statusReason: "low_confidence:enable:0.75",
+        resolved: false,
+      },
+      {
+        id: "m_pruned",
+        title: "系统修剪关系",
+        status: "deprecated",
+        confidence: 0.78,
+        statusReason: "evidence_stable;objective_pruned",
+        resolved: false,
+      },
+    ] as any,
+    "zh-CN" as any
+  );
+  assert.equal(lowConfidence, null);
 });
 
 console.log("All PRD re-alignment checks passed.");
