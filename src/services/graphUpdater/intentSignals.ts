@@ -1656,6 +1656,9 @@ export function isLikelyDestinationCandidate(x: string): boolean {
   if (/(人民币|预算|经费|花费|费用|准备|打算|计划|安排|行程)/i.test(s)) return false;
   if (/[A-Za-z]/.test(s) && /[\u4e00-\u9fff]/.test(s)) return false;
   if (/^[A-Za-z]+$/.test(s) && s.length <= 2) return false;
+  if (/^(?:更|比较|稍微|尽量|优先|最好)?\s*(?:慢|快|轻松|悠闲|休闲|紧凑|宽松|松弛|舒服|舒适|放松|赶)\s*(?:一点|一些)?(?:也可以|也行)?$/i.test(s)) {
+    return false;
+  }
   if (/(妈妈|爸爸|父母|家人|老人|孩子|娃|可以)/.test(s)) return false;
   if (/(多住一点|少住一点|多待一点|少待一点|压缩一些|都保留|不用单独算|还是问题|先别塞满|别塞满)/.test(s)) return false;
   if (/(一个人|两个人|三个人|[0-9一二三四五六七八九十两]{1,2}个?人|独自|单人|全家|一家)/i.test(s)) return false;
@@ -1856,6 +1859,22 @@ function extractDestinationList(text: string): Array<{ city: string; evidence: s
   return dedup.slice(0, 4);
 }
 
+function isCompoundTripEnvelopeDuration(snippet: string, city: string): boolean {
+  const s = cleanStatement(snippet, 120);
+  const normalizedCity = normalizeDestination(city);
+  if (!s || !normalizedCity) return false;
+  const pair = s.match(
+    /([A-Za-z\u4e00-\u9fff]{2,16})\s*(?:和|与|及|加|、|,|，)\s*([A-Za-z\u4e00-\u9fff]{2,16})\s*[0-9一二三四五六七八九十两]{1,3}\s*(?:天|晚|夜)(?!上)/i
+  );
+  if (!pair?.[1] || !pair?.[2]) return false;
+  const left = normalizeDestination(pair[1]);
+  const right = normalizeDestination(pair[2]);
+  if (!left || !right) return false;
+  if (!isLikelyDestinationCandidate(left) || !isLikelyDestinationCandidate(right)) return false;
+  if (normalizedCity !== left && normalizedCity !== right) return false;
+  return /(?:想去|想安排|安排|规划|计划|旅行|旅游|出行|行程|玩|度假|整体|全程|总共|一共)/i.test(s);
+}
+
 function extractCityDurationSegments(
   text: string,
   locale?: AppLocale
@@ -1903,6 +1922,7 @@ function extractCityDurationSegments(
     const snippet = cleanStatement(m[0] || `${city} ${formatDayCount(locale, days)}`, 80);
     if (hasRelativeDayOffset(snippet, city)) continue;
     if (hasHardDayReservationSignal(snippet) && days <= 2) continue;
+    if (isCompoundTripEnvelopeDuration(snippet, city)) continue;
     const kind: "travel" | "meeting" =
       /(会议|开会|chi|conference|workshop|论坛|参会)/i.test(snippet) ? "meeting" : "travel";
     out.push({
@@ -1931,6 +1951,7 @@ function extractCityDurationSegments(
     const ctx = cleanStatement(scanText.slice(idx, right), 80);
     if (hasRelativeDayOffset(ctx, city)) continue;
     if (hasHardDayReservationSignal(ctx) && days <= 2) continue;
+    if (isCompoundTripEnvelopeDuration(ctx, city)) continue;
     const kind: "travel" | "meeting" =
       /(会议|开会|chi|conference|workshop|论坛)/i.test(ctx) ? "meeting" : "travel";
 
@@ -2100,9 +2121,13 @@ export function buildTravelIntentStatement(
       .map((x) => normalizeDestination(x.name || ""))
       .filter(Boolean)
   );
-  const destinations = (signals.destinations || [])
-    .map((x) => normalizeDestination(x))
-    .filter((x) => {
+  const alignedDestinations = (signals.destinations || [])
+    .map((x, index) => ({
+      city: normalizeDestination(x),
+      evidence: cleanStatement(signals.destinationEvidences?.[index] || "", 60),
+    }))
+    .filter(({ city }) => {
+      const x = city;
       if (!x || !isLikelyDestinationCandidate(x)) return false;
       if (subLocationNames.has(x)) return false;
       for (const sub of subLocationNames) {
@@ -2111,6 +2136,7 @@ export function buildTravelIntentStatement(
       }
       return true;
     });
+  const destinations = alignedDestinations.map((x) => x.city);
   const normalizedPrimary = normalizeDestination(signals.destination || "");
   const primaryDestination =
     normalizedPrimary &&
@@ -2120,11 +2146,27 @@ export function buildTravelIntentStatement(
       ? normalizedPrimary
       : "";
   const en = isEnglishLocale(locale);
-  const destinationPhrase =
+  const goalDestinations =
     destinations.length >= 2
+      ? (() => {
+          const firstEvidence = alignedDestinations[0]?.evidence;
+          if (firstEvidence) {
+            const primaryCluster = alignedDestinations
+              .filter((x) => x.evidence === firstEvidence)
+              .map((x) => x.city);
+            if (primaryCluster.length >= 2) return primaryCluster.slice(0, 3);
+          }
+          if (primaryDestination && destinations.includes(primaryDestination)) {
+            return [primaryDestination, ...destinations.filter((x) => x !== primaryDestination)].slice(0, 3);
+          }
+          return destinations.slice(0, 3);
+        })()
+      : [primaryDestination || destinations[0] || ""].filter(Boolean);
+  const destinationPhrase =
+    goalDestinations.length >= 2
       ? en
-        ? destinations.slice(0, 3).join(" and ")
-        : destinations.slice(0, 3).join("和")
+        ? goalDestinations.join(" and ")
+        : goalDestinations.join("和")
       : primaryDestination || destinations[0] || "";
 
   if (destinationPhrase && signals.durationDays) {
@@ -2919,7 +2961,22 @@ export function extractIntentSignals(userText: string, opts?: { historyMode?: bo
     out.durationBoundaryQuestion = duration.boundaryQuestion;
   }
 
-  const citySegments = dedupeCityDurationSegments(extractCityDurationSegments(text, opts?.locale), opts?.locale);
+  const rawCitySegments = dedupeCityDurationSegments(extractCityDurationSegments(text, opts?.locale), opts?.locale);
+  const pairEnvelopeSegment = rawCitySegments.find((seg) => {
+    if ((out.destinations || []).length < 2) return false;
+    return isCompoundTripEnvelopeDuration(seg.evidence || "", seg.city);
+  });
+  if (!out.durationDays && pairEnvelopeSegment) {
+    out.durationDays = pairEnvelopeSegment.days;
+    out.durationEvidence = pairEnvelopeSegment.evidence;
+    out.durationStrength = Math.max(out.durationStrength || 0, 0.76);
+  }
+  const citySegments = rawCitySegments.filter((seg) => {
+    if ((out.destinations || []).length < 2) return true;
+    if (!isCompoundTripEnvelopeDuration(seg.evidence || "", seg.city)) return true;
+    if (out.durationDays != null && seg.days !== out.durationDays) return true;
+    return false;
+  });
   if (citySegments.length) {
     out.cityDurations = citySegments.map((x) => ({
       city: remapBySubLocationParent(x.city, out.subLocations),
@@ -3273,6 +3330,22 @@ function clearPreferenceStateForAxis(signals: IntentSignals, axis: PreferenceAxi
 
 function mergeSignalsWithLatest(history: IntentSignals, latest: IntentSignals, locale?: AppLocale): IntentSignals {
   const out: IntentSignals = { ...history };
+  const destinationEvidenceByCity = new Map<string, string>();
+  const rememberDestinationEvidence = (rawCity: string | undefined, rawEvidence: string | undefined) => {
+    const city = normalizeDestination(rawCity || "");
+    const evidence = cleanStatement(rawEvidence || rawCity || "", 60);
+    const key = city.toLowerCase();
+    if (!city || !evidence || !key || !isLikelyDestinationCandidate(city) || destinationEvidenceByCity.has(key)) return;
+    destinationEvidenceByCity.set(key, evidence);
+  };
+  (history.destinations || []).forEach((city, index) => {
+    rememberDestinationEvidence(city, history.destinationEvidences?.[index] || history.destinationEvidence || city);
+  });
+  rememberDestinationEvidence(history.destination, history.destinationEvidence || history.destination);
+  (latest.destinations || []).forEach((city, index) => {
+    rememberDestinationEvidence(city, latest.destinationEvidences?.[index] || latest.destinationEvidence || city);
+  });
+  rememberDestinationEvidence(latest.destination, latest.destinationEvidence || latest.destination);
   // delta 是“事件”，不是“状态”：避免历史增量在后续轮次被重复叠加。
   out.budgetDeltaCny = undefined;
   out.budgetSpentDeltaCny = undefined;
@@ -3320,6 +3393,7 @@ function mergeSignalsWithLatest(history: IntentSignals, latest: IntentSignals, l
         evidence: cleanStatement(seg?.evidence || `${city} ${formatDayCount(locale, days)}`, 40),
         kind,
       };
+      rememberDestinationEvidence(city, cand.evidence);
       const shouldReplace =
         !cur ||
         cand.days > cur.days ||
@@ -3457,6 +3531,17 @@ function mergeSignalsWithLatest(history: IntentSignals, latest: IntentSignals, l
       latestStableCitySnapshot?.evidenceByCity.get(out.destination) ||
       latest.destinationEvidence ||
       out.destinationEvidence;
+  }
+  if (out.destinations?.length) {
+    out.destinationEvidences = out.destinations.map(
+      (city) =>
+        latestStableCitySnapshot?.evidenceByCity.get(city) ||
+        destinationEvidenceByCity.get(normalizeDestination(city).toLowerCase()) ||
+        city
+    );
+    out.destinationEvidence = out.destinationEvidences[0] || out.destinationEvidence || out.destination;
+  } else {
+    out.destinationEvidences = undefined;
   }
   out.cityDurationImportanceByCity = mergeImportanceMap(
     out.cityDurationImportanceByCity,

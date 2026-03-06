@@ -326,6 +326,19 @@ function stableTravelSnapshotCities(out: IntentSignals): Array<{ city: string; e
 export function sanitizeIntentSignals(input: IntentSignals): IntentSignals {
   const out: IntentSignals = { ...input };
   const derivedConstraints: NonNullable<IntentSignals["genericConstraints"]> = [];
+  const destinationEvidenceByKey = new Map<string, string>();
+  const rememberDestinationEvidence = (rawCity: string | undefined, rawEvidence: string | undefined) => {
+    const city = canonicalCity(rawCity || "");
+    const evidence = cleanStatement(rawEvidence || rawCity || "", 60);
+    const key = slug(city);
+    if (!city || !evidence || !key || destinationEvidenceByKey.has(key)) return;
+    destinationEvidenceByKey.set(key, evidence);
+  };
+
+  (out.destinations || []).forEach((city, index) => {
+    rememberDestinationEvidence(city, out.destinationEvidences?.[index] || out.destinationEvidence || city);
+  });
+  rememberDestinationEvidence(out.destination, out.destinationEvidence || out.destination);
 
   if (out.genericConstraints?.length) {
     const map = new Map<string, NonNullable<IntentSignals["genericConstraints"]>[number]>();
@@ -428,6 +441,7 @@ export function sanitizeIntentSignals(input: IntentSignals): IntentSignals {
     if (subParentByName.has(key)) {
       const parent = subParentByName.get(key)!;
       destMap.set(slug(parent), parent);
+      rememberDestinationEvidence(parent, destinationEvidenceByKey.get(key) || raw);
       continue;
     }
 
@@ -441,10 +455,12 @@ export function sanitizeIntentSignals(input: IntentSignals): IntentSignals {
   if (destMap.size) {
     out.destinations = Array.from(destMap.values()).slice(0, 8);
     out.destination = out.destinations[0];
-    if (!out.destinationEvidence) out.destinationEvidence = out.destination;
+    out.destinationEvidences = out.destinations.map((city) => destinationEvidenceByKey.get(slug(city)) || city);
+    out.destinationEvidence = out.destinationEvidences[0] || out.destination;
   } else {
     out.destinations = undefined;
     out.destination = undefined;
+    out.destinationEvidences = undefined;
   }
 
   if (derivedConstraints.length) {
@@ -477,11 +493,14 @@ export function sanitizeIntentSignals(input: IntentSignals): IntentSignals {
         byCity.set(key, next);
       }
       if (!destMap.has(key)) destMap.set(key, mapped);
+      rememberDestinationEvidence(mapped, destinationEvidenceByKey.get(key) || next.evidence || mapped);
     }
     out.cityDurations = byCity.size ? Array.from(byCity.values()).slice(0, 8) : undefined;
     if (destMap.size) {
       out.destinations = Array.from(destMap.values()).slice(0, 8);
       out.destination = out.destinations[0];
+      out.destinationEvidences = out.destinations.map((city) => destinationEvidenceByKey.get(slug(city)) || city);
+      out.destinationEvidence = out.destinationEvidences[0] || out.destination;
     }
   }
 
@@ -505,6 +524,7 @@ export function sanitizeIntentSignals(input: IntentSignals): IntentSignals {
   if (stableTravelCities.length >= 2) {
     out.destinations = stableTravelCities.map((x) => x.city).slice(0, 8);
     out.destination = out.destinations[0];
+    out.destinationEvidences = stableTravelCities.map((x) => cleanStatement(x.evidence || x.city, 60)).slice(0, 8);
     out.destinationEvidence = stableTravelCities[0]?.evidence || out.destination;
     if (out.destinationImportanceByCity) {
       const filtered: Record<string, number> = {};

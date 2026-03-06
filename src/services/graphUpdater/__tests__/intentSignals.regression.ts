@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 
 import {
+  buildTravelIntentStatement,
   extractIntentSignals,
   extractIntentSignalsWithRecency,
   mergeIntentSignals,
@@ -780,6 +781,49 @@ const cases: Case[] = [
       const s = extractIntentSignals("我想安排西班牙和葡萄牙10天，里斯本和塞维利亚优先，马德里不是必须。");
       assert.equal((s.destinations || []).includes("里斯本"), true);
       assert.equal((s.destinations || []).includes("塞维利亚"), true);
+    },
+  },
+  {
+    name: "pace preference should not leak into paired-country destinations or goal text",
+    run: () => {
+      const text = "我想安排西班牙和葡萄牙10天，想慢一点，里斯本和塞维利亚优先，马德里不是必须。";
+      const s = extractIntentSignals(text);
+      assert.deepEqual(s.destinations, ["西班牙", "葡萄牙", "里斯本", "塞维利亚"]);
+      assert.equal((s.destinations || []).includes("慢一点"), false);
+      assert.equal((s.cityDurations || []).some((x) => x.city === "葡萄牙"), false);
+      assert.equal(buildTravelIntentStatement(s, text, "zh-CN"), "意图：去西班牙和葡萄牙旅游10天");
+    },
+  },
+  {
+    name: "paired-country priority phrasing should not generate pace destination or pair-envelope city-duration slots",
+    run: async () => {
+      const text = "我想安排西班牙和葡萄牙10天，想慢一点，里斯本和塞维利亚优先，马德里不是必须。";
+      const patch = await generateGraphPatch({
+        graph: { id: "g_iberia_priority_clean", version: 1, nodes: [], edges: [] },
+        userText: text,
+        recentTurns: [{ role: "user", content: text }],
+        stateContextUserTurns: [text],
+        assistantText: "收到",
+        locale: "zh-CN",
+      });
+      const nodes = patch.ops
+        .filter((op: any) => op.op === "add_node" || op.op === "upsert_node")
+        .map((op: any) => op.node);
+      const destinationKeys = nodes
+        .filter((n: any) => String(n.key || "").startsWith("slot:destination:"))
+        .map((n: any) => String(n.key))
+        .sort();
+      const goalNode = nodes.find((n: any) => String(n.key || "") === "slot:goal");
+      assert.equal(destinationKeys.includes("slot:destination:慢一点"), false);
+      assert.equal(destinationKeys.includes("slot:destination:西班牙"), true);
+      assert.equal(destinationKeys.includes("slot:destination:葡萄牙"), true);
+      assert.equal(destinationKeys.includes("slot:destination:里斯本"), true);
+      assert.equal(destinationKeys.includes("slot:destination:塞维利亚"), true);
+      assert.equal(
+        nodes.some((n: any) => String(n.key || "").startsWith("slot:duration_city:葡萄牙")),
+        false
+      );
+      assert.equal(goalNode?.statement, "意图：去西班牙和葡萄牙旅游10天");
     },
   },
   {
