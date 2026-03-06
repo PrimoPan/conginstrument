@@ -196,6 +196,50 @@ run("fresh trip phrasing should still switch even if the new task mentions longe
   assert.equal(out.is_task_switch, true);
 });
 
+run("coarse region refined into city-night allocation should stay in the same task", () => {
+  const prev = makePlan("关西七天旅行");
+  prev.destinations = ["关西"];
+  prev.destination_scope = ["关西"];
+  prev.travel_dates_or_duration = "7天";
+  const out = detectTaskSwitchFromLatestUserTurn({
+    conversationId: "conv_5",
+    locale,
+    previousTravelPlan: prev,
+    latestUserText: "可以，那就按京都为主住6晚，大阪最后1晚，整体还是7天。",
+  });
+  assert.equal(out.switch_reason_code, "continuous");
+  assert.equal(out.is_task_switch, false);
+});
+
+run("country refined into city allocation with transition stop should stay in the same task", () => {
+  const prev = makePlan("摩洛哥八天旅行");
+  prev.destinations = ["摩洛哥"];
+  prev.destination_scope = ["摩洛哥"];
+  prev.travel_dates_or_duration = "8天";
+  const out = detectTaskSwitchFromLatestUserTurn({
+    conversationId: "conv_6",
+    locale,
+    previousTravelPlan: prev,
+    latestUserText: "先按马拉喀什4晚、非斯2晚，卡萨最多半天过渡，整体还是8天。",
+  });
+  assert.equal(out.switch_reason_code, "continuous");
+  assert.equal(out.is_task_switch, false);
+});
+
+run("fresh trip phrasing with city allocation should still switch tasks", () => {
+  const prev = makePlan("关西七天旅行");
+  prev.destinations = ["关西"];
+  prev.destination_scope = ["关西"];
+  const out = detectTaskSwitchFromLatestUserTurn({
+    conversationId: "conv_7",
+    locale,
+    previousTravelPlan: prev,
+    latestUserText: "我想安排西班牙和葡萄牙10天，里斯本4晚、塞维利亚4晚，剩下2天机动。",
+  });
+  assert.equal(out.switch_reason_code, "destination_switch");
+  assert.equal(out.is_task_switch, true);
+});
+
 run("retrieval hints should down-rank stable profile motifs when carry is disabled", () => {
   const plan = makePlan("巴黎七天旅行，偏好在地体验和慢节奏。");
   const motifLibrary = makeLibrary();
