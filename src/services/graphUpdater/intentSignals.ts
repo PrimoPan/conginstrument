@@ -242,10 +242,26 @@ function hasPartialDurationAllocationCue(text: string): boolean {
   );
 }
 
+function hasCompleteTravelDurationAllocation(
+  signals?: Pick<IntentSignals, "cityDurations" | "durationDays">
+): boolean {
+  const travelSegments = (signals?.cityDurations || []).filter((seg) => {
+    const city = normalizeDestination(seg?.city || "");
+    const days = Number(seg?.days) || 0;
+    return !!city && isLikelyDestinationCandidate(city) && days > 0 && seg?.kind !== "meeting";
+  });
+  if (travelSegments.length < 2) return false;
+  const sumDays = travelSegments.reduce((acc, seg) => acc + (Number(seg.days) || 0), 0);
+  if (sumDays <= 0) return false;
+  const statedDays = Number(signals?.durationDays) || 0;
+  return statedDays > 0 && Math.abs(statedDays - sumDays) <= 1;
+}
+
 function summarizeStableCityDurationSnapshot(
   signals?: Pick<IntentSignals, "cityDurations" | "durationDays" | "hasPartialDurationAllocation">
 ): StableCityDurationSnapshot | null {
-  if (signals?.hasPartialDurationAllocation) return null;
+  const completeAllocation = hasCompleteTravelDurationAllocation(signals);
+  if (signals?.hasPartialDurationAllocation && !completeAllocation) return null;
   const orderedCities: string[] = [];
   const seen = new Set<string>();
   const evidenceByCity = new Map<string, string>();

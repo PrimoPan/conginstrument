@@ -503,6 +503,52 @@ const cases: Case[] = [
     },
   },
   {
+    name: "full city allocation should replace coarse destination even if partial-allocation flag is set",
+    run: () => {
+      const merged = mergeIntentSignals(
+        {
+          destination: "关西",
+          destinations: ["关西"],
+          durationDays: 7,
+          durationEvidence: "关西7天",
+          cityDurations: [
+            {
+              city: "关西",
+              days: 7,
+              evidence: "关西7天",
+              kind: "travel",
+            },
+          ],
+        },
+        {
+          destination: "关西",
+          destinations: ["关西", "京都", "大阪"],
+          durationDays: 7,
+          durationEvidence: "整体还是7天",
+          hasExplicitTotalCue: true,
+          hasPartialDurationAllocation: true,
+          cityDurations: [
+            {
+              city: "京都",
+              days: 6,
+              evidence: "京都6晚",
+              kind: "travel",
+            },
+            {
+              city: "大阪",
+              days: 1,
+              evidence: "大阪1晚",
+              kind: "travel",
+            },
+          ],
+        }
+      );
+      assert.equal(merged.durationDays, 7);
+      assert.deepEqual(merged.destinations, ["京都", "大阪"]);
+      assert.equal(merged.destination, "京都");
+    },
+  },
+  {
     name: "signal sanitizer should collapse mixed country-region-city destinations to stable city snapshot",
     run: () => {
       const sanitized = sanitizeIntentSignals({
@@ -529,6 +575,36 @@ const cases: Case[] = [
       assert.deepEqual(sanitized.destinations, ["京都", "大阪"]);
       assert.equal(sanitized.destination, "京都");
       assert.equal(sanitized.destinationEvidence, "京都6晚");
+    },
+  },
+  {
+    name: "signal sanitizer should keep full city snapshot even if partial-allocation flag leaks in",
+    run: () => {
+      const sanitized = sanitizeIntentSignals({
+        destination: "关西",
+        destinations: ["关西", "京都", "大阪"],
+        destinationEvidence: "日本关西",
+        hasPartialDurationAllocation: true,
+        cityDurations: [
+          {
+            city: "京都",
+            days: 6,
+            evidence: "京都6晚",
+            kind: "travel",
+          },
+          {
+            city: "大阪",
+            days: 1,
+            evidence: "大阪1晚",
+            kind: "travel",
+          },
+        ],
+        durationDays: 7,
+        durationEvidence: "整体还是7天",
+      });
+      assert.deepEqual(sanitized.destinations, ["京都", "大阪"]);
+      assert.equal(sanitized.destination, "京都");
+      assert.equal(sanitized.durationDays, 7);
     },
   },
   {

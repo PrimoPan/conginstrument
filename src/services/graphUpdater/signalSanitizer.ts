@@ -193,8 +193,22 @@ function reconcileDurationBySegments(out: IntentSignals): void {
   }
 }
 
+function hasCompleteTravelDurationCoverage(out: Pick<IntentSignals, "cityDurations" | "durationDays">): boolean {
+  const travelSegments = (out.cityDurations || []).filter((seg) => {
+    const city = canonicalCity(seg?.city || "");
+    const days = Number(seg?.days) || 0;
+    return !!city && !isNoiseCityLike(city) && isLikelyDestinationCandidate(city) && days > 0 && seg?.kind !== "meeting";
+  });
+  if (travelSegments.length < 2) return false;
+  const travelSum = travelSegments.reduce((acc, seg) => acc + (Number(seg.days) || 0), 0);
+  if (travelSum <= 0) return false;
+  const statedDays = Number(out.durationDays) || 0;
+  return statedDays > 0 && Math.abs(statedDays - travelSum) <= 1;
+}
+
 function stableTravelSnapshotCities(out: IntentSignals): Array<{ city: string; evidence: string }> {
-  if (out.hasPartialDurationAllocation) return [];
+  const completeCoverage = hasCompleteTravelDurationCoverage(out);
+  if (out.hasPartialDurationAllocation && !completeCoverage) return [];
   const ordered: Array<{ city: string; evidence: string }> = [];
   const seen = new Set<string>();
   for (const seg of out.cityDurations || []) {
@@ -409,7 +423,12 @@ export function sanitizeIntentSignals(input: IntentSignals): IntentSignals {
     const travelSum = travelSegments.reduce((acc, x) => acc + (Number(x.days) || 0), 0);
     const hasMeetingOnly = travelSegments.length === 0 && out.cityDurations.some((x) => x.kind === "meeting");
     const hasDurationUpdateCue = !!out.hasDurationUpdateCue;
-    if (!out.hasPartialDurationAllocation && !hasMeetingOnly && travelCityCount >= 2 && travelSum > 0) {
+    if (
+      (!out.hasPartialDurationAllocation || hasCompleteTravelDurationCoverage(out)) &&
+      !hasMeetingOnly &&
+      travelCityCount >= 2 &&
+      travelSum > 0
+    ) {
       if (!out.durationDays || (!hasDurationUpdateCue && out.durationDays < travelSum)) {
         out.durationDays = travelSum;
         out.durationEvidence = travelSegments.map((x) => `${x.city}${x.days}天`).join(" + ");
