@@ -14,6 +14,15 @@ import type { MotifTransferState } from "./motifTransfer/types.js";
 import { buildTransferredConstraintPrompt } from "./motifTransfer/application.js";
 
 const STREAM_MODE = (process.env.CI_STREAM_MODE || "pseudo") as "upstream" | "pseudo";
+const CHAT_TIMEOUT_MS = Math.max(8_000, Number(process.env.CI_CHAT_TIMEOUT_MS || 45_000));
+const STREAM_FIRST_TOKEN_TIMEOUT_MS = Math.max(
+  4_000,
+  Number(process.env.CI_STREAM_FIRST_TOKEN_TIMEOUT_MS || 18_000)
+);
+const STREAM_TOTAL_TIMEOUT_MS = Math.max(
+  STREAM_FIRST_TOKEN_TIMEOUT_MS,
+  Number(process.env.CI_STREAM_TOTAL_TIMEOUT_MS || CHAT_TIMEOUT_MS)
+);
 const DEBUG = process.env.CI_DEBUG_LLM === "1";
 function dlog(...args: any[]) {
   if (DEBUG) console.log("[LLM][chat]", ...args);
@@ -38,6 +47,57 @@ function sleep(ms: number, signal?: AbortSignal) {
       );
     }
   });
+}
+
+function composeAbortSignal(signals: Array<AbortSignal | undefined>) {
+  const controller = new AbortController();
+  const cleanups: Array<() => void> = [];
+  const abortWith = (reason?: any) => {
+    if (!controller.signal.aborted) controller.abort(reason);
+  };
+
+  for (const signal of signals) {
+    if (!signal) continue;
+    if (signal.aborted) {
+      abortWith((signal as any).reason);
+      continue;
+    }
+    const onAbort = () => abortWith((signal as any).reason);
+    signal.addEventListener("abort", onAbort, { once: true });
+    cleanups.push(() => signal.removeEventListener("abort", onAbort));
+  }
+
+  return {
+    signal: controller.signal,
+    abort: (reason?: any) => abortWith(reason),
+    cleanup: () => {
+      while (cleanups.length) cleanups.pop()?.();
+    },
+  };
+}
+
+function timeoutError(code: string, ms: number) {
+  const err = new Error(`${code}:${ms}`);
+  (err as any).code = code;
+  return err;
+}
+
+async function createChatCompletionWithTimeout<T>(
+  factory: (signal: AbortSignal) => Promise<T>,
+  timeoutMs: number,
+  outerSignal?: AbortSignal
+): Promise<T> {
+  const timeout = new AbortController();
+  const combined = composeAbortSignal([outerSignal, timeout.signal]);
+  const timer = setTimeout(() => {
+    combined.abort(timeoutError("chat_timeout", timeoutMs));
+  }, timeoutMs);
+  try {
+    return await factory(combined.signal);
+  } finally {
+    clearTimeout(timer);
+    combined.cleanup();
+  }
 }
 
 function normalizeRecentTurns(
@@ -315,44 +375,65 @@ export async function generateAssistantTextNonStreaming(params: {
         )}${targetedQuestion}`
       : "");
 
-  const resp = await openai.chat.completions.create({
-    model: config.model,
-    messages: [{ role: "system", content: systemOne }, ...safeRecent, { role: "user", content: params.userText }],
-    max_tokens: 900,
-    temperature: 0.6,
-  });
+  try {
+    const resp = await createChatCompletionWithTimeout(
+      (signal) =>
+        openai.chat.completions.create(
+          {
+            model: config.model,
+            messages: [{ role: "system", content: systemOne }, ...safeRecent, { role: "user", content: params.userText }],
+            max_tokens: 900,
+            temperature: 0.6,
+          },
+          { signal }
+        ),
+      CHAT_TIMEOUT_MS
+    );
 
-  const msg = resp.choices?.[0]?.message;
-  const raw = readTextContent(msg?.content);
-  const text = enforceTargetedQuestion(stripMarkdownToText(raw), targetedQuestion);
+    const msg = resp.choices?.[0]?.message;
+    const raw = readTextContent(msg?.content);
+    const text = enforceTargetedQuestion(stripMarkdownToText(raw), targetedQuestion);
 
-  dlog("choices=", resp?.choices?.length, "finish=", resp?.choices?.[0]?.finish_reason, "len=", text.length);
+    dlog("choices=", resp?.choices?.length, "finish=", resp?.choices?.[0]?.finish_reason, "len=", text.length);
 
-  if (text) return text;
+    if (text) return text;
+  } catch (err: any) {
+    dlog("non-stream primary chat failed:", err?.message || err);
+  }
 
   const fallbackPrompt = isEnglishLocale(params.locale)
     ? `Give a concrete actionable response in plain text (no Markdown).\nUser input: ${params.userText}`
     : `请用简体中文给出具体可执行的回答，纯文本输出，不要Markdown。\n用户输入：${params.userText}`;
 
-  const resp2 = await openai.chat.completions.create({
-    model: config.model,
-    messages: [{ role: "user", content: fallbackPrompt }],
-    max_tokens: 700,
-    temperature: 0.6,
-  });
+  try {
+    const resp2 = await createChatCompletionWithTimeout(
+      (signal) =>
+        openai.chat.completions.create(
+          {
+            model: config.model,
+            messages: [{ role: "user", content: fallbackPrompt }],
+            max_tokens: 700,
+            temperature: 0.6,
+          },
+          { signal }
+        ),
+      CHAT_TIMEOUT_MS
+    );
 
-  const raw2 = readTextContent(resp2.choices?.[0]?.message?.content);
-  const text2 = enforceTargetedQuestion(stripMarkdownToText(raw2), targetedQuestion);
+    const raw2 = readTextContent(resp2.choices?.[0]?.message?.content);
+    const text2 = enforceTargetedQuestion(stripMarkdownToText(raw2), targetedQuestion);
 
-  dlog("fallback finish=", resp2?.choices?.[0]?.finish_reason, "len=", text2.length);
+    dlog("fallback finish=", resp2?.choices?.[0]?.finish_reason, "len=", text2.length);
 
-  return (
-    text2 ||
-    t(
-      params.locale,
-      "我明白你的意思了。你把你现在的目标和限制说一句，我直接给你一个可执行版本。",
-      "Got it. Share your current goal and constraints in one sentence, and I will give you an executable version."
-    )
+    if (text2) return text2;
+  } catch (err: any) {
+    dlog("non-stream fallback chat failed:", err?.message || err);
+  }
+
+  return t(
+    params.locale,
+    "我明白你的意思了。你把你现在的目标和限制说一句，我直接给你一个可执行版本。",
+    "Got it. Share your current goal and constraints in one sentence, and I will give you an executable version."
   );
 }
 
@@ -420,35 +501,59 @@ export async function streamAssistantText(params: {
         )}${targetedQuestion}`
       : "");
 
-  const upstream = await openai.chat.completions.create(
-    {
-      model: config.model,
-      messages: [{ role: "system", content: systemOne }, ...safeRecent, { role: "user", content: params.userText }],
-      stream: true,
-      max_tokens: 900,
-      temperature: 0.6,
-    },
-    params.signal ? { signal: params.signal } : undefined
-  );
-
   let full = "";
   let gotAny = false;
+  const streamController = new AbortController();
+  const combined = composeAbortSignal([params.signal, streamController.signal]);
+  const firstTokenTimer = setTimeout(() => {
+    combined.abort(timeoutError("stream_first_token_timeout", STREAM_FIRST_TOKEN_TIMEOUT_MS));
+  }, STREAM_FIRST_TOKEN_TIMEOUT_MS);
+  const totalTimer = setTimeout(() => {
+    combined.abort(timeoutError("stream_total_timeout", STREAM_TOTAL_TIMEOUT_MS));
+  }, STREAM_TOTAL_TIMEOUT_MS);
 
-  for await (const chunk of upstream as any) {
-    const token = chunk?.choices?.[0]?.delta?.content;
-    if (typeof token === "string" && token.length > 0) {
-      gotAny = true;
-      full += token;
-      params.onToken(token);
+  try {
+    const upstream = await openai.chat.completions.create(
+      {
+        model: config.model,
+        messages: [{ role: "system", content: systemOne }, ...safeRecent, { role: "user", content: params.userText }],
+        stream: true,
+        max_tokens: 900,
+        temperature: 0.6,
+      },
+      { signal: combined.signal }
+    );
+
+    for await (const chunk of upstream as any) {
+      const token = chunk?.choices?.[0]?.delta?.content;
+      if (typeof token === "string" && token.length > 0) {
+        if (!gotAny) clearTimeout(firstTokenTimer);
+        gotAny = true;
+        full += token;
+        params.onToken(token);
+      }
     }
-  }
 
-  const stripped = stripMarkdownToText(full);
-  const cleaned = enforceTargetedQuestion(stripped, targetedQuestion);
-  if (gotAny && cleaned) {
-    const missing = cleaned.startsWith(stripped) ? cleaned.slice(stripped.length) : "";
-    if (missing) params.onToken(missing);
-    return cleaned;
+    const stripped = stripMarkdownToText(full);
+    const cleaned = enforceTargetedQuestion(stripped, targetedQuestion);
+    if (gotAny && cleaned) {
+      const missing = cleaned.startsWith(stripped) ? cleaned.slice(stripped.length) : "";
+      if (missing) params.onToken(missing);
+      return cleaned;
+    }
+  } catch (err) {
+    const stripped = stripMarkdownToText(full);
+    const cleaned = enforceTargetedQuestion(stripped, targetedQuestion);
+    if (gotAny && cleaned) {
+      const missing = cleaned.startsWith(stripped) ? cleaned.slice(stripped.length) : "";
+      if (missing) params.onToken(missing);
+      return cleaned;
+    }
+    throw err;
+  } finally {
+    clearTimeout(firstTokenTimer);
+    clearTimeout(totalTimer);
+    combined.cleanup();
   }
 
   const fallback = await generateAssistantTextNonStreaming(params);
