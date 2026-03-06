@@ -1609,6 +1609,8 @@ export function normalizeDestination(raw: string): string {
   s = s.replace(/(地方|区域|位置|片区)(吧|呢|呀|啊)?$/i, "");
   s = s.replace(/(的地方|的区域)$/i, "");
   s = s.replace(/[吧啊呀呢嘛]+$/g, "");
+  const routeScoped = s.match(/^(.{2,16}?)(?:自驾)?(?:小)?(?:环岛|环线|环游|环路|一圈)$/i);
+  if (routeScoped?.[1]) s = routeScoped[1];
   s = s.trim();
   return s;
 }

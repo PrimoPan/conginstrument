@@ -752,6 +752,8 @@ const cases: Case[] = [
         "想去冰岛环岛9天，两个人，10月出发但日期还没定，每人预算2万元，想看冰河湖和瀑布，不想每天换酒店，最多两到三个基地。"
       );
       assert.equal(s.budgetCny, 20000);
+      assert.equal(s.destination, "冰岛");
+      assert.equal((s.destinations || []).includes("冰岛环岛"), false);
       assert.equal((s.destinations || []).includes("三个基地"), false);
     },
   },
