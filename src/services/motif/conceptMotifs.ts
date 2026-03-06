@@ -46,11 +46,15 @@ export type MotifCoverageInvariantReport = {
   coveredCausalEdges: number;
   uncoveredCausalEdges: number;
   repairedMotifCount: number;
+  repairRatio?: number;
   componentCount: number;
   excludedNonReasoningEdges?: number;
   excludedByReason?: Record<string, number>;
+  boundaryChecks?: number;
   llmValidatedEdges?: number;
   llmRejectedEdges?: number;
+  boundaryLlmCalls?: number;
+  highImpactEdges?: number;
 };
 
 export type ConceptMotif = {
@@ -112,7 +116,19 @@ export type ConceptMotif = {
   last_extracted_turn?: number;
   confidence_trace?: Array<{ turn: number; confidence: number }>;
   change_source?: MotifSilentChangeSource;
+  selection_score?: number;
+  uncertainty?: number;
+  state_transition_reason?: string;
+  support_count?: number;
 };
+
+type MotifLifecycleEvent =
+  | "evidence_up"
+  | "evidence_down"
+  | "explicit_negation"
+  | "conflict_resolved"
+  | "transfer_failure"
+  | "manual_disable";
 
 const MAX_ACTIVE_MOTIFS_PER_ANCHOR = 3;
 
@@ -121,6 +137,12 @@ function cleanText(input: any, max = 200): string {
     .replace(/\s+/g, " ")
     .trim()
     .slice(0, max);
+}
+
+function isAlgoV3Enabled(): boolean {
+  const raw = String(process.env.CI_ALGO_V3 || "").trim().toLowerCase();
+  if (!raw) return true;
+  return !(raw === "0" || raw === "false" || raw === "off" || raw === "no");
 }
 
 function clamp01(v: any, fallback = 0.7): number {
@@ -1404,6 +1426,16 @@ function normalizeMotifs(input: any): ConceptMotif[] {
         changeSourceRaw === "unchanged"
           ? (changeSourceRaw as MotifSilentChangeSource)
           : undefined,
+      selection_score: Number.isFinite(Number((raw as any)?.selection_score))
+        ? clamp01((raw as any)?.selection_score, 0.72)
+        : undefined,
+      uncertainty: Number.isFinite(Number((raw as any)?.uncertainty))
+        ? clamp01((raw as any)?.uncertainty, 0.35)
+        : undefined,
+      state_transition_reason: cleanText((raw as any)?.state_transition_reason, 180) || undefined,
+      support_count: Number.isFinite(Number((raw as any)?.support_count))
+        ? Math.max(0, Math.min(999, Math.round(Number((raw as any)?.support_count))))
+        : undefined,
     });
   }
   return out;
@@ -1435,6 +1467,33 @@ function statusRank(s: MotifLifecycleStatus): number {
   return 1;
 }
 
+export function motifLifecycleTransition(params: {
+  current: MotifLifecycleStatus;
+  event: MotifLifecycleEvent;
+  fallbackReason?: string;
+}): { status: MotifLifecycleStatus; reason: string } {
+  const current = normalizeMotifLifecycleStatus(params.current, "active");
+  const reason = cleanText(params.fallbackReason, 180) || params.event;
+  if (params.event === "manual_disable") return { status: "cancelled", reason };
+  if (params.event === "transfer_failure") return { status: "uncertain", reason };
+  if (params.event === "explicit_negation") return { status: "deprecated", reason };
+  if (params.event === "conflict_resolved") {
+    if (current === "deprecated" || current === "uncertain") return { status: "active", reason };
+    return { status: current, reason };
+  }
+  if (params.event === "evidence_down") {
+    if (current === "active") return { status: "uncertain", reason };
+    if (current === "uncertain") return { status: "deprecated", reason };
+    return { status: current, reason };
+  }
+  if (params.event === "evidence_up") {
+    if (current === "active") return { status: "active", reason: "" };
+    if (current === "deprecated" || current === "uncertain") return { status: "active", reason };
+    return { status: current, reason };
+  }
+  return { status: current, reason };
+}
+
 function inferBaseStatus(m: ConceptMotif, prev: ConceptMotif | undefined, conceptById: Map<string, ConceptItem>) {
   if (
     prev?.resolved &&
@@ -1455,20 +1514,35 @@ function inferBaseStatus(m: ConceptMotif, prev: ConceptMotif | undefined, concep
       const c = conceptById.get(cid);
       return !!c?.paused;
     });
-  if (allPaused) return { status: "cancelled" as MotifLifecycleStatus, reason: "all_related_concepts_paused" };
+  if (allPaused) {
+    return motifLifecycleTransition({
+      current: normalizeMotifLifecycleStatus(prev?.status, "active"),
+      event: "manual_disable",
+      fallbackReason: "all_related_concepts_paused",
+    });
+  }
 
   if (prev?.status === "disabled" && !!prev.resolved && !allPaused) {
-    return { status: "cancelled" as MotifLifecycleStatus, reason: prev.statusReason || "legacy_user_disabled" };
+    return motifLifecycleTransition({
+      current: "cancelled",
+      event: "manual_disable",
+      fallbackReason: prev.statusReason || "legacy_user_disabled",
+    });
   }
   const dep = motifDependencyClass(m);
   const threshold = motifLowConfidenceThreshold(dep);
   if (isMotifLowConfidence(m.confidence, dep)) {
-    return {
-      status: "uncertain" as MotifLifecycleStatus,
-      reason: `low_confidence:${dep}:${threshold.toFixed(2)}`,
-    };
+    return motifLifecycleTransition({
+      current: normalizeMotifLifecycleStatus(prev?.status, "active"),
+      event: "evidence_down",
+      fallbackReason: `low_confidence:${dep}:${threshold.toFixed(2)}`,
+    });
   }
-  return { status: "active" as MotifLifecycleStatus, reason: "" };
+  return motifLifecycleTransition({
+    current: normalizeMotifLifecycleStatus(prev?.status, "active"),
+    event: "evidence_up",
+    fallbackReason: "evidence_stable",
+  });
 }
 
 function isUserEditableStatus(status: MotifLifecycleStatus | undefined): status is "active" | "cancelled" {
@@ -2399,6 +2473,119 @@ function appendStatusHistory(next: ConceptMotif, prev?: ConceptMotif): ConceptMo
   };
 }
 
+function motifCoverageComponent(m: ConceptMotif): number {
+  if (m.coverage_origin === "edge_repair") return 1;
+  const edgeSupport = Math.min(1, (m.supportEdgeIds || []).length / 2);
+  const nodeSupport = Math.min(1, (m.supportNodeIds || []).length / 6);
+  return clamp01(edgeSupport * 0.68 + nodeSupport * 0.32, 0.6);
+}
+
+function motifTransferabilityComponent(m: ConceptMotif): number {
+  if ((m.reuseClass || "reusable") === "reusable") return 1;
+  return m.motifType === "triad" ? 0.52 : 0.44;
+}
+
+function motifConflictPenalty(m: ConceptMotif): number {
+  const reason = cleanText(m.statusReason, 160).toLowerCase();
+  if (reason.startsWith("relation_conflict_with:") || m.relation === "conflicts_with") return 1;
+  if (m.status === "deprecated") return 0.8;
+  if (m.status === "uncertain") return 0.35;
+  return 0.1;
+}
+
+function motifRedundancyPenalty(keyCount: number): number {
+  if (keyCount <= 1) return 0;
+  return Math.min(1, (keyCount - 1) * 0.42);
+}
+
+export function motifObjectiveScore(params: {
+  motif: ConceptMotif;
+  redundancyGroupSize: number;
+}): number {
+  const coverage = motifCoverageComponent(params.motif);
+  const confidence = clamp01(params.motif.confidence, 0.7);
+  const transferability = motifTransferabilityComponent(params.motif);
+  const redundancy = motifRedundancyPenalty(params.redundancyGroupSize);
+  const conflictPenalty = motifConflictPenalty(params.motif);
+  return Number(
+    clamp01(
+      coverage * 0.45 + confidence * 0.22 + transferability * 0.14 - redundancy * 0.11 - conflictPenalty * 0.08,
+      confidence
+    ).toFixed(4)
+  );
+}
+
+export function selectMotifSetGreedy(motifs: ConceptMotif[], conceptById: Map<string, ConceptItem>): ConceptMotif[] {
+  if (!motifs.length) return motifs;
+  const sourceSigById = new Map<string, string>();
+  const keyCount = new Map<string, number>();
+  for (const m of motifs) {
+    const sourceSig = sourceFamilySignature(m, conceptById) || "none";
+    sourceSigById.set(m.id, sourceSig);
+    const key = `${motifDependencyClass(m)}|${cleanText(m.anchorConceptId, 120)}|${sourceSig}`;
+    keyCount.set(key, (keyCount.get(key) || 0) + 1);
+  }
+
+  const withScore = motifs.map((m) => {
+    const sourceSig = sourceSigById.get(m.id) || "none";
+    const key = `${motifDependencyClass(m)}|${cleanText(m.anchorConceptId, 120)}|${sourceSig}`;
+    const selectionScore = motifObjectiveScore({
+      motif: m,
+      redundancyGroupSize: Number(keyCount.get(key) || 1),
+    });
+    return {
+      ...m,
+      selection_score: selectionScore,
+      uncertainty: Number((1 - clamp01(m.confidence, 0.7)).toFixed(4)),
+      support_count: (m.supportEdgeIds || []).length + (m.supportNodeIds || []).length,
+    };
+  });
+
+  const hardConflictIds = new Set(
+    withScore
+      .filter((m) => cleanText(m.statusReason, 120).toLowerCase().startsWith("relation_conflict_with:"))
+      .map((m) => m.id)
+  );
+  const selected = new Set<string>();
+  const selectedByAnchor = new Map<string, number>();
+  const selectedKey = new Set<string>();
+
+  const candidates = withScore
+    .filter((m) => m.status === "active" && !m.resolved && m.status !== "cancelled")
+    .slice()
+    .sort(
+      (a, b) =>
+        Number(b.selection_score || 0) - Number(a.selection_score || 0) ||
+        b.confidence - a.confidence ||
+        a.id.localeCompare(b.id)
+    );
+
+  for (const motif of candidates) {
+    const anchor = cleanText(motif.anchorConceptId, 120) || "none";
+    const current = Number(selectedByAnchor.get(anchor) || 0);
+    if (current >= MAX_ACTIVE_MOTIFS_PER_ANCHOR) continue;
+    const sourceSig = sourceSigById.get(motif.id) || "none";
+    const dedupKey = `${motifDependencyClass(motif)}|${anchor}|${sourceSig}`;
+    if (selectedKey.has(dedupKey)) continue;
+    selected.add(motif.id);
+    selectedKey.add(dedupKey);
+    selectedByAnchor.set(anchor, current + 1);
+  }
+
+  return withScore.map((m) => {
+    if (m.status !== "active") return m;
+    if (selected.has(m.id)) return m;
+    if (hardConflictIds.has(m.id)) return m;
+    return {
+      ...m,
+      status: "deprecated",
+      statusReason: appendReason(m.statusReason, "objective_pruned"),
+      state_transition_reason: "objective_pruned",
+      novelty: m.novelty === "new" ? "new" : "updated",
+    };
+  });
+}
+
 type RequiredCausalCoverageEdge = {
   edgeId: string;
   fromNodeId: string;
@@ -2536,6 +2723,20 @@ function groundingStrengthScore(fromConcept: ConceptItem | undefined, toConcept:
   return clamp01((source + target) / 2, 0.5);
 }
 
+function historyAgreementScore(fromConcept: ConceptItem | undefined, toConcept: ConceptItem | undefined): number {
+  const sourceTokens = uniq(
+    [...(fromConcept?.support_sources || []), ...((fromConcept?.sourceMsgIds || []).map((x) => cleanText(x, 40)))],
+    16
+  );
+  const targetTokens = uniq(
+    [...(toConcept?.support_sources || []), ...((toConcept?.sourceMsgIds || []).map((x) => cleanText(x, 40)))],
+    16
+  );
+  const overlap = tokenOverlapScore(sourceTokens, targetTokens);
+  if (!sourceTokens.length || !targetTokens.length) return 0.62;
+  return clamp01(0.4 + overlap * 0.6, 0.62);
+}
+
 function topologySupportScore(params: {
   edgeConfidence: number;
   fromConceptIds: string[];
@@ -2573,27 +2774,61 @@ function edgeReasoningScore(params: {
     fromConceptIds: params.fromConceptIds,
     toConceptIds: params.toConceptIds,
   });
-  return clamp01(family * 0.42 + grounding * 0.24 + lexical * 0.14 + topology * 0.2, 0.62);
+  const history = historyAgreementScore(params.fromConcept, params.toConcept);
+  if (!isAlgoV3Enabled()) {
+    return clamp01(family * 0.42 + grounding * 0.24 + lexical * 0.14 + topology * 0.2, 0.62);
+  }
+  return clamp01(family * 0.4 + grounding * 0.22 + lexical * 0.16 + topology * 0.12 + history * 0.1, 0.62);
 }
 
 function reasoningScoreThreshold(relation: EdgeType): number {
-  if (relation === "determine") return 0.68;
-  if (relation === "constraint") return 0.64;
-  return 0.62;
+  if (!isAlgoV3Enabled()) {
+    if (relation === "determine") return 0.68;
+    if (relation === "constraint") return 0.64;
+    return 0.62;
+  }
+  if (relation === "determine") return 0.69;
+  if (relation === "constraint") return 0.65;
+  return 0.63;
 }
 
 function shouldRunBoundaryValidation(score: number, relation: EdgeType): boolean {
   const thr = reasoningScoreThreshold(relation);
-  return score >= thr - 0.08 && score <= thr + 0.07;
+  if (!isAlgoV3Enabled()) return score >= thr - 0.08 && score <= thr + 0.07;
+  return score >= thr - 0.06 && score <= thr + 0.06;
 }
 
 type CoverageEligibilityDecision = {
   eligible: boolean;
   reason: string;
   score: number;
+  boundaryChecked: boolean;
+  boundaryLlmCalled: boolean;
+  highImpact: boolean;
   llmValidated: boolean;
   llmRejected: boolean;
 };
+
+function impactRelationWeight(relation: EdgeType): number {
+  if (relation === "determine") return 1;
+  if (relation === "constraint") return 0.86;
+  return 0.72;
+}
+
+function isHighImpactEdge(params: {
+  relation: EdgeType;
+  score: number;
+  fromConcept: ConceptItem | undefined;
+  toConcept: ConceptItem | undefined;
+  p80Centrality: number;
+  conceptCentralityById: Map<string, number>;
+}): boolean {
+  const fromCentrality = Number(params.conceptCentralityById.get(cleanText(params.fromConcept?.id, 120)) || 0);
+  const toCentrality = Number(params.conceptCentralityById.get(cleanText(params.toConcept?.id, 120)) || 0);
+  const centrality = (fromCentrality + toCentrality) / 2;
+  const impact = centrality * impactRelationWeight(params.relation) * (1 + (1 - params.score) * 0.4);
+  return centrality >= params.p80Centrality && impact >= 0.72;
+}
 
 function isCoverageEligiblePair(params: {
   relation: EdgeType;
@@ -2602,6 +2837,8 @@ function isCoverageEligiblePair(params: {
   edgeConfidence: number;
   fromConceptIds: string[];
   toConceptIds: string[];
+  p80Centrality: number;
+  conceptCentralityById: Map<string, number>;
 }): CoverageEligibilityDecision {
   const sourceFamily = canonicalConceptFamily(params.fromConcept);
   const targetFamily = canonicalConceptFamily(params.toConcept);
@@ -2615,6 +2852,9 @@ function isCoverageEligiblePair(params: {
       eligible: false,
       reason: forceSkipReason,
       score: 0,
+      boundaryChecked: false,
+      boundaryLlmCalled: false,
+      highImpact: false,
       llmValidated: false,
       llmRejected: false,
     };
@@ -2629,17 +2869,29 @@ function isCoverageEligiblePair(params: {
     toConcept: params.toConcept,
   });
   const threshold = reasoningScoreThreshold(params.relation);
+  const highImpact = isHighImpactEdge({
+    relation: params.relation,
+    score,
+    fromConcept: params.fromConcept,
+    toConcept: params.toConcept,
+    p80Centrality: params.p80Centrality,
+    conceptCentralityById: params.conceptCentralityById,
+  });
   if (score >= threshold) {
     return {
       eligible: true,
       reason: "reasoning_score_pass",
       score,
+      boundaryChecked: false,
+      boundaryLlmCalled: false,
+      highImpact,
       llmValidated: false,
       llmRejected: false,
     };
   }
 
   if (shouldRunBoundaryValidation(score, params.relation)) {
+    const historyAgreement = historyAgreementScore(params.fromConcept, params.toConcept);
     const boundary = validateBoundaryReasoningEdge({
       relation: params.relation,
       sourceFamily,
@@ -2648,11 +2900,16 @@ function isCoverageEligiblePair(params: {
       targetText: cleanText(params.toConcept?.title || "", 220),
       score,
       edgeConfidence: params.edgeConfidence,
+      highImpact,
+      historyAgreement,
     });
     return {
       eligible: boundary.accepted,
       reason: boundary.reason,
       score,
+      boundaryChecked: true,
+      boundaryLlmCalled: boundary.validator === "llm",
+      highImpact,
       llmValidated: boundary.validator === "llm" && boundary.accepted,
       llmRejected: boundary.validator === "llm" && !boundary.accepted,
     };
@@ -2662,6 +2919,9 @@ function isCoverageEligiblePair(params: {
     eligible: false,
     reason: "reasoning_score_low",
     score,
+    boundaryChecked: false,
+    boundaryLlmCalled: false,
+    highImpact,
     llmValidated: false,
     llmRejected: false,
   };
@@ -2674,14 +2934,36 @@ function collectRequiredCausalCoverageEdges(params: {
   required: RequiredCausalCoverageEdge[];
   excludedByReason: Record<string, number>;
   excludedNonReasoningEdges: number;
+  boundaryChecks: number;
+  boundaryLlmCalls: number;
+  highImpactEdges: number;
   llmValidatedEdges: number;
   llmRejectedEdges: number;
 } {
   const conceptById = new Map((params.concepts || []).map((c) => [c.id, c]));
   const nodeToConcepts = buildNodeToConcepts(params.concepts);
+  const nodeDegree = new Map<string, number>();
+  for (const n of params.graph.nodes || []) nodeDegree.set(n.id, 0);
+  for (const e of params.graph.edges || []) {
+    nodeDegree.set(e.from, (nodeDegree.get(e.from) || 0) + 1);
+    nodeDegree.set(e.to, (nodeDegree.get(e.to) || 0) + 1);
+  }
+  const conceptCentralityById = new Map<string, number>();
+  for (const c of params.concepts || []) {
+    const avgDegree =
+      (c.nodeIds || []).reduce((sum, id) => sum + Number(nodeDegree.get(id) || 0), 0) /
+      Math.max(1, (c.nodeIds || []).length || 1);
+    conceptCentralityById.set(c.id, clamp01(avgDegree / 3, 0));
+  }
+  const centralityValues = Array.from(conceptCentralityById.values()).sort((a, b) => a - b);
+  const p80Index = centralityValues.length ? Math.max(0, Math.floor((centralityValues.length - 1) * 0.8)) : 0;
+  const p80Centrality = centralityValues.length ? centralityValues[p80Index] : 0.72;
   const required: RequiredCausalCoverageEdge[] = [];
   const excludedByReason: Record<string, number> = {};
   let excludedNonReasoningEdges = 0;
+  let boundaryChecks = 0;
+  let boundaryLlmCalls = 0;
+  let highImpactEdges = 0;
   let llmValidatedEdges = 0;
   let llmRejectedEdges = 0;
   const bumpReason = (reason: string) => {
@@ -2708,7 +2990,12 @@ function collectRequiredCausalCoverageEdges(params: {
           edgeConfidence: clamp01(edge.confidence, 0.78),
           fromConceptIds,
           toConceptIds,
+          p80Centrality,
+          conceptCentralityById,
         });
+        if (decision.boundaryChecked) boundaryChecks += 1;
+        if (decision.boundaryLlmCalled) boundaryLlmCalls += 1;
+        if (decision.highImpact) highImpactEdges += 1;
         if (decision.llmValidated) llmValidatedEdges += 1;
         if (decision.llmRejected) llmRejectedEdges += 1;
         if (decision.eligible) {
@@ -2741,6 +3028,9 @@ function collectRequiredCausalCoverageEdges(params: {
     required,
     excludedByReason,
     excludedNonReasoningEdges,
+    boundaryChecks,
+    boundaryLlmCalls,
+    highImpactEdges,
     llmValidatedEdges,
     llmRejectedEdges,
   };
@@ -2776,6 +3066,11 @@ function buildConceptPairRelationIndex(params: {
 }): Set<string> {
   const conceptById = new Map((params.concepts || []).map((c) => [c.id, c]));
   const nodeToConcepts = buildNodeToConcepts(params.concepts);
+  const conceptCentralityById = new Map<string, number>();
+  for (const c of params.concepts || []) {
+    conceptCentralityById.set(c.id, clamp01((c.nodeIds || []).length / 3, 0.4));
+  }
+  const p80Centrality = 0.72;
   const pairs = new Set<string>();
   for (const edge of params.graph.edges || []) {
     if (!isCoverageRelation(edge.type)) continue;
@@ -2794,6 +3089,8 @@ function buildConceptPairRelationIndex(params: {
           edgeConfidence,
           fromConceptIds,
           toConceptIds,
+          p80Centrality,
+          conceptCentralityById,
         });
         if (!decision.eligible) {
           continue;
@@ -3029,9 +3326,13 @@ export function enforceCausalEdgeCoverage(params: {
       coveredCausalEdges,
       uncoveredCausalEdges: Math.max(0, required.length - coveredCausalEdges),
       repairedMotifCount,
+      repairRatio: required.length ? Number((repairedMotifCount / required.length).toFixed(4)) : 0,
       componentCount: motifComponentCount(motifs),
       excludedNonReasoningEdges: coverage.excludedNonReasoningEdges,
       excludedByReason: coverage.excludedByReason,
+      boundaryChecks: coverage.boundaryChecks,
+      boundaryLlmCalls: coverage.boundaryLlmCalls,
+      highImpactEdges: coverage.highImpactEdges,
       llmValidatedEdges: coverage.llmValidatedEdges,
       llmRejectedEdges: coverage.llmRejectedEdges,
     },
@@ -3072,6 +3373,7 @@ export function reconcileMotifsWithGraph(params: {
         prev?.description && !preferDerivedDescription ? prev.description : m.description,
       status,
       statusReason: inferred.reason || prev?.statusReason,
+      state_transition_reason: inferred.reason || undefined,
       resolved: !!prev?.resolved && status !== "deprecated",
       resolvedAt: prev?.resolvedAt,
       resolvedBy: prev?.resolvedBy,
@@ -3103,7 +3405,10 @@ export function reconcileMotifsWithGraph(params: {
   const crossAnchorDeduped = applyCrossAnchorPathDedup(highSimilarityCollapsed, conceptById);
   const triadSubsumed = applyTriadSubsumption(crossAnchorDeduped, conceptById);
   const chainCompressed = applyRelayChainCompression(triadSubsumed, conceptById, params.locale);
-  const densityCapped = capActiveMotifsPerAnchor(chainCompressed);
+  const objectiveSelected = isAlgoV3Enabled()
+    ? selectMotifSetGreedy(chainCompressed, conceptById)
+    : chainCompressed;
+  const densityCapped = capActiveMotifsPerAnchor(objectiveSelected);
   const softPrunedCollapsed = convertSoftDeprecationsToCancelled(densityCapped).map((m) => {
     if (m.status !== "deprecated" && m.status !== "cancelled") return m;
     if (m.novelty === "new") return m;

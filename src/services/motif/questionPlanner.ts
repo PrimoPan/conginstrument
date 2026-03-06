@@ -44,6 +44,50 @@ function isResolvedDeprecated(m: ConceptMotif): boolean {
   return reason.startsWith("user_resolved");
 }
 
+function motifUncertaintyScore(m: ConceptMotif): number {
+  const confidence = Math.max(0, Math.min(1, Number(m.confidence || 0.7)));
+  const statusBoost = m.status === "uncertain" ? 1.08 : m.status === "deprecated" ? 1.12 : 0.86;
+  return Math.max(0.05, (1 - confidence) * statusBoost);
+}
+
+function motifCentralityScore(m: ConceptMotif, motifs: ConceptMotif[]): number {
+  const ids = new Set((m.conceptIds || []).map((x) => cleanText(x, 100)).filter(Boolean));
+  if (!ids.size) return 0.3;
+  let touch = 0;
+  for (const other of motifs || []) {
+    if (other.id === m.id || other.status === "cancelled") continue;
+    const overlap = (other.conceptIds || []).some((cid) => ids.has(cleanText(cid, 100)));
+    if (overlap) touch += 1;
+  }
+  return Math.max(0.25, Math.min(1, touch / Math.max(2, motifs.length || 1)));
+}
+
+function coverageGapWeight(m: ConceptMotif): number {
+  const reason = cleanText(m.statusReason, 160).toLowerCase();
+  if (reason.includes("coverage_repair") || reason.includes("not_supported_by_current_graph")) return 1.16;
+  if (reason.includes("relation_conflict_with")) return 1.2;
+  return m.status === "deprecated" ? 1.1 : 1;
+}
+
+function transferRiskScore(m: ConceptMotif, transferState?: MotifTransferState | null): number {
+  const motifTypeId = cleanText((m as any)?.motif_type_id, 180);
+  if (!motifTypeId) return 0.72;
+  const injection = (transferState?.activeInjections || []).find((x) => cleanText(x.motif_type_id, 180) === motifTypeId);
+  if (!injection) return 0.72;
+  const confidence = Math.max(0, Math.min(1, Number(injection.transfer_confidence || 0.7)));
+  const disabledBoost = injection.injection_state === "disabled" ? 1.18 : 1;
+  return Math.max(0.45, (1 - confidence) * disabledBoost + 0.55);
+}
+
+function motifImpactScore(m: ConceptMotif, motifs: ConceptMotif[], transferState?: MotifTransferState | null): number {
+  return (
+    motifUncertaintyScore(m) *
+    motifCentralityScore(m, motifs) *
+    coverageGapWeight(m) *
+    transferRiskScore(m, transferState)
+  );
+}
+
 function termPriorityScore(raw: string): number {
   const text = cleanText(raw, 80);
   if (!text) return -1;
@@ -209,7 +253,12 @@ export function planMotifQuestion(params: {
   const deprecated = motifs
     .filter((m) => m.status === "deprecated" && !isResolvedDeprecated(m))
     .slice()
-    .sort((a, b) => b.confidence - a.confidence || a.id.localeCompare(b.id));
+    .sort(
+      (a, b) =>
+        motifImpactScore(b, motifs, params.transferState) - motifImpactScore(a, motifs, params.transferState) ||
+        b.confidence - a.confidence ||
+        a.id.localeCompare(b.id)
+    );
   if (deprecated.length) {
     const top = deprecated[0];
     const conflictWithId = String(top.statusReason || "").match(/relation_conflict_with:([a-z0-9_\-:]+)/i)?.[1] || "";
@@ -262,7 +311,12 @@ export function planMotifQuestion(params: {
   const uncertain = motifs
     .filter((m) => m.status === "uncertain")
     .slice()
-    .sort((a, b) => a.confidence - b.confidence || a.id.localeCompare(b.id));
+    .sort(
+      (a, b) =>
+        motifImpactScore(b, motifs, params.transferState) - motifImpactScore(a, motifs, params.transferState) ||
+        a.confidence - b.confidence ||
+        a.id.localeCompare(b.id)
+    );
   if (!uncertain.length) return { question: null, rationale: "motif_stable" };
 
   const top = uncertain[0];

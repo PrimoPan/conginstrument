@@ -26,7 +26,20 @@ import {
 } from "./contexts.js";
 import type { AppLocale } from "../i18n/locale.js";
 
+export const ALGORITHM_VERSION = "v3" as const;
+
+export type AlgorithmPipelineSnapshot = {
+  version: typeof ALGORITHM_VERSION;
+  stages: Array<{
+    stage: string;
+    input_count?: number;
+    output_count?: number;
+  }>;
+};
+
 export type CognitiveModel = {
+  algorithmVersion: typeof ALGORITHM_VERSION;
+  algorithmPipeline: AlgorithmPipelineSnapshot;
   graph: CDG;
   conceptGraph: CDG;
   motifGraph: {
@@ -43,6 +56,8 @@ export type CognitiveModel = {
 };
 
 export type MotifGenerationChain = {
+  algorithmVersion: typeof ALGORITHM_VERSION;
+  algorithmPipeline: AlgorithmPipelineSnapshot;
   graph: CDG;
   concepts: ConceptItem[];
   motifs: ConceptMotif[];
@@ -139,7 +154,13 @@ export function runMotifGenerationChain(params: {
   baseContexts?: any;
   locale?: AppLocale;
 }): MotifGenerationChain {
+  const stages: AlgorithmPipelineSnapshot["stages"] = [];
   const normalizedGraph = normalizeGraphConceptSchema(params.graph);
+  stages.push({
+    stage: "normalize_graph_schema",
+    input_count: (params.graph.nodes || []).length,
+    output_count: (normalizedGraph.nodes || []).length,
+  });
 
   // PRD pipeline:
   // 1) load+normalize -> 2) concept identify/disambiguate -> 3) dedup
@@ -148,6 +169,10 @@ export function runMotifGenerationChain(params: {
   const nextConceptsDraftPass1 = reconcileConceptsWithGraph({
     graph: normalizedGraph,
     baseConcepts: params.baseConcepts,
+  });
+  stages.push({
+    stage: "concept_probabilistic_fusion",
+    output_count: nextConceptsDraftPass1.length,
   });
   const graphWithConceptStatePass1 = applyConceptStateToGraph({
     graph: normalizedGraph,
@@ -159,6 +184,10 @@ export function runMotifGenerationChain(params: {
     concepts: nextConceptsDraftPass1,
     baseMotifs: params.baseMotifs,
     locale: params.locale,
+  });
+  stages.push({
+    stage: "motif_generation_and_selection",
+    output_count: motifsPass1.length,
   });
 
   const graphSynced = syncGraphConflictsWithMotifs(graphWithConceptStatePass1, motifsPass1);
@@ -193,6 +222,11 @@ export function runMotifGenerationChain(params: {
     locale: params.locale,
     maxRounds: 2,
   });
+  stages.push({
+    stage: "reasoning_edge_coverage",
+    input_count: (covered.report.requiredCausalEdges || 0),
+    output_count: covered.report.coveredCausalEdges || 0,
+  });
   const coveredMotifs = covered.motifs;
   const motifLinks = reconcileMotifLinks({
     motifs: coveredMotifs,
@@ -204,6 +238,10 @@ export function runMotifGenerationChain(params: {
     motifLinks,
     locale: params.locale,
   });
+  stages.push({
+    stage: "reasoning_view_projection",
+    output_count: (motifReasoningView.steps || []).length,
+  });
   const concepts = attachMotifIdsToConcepts(nextConceptsDraft, coveredMotifs);
   const contexts = reconcileContextsWithGraph({
     graph: graphWithConceptState,
@@ -214,6 +252,11 @@ export function runMotifGenerationChain(params: {
   const validationStatus = deriveInteractionValidationStatus(concepts);
 
   return {
+    algorithmVersion: ALGORITHM_VERSION,
+    algorithmPipeline: {
+      version: ALGORITHM_VERSION,
+      stages,
+    },
     graph: graphWithConceptState,
     concepts,
     validationStatus,
@@ -236,6 +279,8 @@ export function buildCognitiveModel(params: {
 }): CognitiveModel {
   const chain = runMotifGenerationChain(params);
   return {
+    algorithmVersion: chain.algorithmVersion,
+    algorithmPipeline: chain.algorithmPipeline,
     graph: chain.graph,
     conceptGraph: chain.graph,
     motifGraph: {

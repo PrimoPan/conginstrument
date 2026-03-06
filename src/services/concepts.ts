@@ -7,6 +7,7 @@ import {
   type ConceptValidationStatus,
   type ConceptExtractionStage,
 } from "../core/graph/schemaAdapters.js";
+import { distance as levenshteinDistance } from "fastest-levenshtein";
 
 export type ConceptKind =
   | "belief"
@@ -55,6 +56,10 @@ export type ConceptItem = {
   locked: boolean;
   paused: boolean;
   updatedAt: string;
+  posterior?: number;
+  entropy?: number;
+  alias_group_id?: string;
+  support_sources?: string[];
 };
 
 function cleanText(input: any, max = 200): string {
@@ -68,6 +73,26 @@ function clamp01(v: any, fallback = 0.7): number {
   const n = Number(v);
   if (!Number.isFinite(n)) return fallback;
   return Math.max(0, Math.min(1, n));
+}
+
+function isAlgoV3Enabled(): boolean {
+  const raw = String(process.env.CI_ALGO_V3 || "").trim().toLowerCase();
+  if (!raw) return true;
+  return !(raw === "0" || raw === "false" || raw === "off" || raw === "no");
+}
+
+function sigmoid(x: number): number {
+  if (!Number.isFinite(x)) return 0.5;
+  if (x > 18) return 0.99999999;
+  if (x < -18) return 0.00000001;
+  return 1 / (1 + Math.exp(-x));
+}
+
+function binaryEntropy(prob: number): number {
+  const p = clamp01(prob, 0.5);
+  if (p <= 0 || p >= 1) return 0;
+  const h = -p * Math.log2(p) - (1 - p) * Math.log2(1 - p);
+  return Number.isFinite(h) ? h : 0;
 }
 
 function uniq(arr: string[], max = 40): string[] {
@@ -474,11 +499,150 @@ function jaccardSimilarity(a: Set<string>, b: Set<string>): number {
   return inter / union;
 }
 
+function normalizedLevenshtein(a: string, b: string): number {
+  const left = normalizeSimilarityText(a);
+  const right = normalizeSimilarityText(b);
+  if (!left || !right) return 0;
+  if (left === right) return 1;
+  const dist = levenshteinDistance(left, right);
+  const denom = Math.max(left.length, right.length, 1);
+  return clamp01(1 - dist / denom, 0);
+}
+
 function conceptPriorityScore(c: ConceptItem): number {
   const nonFreeformBoost = c.semanticKey.startsWith("slot:freeform:") ? 0 : 0.04;
   const lockBoost = c.locked ? 0.08 : 0;
   const nodeBoost = Math.min((c.nodeIds || []).length, 8) * 0.004;
   return c.score + nonFreeformBoost + lockBoost + nodeBoost;
+}
+
+function sourceRoleFromToken(raw: string): "user" | "assistant" | "function_call" | "system" | "unknown" {
+  const token = cleanText(raw, 80).toLowerCase();
+  if (!token) return "unknown";
+  if (
+    token.includes("function") ||
+    token.includes("tool") ||
+    token.includes("slot_call") ||
+    token.includes("slot_function") ||
+    token.startsWith("fn_")
+  ) {
+    return "function_call";
+  }
+  if (
+    token.includes("latest_user") ||
+    token.includes("user") ||
+    token.startsWith("u_") ||
+    token.startsWith("msg_u") ||
+    token.startsWith("turn_u")
+  ) {
+    return "user";
+  }
+  if (
+    token.includes("assistant") ||
+    token.includes("latest_assistant") ||
+    token.startsWith("a_") ||
+    token.startsWith("msg_a")
+  ) {
+    return "assistant";
+  }
+  if (token.includes("system") || token.startsWith("sys_")) return "system";
+  return "unknown";
+}
+
+function supportSourcesFromMsgIds(sourceMsgIds: string[]): string[] {
+  const out = new Set<string>();
+  for (const token of sourceMsgIds || []) {
+    out.add(sourceRoleFromToken(token));
+  }
+  return Array.from(out).sort();
+}
+
+function hasOnlyAssistantSource(sourceMsgIds: string[]): boolean {
+  const roles = supportSourcesFromMsgIds(sourceMsgIds);
+  if (!roles.length) return false;
+  return roles.every((x) => x === "assistant" || x === "unknown");
+}
+
+function hasFunctionSignal(node: ConceptNode): boolean {
+  const key = cleanText((node as any)?.key, 180).toLowerCase();
+  const valueText = cleanText(JSON.stringify((node as any)?.value || {}), 220).toLowerCase();
+  const src = Array.isArray((node as any)?.sourceMsgIds) ? ((node as any).sourceMsgIds as string[]) : [];
+  if (src.some((x) => sourceRoleFromToken(x) === "function_call")) return true;
+  return (
+    key.includes("slot:") &&
+    (valueText.includes("function") || valueText.includes("tool") || valueText.includes("slot"))
+  );
+}
+
+function lexicalSpecificityScore(parts: string[]): number {
+  const text = cleanText(parts.join(" "), 320);
+  if (!text) return 0.35;
+  const tokens = text.match(/[\u4e00-\u9fa5]{1,4}|[a-z0-9]{2,24}/g) || [];
+  const uniqTokens = new Set(tokens.map((x) => cleanText(x, 24).toLowerCase()).filter(Boolean));
+  const numericBoost = /[0-9]/.test(text) ? 0.08 : 0;
+  const contentRatio = Math.min(1, uniqTokens.size / Math.max(6, tokens.length || 1));
+  return clamp01(0.34 + contentRatio * 0.56 + numericBoost, 0.5);
+}
+
+function statementTokens(text: string): Set<string> {
+  const chunks = cleanText(text, 320).toLowerCase().match(/[\u4e00-\u9fa5]{1,4}|[a-z0-9]{2,24}/g) || [];
+  return new Set(chunks.filter(Boolean));
+}
+
+function jaccardSet(a: Set<string>, b: Set<string>): number {
+  if (!a.size || !b.size) return 0;
+  let inter = 0;
+  for (const token of a) {
+    if (b.has(token)) inter += 1;
+  }
+  const union = a.size + b.size - inter;
+  if (!union) return 0;
+  return inter / union;
+}
+
+export function historyConsistencyScore(nodes: ConceptNode[]): number {
+  const filtered = (nodes || []).filter((n) => cleanText(n?.statement, 6));
+  if (filtered.length <= 1) return 0.68;
+  const sets = filtered.map((n) => statementTokens(cleanText(n.statement, 200)));
+  let sum = 0;
+  let cnt = 0;
+  for (let i = 0; i < sets.length; i += 1) {
+    for (let j = i + 1; j < sets.length; j += 1) {
+      sum += jaccardSet(sets[i], sets[j]);
+      cnt += 1;
+    }
+  }
+  if (!cnt) return 0.68;
+  return clamp01(0.36 + (sum / cnt) * 0.64, 0.68);
+}
+
+function topologySupportScore(nodeIds: string[], degreeByNode: Map<string, number>): number {
+  if (!nodeIds.length) return 0.42;
+  const degreeScore =
+    nodeIds.reduce((sum, id) => sum + Math.min(1, Number(degreeByNode.get(id) || 0) / 3), 0) /
+    Math.max(1, nodeIds.length);
+  return clamp01(0.35 + degreeScore * 0.65, 0.52);
+}
+
+type ConceptPosteriorFeatures = {
+  rule: number;
+  functionCall: number;
+  historyConsistency: number;
+  lexicalSpecificity: number;
+  topologySupport: number;
+  assistantOnlyPenalty: number;
+};
+
+export function computeConceptPosterior(features: ConceptPosteriorFeatures): number {
+  const raw =
+    0.34 * clamp01(features.rule, 0.6) +
+    0.24 * clamp01(features.functionCall, 0.55) +
+    0.18 * clamp01(features.historyConsistency, 0.6) +
+    0.14 * clamp01(features.lexicalSpecificity, 0.6) +
+    0.1 * clamp01(features.topologySupport, 0.55) -
+    clamp01(features.assistantOnlyPenalty, 0) -
+    0.5;
+  return clamp01(sigmoid(raw * 3.4), 0.5);
 }
 
 const STRUCTURED_SIMILARITY_MERGE_FAMILIES = new Set<ConceptFamily>([
@@ -531,8 +695,9 @@ function shouldCollapseHighlySimilarConcept(a: ConceptItem, b: ConceptItem): boo
   const textA = `${a.title} ${a.description} ${(a.evidenceTerms || []).join(" ")}`;
   const textB = `${b.title} ${b.description} ${(b.evidenceTerms || []).join(" ")}`;
   const sim = jaccardSimilarity(similarityTokens(textA), similarityTokens(textB));
-  const minSim = structuredMergeFamily && !freeformA && !freeformB ? 0.88 : 0.82;
-  return sim >= minSim;
+  const lev = normalizedLevenshtein(textA, textB);
+  const minSim = structuredMergeFamily && !freeformA && !freeformB ? 0.88 : 0.84;
+  return sim >= minSim || lev >= 0.9;
 }
 
 function mergeConceptPair(a: ConceptItem, b: ConceptItem, now: string): ConceptItem {
@@ -540,13 +705,18 @@ function mergeConceptPair(a: ConceptItem, b: ConceptItem, now: string): ConceptI
   const winner = keepA ? a : b;
   const loser = keepA ? b : a;
   const primaryNodeId = winner.primaryNodeId || loser.primaryNodeId;
+  const posterior = Math.max(Number(winner.posterior || winner.score || 0.7), Number(loser.posterior || loser.score || 0.7));
   return {
     ...winner,
     score: clamp01(Math.max(winner.score, loser.score), winner.score),
+    posterior: clamp01(posterior, winner.score),
+    entropy: binaryEntropy(posterior),
+    alias_group_id: cleanText(winner.alias_group_id || loser.alias_group_id || winner.id, 120) || winner.id,
     nodeIds: sortNodeIds([...(winner.nodeIds || []), ...(loser.nodeIds || [])], primaryNodeId),
     primaryNodeId,
     evidenceTerms: uniq([...(winner.evidenceTerms || []), ...(loser.evidenceTerms || [])], 24),
     sourceMsgIds: uniq([...(winner.sourceMsgIds || []), ...(loser.sourceMsgIds || [])], 80),
+    support_sources: uniq([...(winner.support_sources || []), ...(loser.support_sources || [])], 6),
     motifIds: uniq([...(winner.motifIds || []), ...(loser.motifIds || [])], 48),
     migrationHistory: uniq(
       [
@@ -562,7 +732,7 @@ function mergeConceptPair(a: ConceptItem, b: ConceptItem, now: string): ConceptI
   };
 }
 
-function collapseHighlySimilarConcepts(concepts: ConceptItem[]): ConceptItem[] {
+export function aliasClusterMerge(concepts: ConceptItem[]): ConceptItem[] {
   if (!concepts.length) return concepts;
   const now = new Date().toISOString();
   const grouped = new Map<string, ConceptItem[]>();
@@ -640,9 +810,21 @@ function primaryNodeOf(nodes: ConceptNode[]): ConceptNode | null {
   return nodes.slice(1).reduce((best, n) => betterNode(best, n), nodes[0]);
 }
 
+function buildNodeDegreeMap(graph: CDG): Map<string, number> {
+  const out = new Map<string, number>();
+  for (const n of graph.nodes || []) out.set(n.id, 0);
+  for (const e of graph.edges || []) {
+    out.set(e.from, (out.get(e.from) || 0) + 1);
+    out.set(e.to, (out.get(e.to) || 0) + 1);
+  }
+  return out;
+}
+
 export function deriveConceptsFromGraph(graph: CDG): ConceptItem[] {
   const now = new Date().toISOString();
   const semanticIndex = buildSemanticNodeIndex(graph);
+  const degreeByNode = buildNodeDegreeMap(graph);
+  const algoV3 = isAlgoV3Enabled();
   const concepts: ConceptItem[] = [];
 
   for (const bucket of semanticIndex.values()) {
@@ -655,7 +837,6 @@ export function deriveConceptsFromGraph(graph: CDG): ConceptItem[] {
     const kind = bucket.kind;
     const polarity = bucket.polarity;
     const scope = bucket.scope;
-    const validationStatus = conceptValidationStatusFromNode(primaryNode);
     const title = conceptTitleFromNode(primaryNode);
     const description = conceptDescriptionFromNode(primaryNode, kind);
 
@@ -683,6 +864,28 @@ export function deriveConceptsFromGraph(graph: CDG): ConceptItem[] {
     );
     const paused = nodes.some((n) => readNodePaused(n));
     const locked = nodes.some((n) => !!n.locked);
+    const supportSources = supportSourcesFromMsgIds(allSourceMsgIds);
+    const posterior = algoV3
+      ? computeConceptPosterior({
+          rule: score,
+          functionCall: nodes.some((n) => hasFunctionSignal(n)) ? 0.92 : 0.55,
+          historyConsistency: historyConsistencyScore(nodes),
+          lexicalSpecificity: lexicalSpecificityScore([title, description, ...allEvidenceTerms]),
+          topologySupport: topologySupportScore(nodeIds, degreeByNode),
+          assistantOnlyPenalty: hasOnlyAssistantSource(allSourceMsgIds) ? 0.2 : 0,
+        })
+      : score;
+    if (algoV3 && !locked && posterior < 0.55) {
+      continue;
+    }
+    const validationStatus: ConceptValidationStatus =
+      !algoV3
+        ? conceptValidationStatusFromNode(primaryNode)
+        : posterior >= 0.72
+        ? "resolved"
+        : posterior >= 0.55
+        ? "pending"
+        : conceptValidationStatusFromNode(primaryNode);
 
     concepts.push({
       id: stableConceptIdFromSemanticKey(`${semanticKey}|${kind}|${polarity}|${scope}`),
@@ -705,6 +908,10 @@ export function deriveConceptsFromGraph(graph: CDG): ConceptItem[] {
       locked,
       paused,
       updatedAt: now,
+      posterior,
+      entropy: binaryEntropy(posterior),
+      alias_group_id: stableConceptIdFromSemanticKey(`${semanticKey}|${family}|${scope}|${polarity}`),
+      support_sources: supportSources,
     });
   }
 
@@ -837,6 +1044,17 @@ export function normalizeConceptsForGraph(input: any, graph: CDG): ConceptItem[]
       locked: !!(raw as any)?.locked,
       paused: !!(raw as any)?.paused,
       updatedAt: cleanText((raw as any)?.updatedAt, 40) || new Date().toISOString(),
+      posterior: clamp01((raw as any)?.posterior, 0.7),
+      entropy: clamp01((raw as any)?.entropy, 0.5),
+      alias_group_id:
+        cleanText((raw as any)?.alias_group_id, 120) ||
+        stableConceptIdFromSemanticKey(`${semanticKey}|${family}|${scope}|${polarity}`),
+      support_sources: uniq(
+        (Array.isArray((raw as any)?.support_sources) ? (raw as any).support_sources : []).map((x: any) =>
+          cleanText(x, 24)
+        ),
+        6
+      ),
     });
   }
 
@@ -853,6 +1071,11 @@ export function reconcileConceptsWithGraph(params: { graph: CDG; baseConcepts?: 
   const merged = derived.map((d) => {
     const ex = byId.get(d.id) || bySemantic.get(d.semanticKey);
     if (!ex) return d;
+    const posterior = clamp01(
+      Number(d.posterior == null ? d.score : d.posterior) * 0.72 +
+        Number(ex.posterior == null ? ex.score : ex.posterior) * 0.28,
+      d.score
+    );
     return {
       ...d,
       title: ex.title || d.title,
@@ -870,11 +1093,15 @@ export function reconcileConceptsWithGraph(params: { graph: CDG; baseConcepts?: 
       sourceMsgIds: uniq([...d.sourceMsgIds, ...ex.sourceMsgIds], 80),
       motifIds: uniq([...(d.motifIds || []), ...(ex.motifIds || [])], 48),
       migrationHistory: uniq([...(d.migrationHistory || []), ...(ex.migrationHistory || [])], 24),
+      posterior,
+      entropy: binaryEntropy(posterior),
+      alias_group_id: cleanText(ex.alias_group_id || d.alias_group_id || d.id, 120) || d.id,
+      support_sources: uniq([...(d.support_sources || []), ...(ex.support_sources || [])], 6),
       updatedAt: now,
     };
   });
 
-  return collapseHighlySimilarConcepts(merged).slice(0, 180);
+  return (isAlgoV3Enabled() ? aliasClusterMerge(merged) : merged).slice(0, 180);
 }
 
 function setNodeConceptMeta(node: ConceptNode, paused: boolean, validationStatus: ConceptValidationStatus): ConceptNode {

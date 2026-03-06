@@ -1073,6 +1073,8 @@ function normalizeReasoningSteps(model: ReturnType<typeof buildCognitiveModel>) 
 function modelPayload(model: ReturnType<typeof buildCognitiveModel>) {
   const reasoning_steps = normalizeReasoningSteps(model);
   return {
+    algorithm_version: model.algorithmVersion || "v3",
+    algorithm_pipeline: model.algorithmPipeline,
     graph: model.graph,
     concept_graph: model.conceptGraph,
     motifs: model.motifs,

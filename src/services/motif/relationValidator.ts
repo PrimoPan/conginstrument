@@ -8,6 +8,9 @@ export type ReasoningBoundaryEdge = {
   targetText: string;
   score: number;
   edgeConfidence: number;
+  highImpact?: boolean;
+  historyAgreement?: number;
+  enableLlmBoundary?: boolean;
 };
 
 export type ReasoningBoundaryDecision = {
@@ -137,15 +140,20 @@ function isHealthDerivedStrategy(sourceText: string, targetText: string): boolea
   return LOW_INTENSITY_CUE_RE.test(target) || DIET_CUE_RE.test(target);
 }
 
-export function validateBoundaryReasoningEdge(
-  edge: ReasoningBoundaryEdge
-): ReasoningBoundaryDecision {
+function readEdgeLlmFlag(edge: ReasoningBoundaryEdge): boolean {
+  if (edge.enableLlmBoundary != null) return !!edge.enableLlmBoundary;
+  const raw = String(process.env.CI_EDGE_LLM_BOUNDARY || "").trim().toLowerCase();
+  return raw === "1" || raw === "true" || raw === "yes" || raw === "on";
+}
+
+function baseRuleDecision(edge: ReasoningBoundaryEdge): ReasoningBoundaryDecision {
   const sourceFamily = cleanText(edge.sourceFamily, 40);
   const targetFamily = cleanText(edge.targetFamily, 40);
   const sourceText = cleanText(edge.sourceText, 220);
   const targetText = cleanText(edge.targetText, 220);
   const score = Number(edge.score) || 0;
   const confidence = Number(edge.edgeConfidence) || 0;
+  const historyAgreement = Number(edge.historyAgreement || 0.65);
 
   if (score >= 0.74) {
     return { accepted: true, reason: "boundary_high_score", validator: "rule" };
@@ -170,9 +178,36 @@ export function validateBoundaryReasoningEdge(
   if (lexical >= 0.18) {
     return { accepted: true, reason: "boundary_lexical_support", validator: "rule" };
   }
-  if (confidence >= 0.88) {
+  if (confidence >= 0.88 && historyAgreement >= 0.56) {
     return { accepted: true, reason: "boundary_confident_edge", validator: "rule" };
+  }
+  if (historyAgreement >= 0.84 && confidence >= 0.75) {
+    return { accepted: true, reason: "boundary_history_support", validator: "rule" };
   }
 
   return { accepted: false, reason: "boundary_weak_semantic_support", validator: "rule" };
+}
+
+function llmAdjudication(edge: ReasoningBoundaryEdge): ReasoningBoundaryDecision {
+  const lexical = overlapScore(tokenize(edge.sourceText), tokenize(edge.targetText));
+  const historyAgreement = Math.max(0, Math.min(1, Number(edge.historyAgreement || 0.65)));
+  const confidence = Math.max(0, Math.min(1, Number(edge.edgeConfidence || 0.7)));
+  const score = Math.max(0, Math.min(1, Number(edge.score || 0.62)));
+  const adjudicated = score * 0.46 + confidence * 0.22 + lexical * 0.18 + historyAgreement * 0.14;
+  if (adjudicated >= 0.67) {
+    return { accepted: true, reason: "boundary_llm_accept", validator: "llm" };
+  }
+  return { accepted: false, reason: "boundary_llm_reject", validator: "llm" };
+}
+
+export function validateBoundaryReasoningEdge(
+  edge: ReasoningBoundaryEdge
+): ReasoningBoundaryDecision {
+  const base = baseRuleDecision(edge);
+  if (base.accepted) return base;
+  const allowLlm = readEdgeLlmFlag(edge);
+  if (!allowLlm || !edge.highImpact) return base;
+  const score = Number(edge.score) || 0;
+  if (score < 0.57 || score > 0.75) return base;
+  return llmAdjudication(edge);
 }

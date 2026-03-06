@@ -15,6 +15,12 @@ function clean(input: any, max = 240): string {
     .slice(0, max);
 }
 
+function isAlgoV3Enabled(): boolean {
+  const raw = String(process.env.CI_ALGO_V3 || "").trim().toLowerCase();
+  if (!raw) return true;
+  return !(raw === "0" || raw === "false" || raw === "off" || raw === "no");
+}
+
 function toTokens(input: string): Set<string> {
   const text = clean(input, 1200).toLowerCase();
   const parts = text.match(/[\u4e00-\u9fff]{1,4}|[a-z0-9]{2,24}/g) || [];
@@ -31,6 +37,17 @@ function overlapScore(a: Set<string>, b: Set<string>): number {
   return hit / denom;
 }
 
+function overlapScoreArray(a: string[], b: string[]): number {
+  if (!a.length || !b.length) return 0;
+  const sa = new Set(a.map((x) => clean(x, 32).toLowerCase()).filter(Boolean));
+  const sb = new Set(b.map((x) => clean(x, 32).toLowerCase()).filter(Boolean));
+  if (!sa.size || !sb.size) return 0;
+  let hit = 0;
+  for (const token of sa) if (sb.has(token)) hit += 1;
+  const denom = sa.size + sb.size - hit;
+  return denom > 0 ? hit / denom : 0;
+}
+
 function activeTaskText(plan: TravelPlanState | null | undefined): string {
   if (!plan) return "";
   const parts = [
@@ -42,6 +59,69 @@ function activeTaskText(plan: TravelPlanState | null | undefined): string {
     Array.isArray((plan as any)?.travelers) ? (plan as any).travelers.slice(0, 6).join(" ") : "",
   ].filter(Boolean);
   return parts.join(" ");
+}
+
+function taskStructureSignals(plan: TravelPlanState | null | undefined): string[] {
+  const text = activeTaskText(plan);
+  const out: string[] = [];
+  if (/预算|budget|cost|花费|cny|usd|eur|hkd/i.test(text)) out.push("budget");
+  if (/天|day|days|时长|duration|行程长度/i.test(text)) out.push("duration");
+  if (/住宿|hotel|airbnb|lodging/i.test(text)) out.push("lodging");
+  if (/活动|activity|节奏|pace|强度|intensity/i.test(text)) out.push("activity");
+  if (/安全|safety|治安|risk|危险/i.test(text)) out.push("safety");
+  if (/交通|metro|subway|logistics|换乘|transfer/i.test(text)) out.push("logistics");
+  if (/饮食|diet|halal|kosher|vegan|vegetarian/i.test(text)) out.push("diet");
+  return Array.from(new Set(out));
+}
+
+function entryStructureSignals(params: {
+  entry: MotifLibraryEntryPayload;
+  entryText: string;
+  versionUpdatedAt?: string;
+}): string[] {
+  const out: string[] = [];
+  const dep = clean(params.entry.dependency, 40).toLowerCase();
+  if (dep) out.push(`dep:${dep}`);
+  for (const lv of params.entry.abstraction_levels || []) out.push(`lv:${clean(lv, 8).toLowerCase()}`);
+  const text = clean(params.entryText, 360);
+  if (/预算|budget|cost|花费|cny|usd|eur|hkd/i.test(text)) out.push("budget");
+  if (/天|day|days|时长|duration/i.test(text)) out.push("duration");
+  if (/住宿|hotel|airbnb|lodging/i.test(text)) out.push("lodging");
+  if (/活动|activity|节奏|pace|强度|intensity/i.test(text)) out.push("activity");
+  if (/安全|safety|治安|risk|危险/i.test(text)) out.push("safety");
+  if (/交通|metro|subway|logistics|换乘|transfer/i.test(text)) out.push("logistics");
+  if (/饮食|diet|halal|kosher|vegan|vegetarian/i.test(text)) out.push("diet");
+  if (clean(params.versionUpdatedAt, 40)) out.push("has_recent_version");
+  return Array.from(new Set(out));
+}
+
+function daysSince(iso?: string): number {
+  const ts = Date.parse(String(iso || ""));
+  if (!Number.isFinite(ts)) return 365;
+  const delta = Date.now() - ts;
+  if (!Number.isFinite(delta) || delta <= 0) return 0;
+  return delta / (1000 * 60 * 60 * 24);
+}
+
+function mmrSelect<T>(items: T[], limit: number, lambda: number, score: (x: T) => number, sim: (a: T, b: T) => number): T[] {
+  const selected: T[] = [];
+  const pool = items.slice();
+  while (pool.length && selected.length < limit) {
+    let bestIdx = 0;
+    let bestVal = -Infinity;
+    for (let i = 0; i < pool.length; i += 1) {
+      const candidate = pool[i];
+      const relevance = score(candidate);
+      const maxSim = selected.length ? Math.max(...selected.map((s) => sim(candidate, s))) : 0;
+      const mmr = lambda * relevance - (1 - lambda) * maxSim;
+      if (mmr > bestVal) {
+        bestVal = mmr;
+        bestIdx = i;
+      }
+    }
+    selected.push(pool.splice(bestIdx, 1)[0]);
+  }
+  return selected;
 }
 
 function modeFromEntry(entry: MotifLibraryEntryPayload): TransferRecommendedMode {
@@ -72,10 +152,12 @@ export function buildTransferRecommendations(params: {
   maxCount?: number;
 }): MotifTransferRecommendation[] {
   const now = new Date().toISOString();
+  const algoV3 = isAlgoV3Enabled();
   const activeText = activeTaskText(params.travelPlanState || null);
   const activeTokens = toTokens(activeText);
+  const taskSignals = taskStructureSignals(params.travelPlanState || null);
   const maxCount = Math.max(1, Math.min(Number(params.maxCount || 4), 6));
-  const candidates = (params.motifLibrary || [])
+  const scoredCandidates = (params.motifLibrary || [])
     .map((entry) => {
       const version = entry.versions.find((v) => v.version_id === entry.current_version_id) || entry.versions[entry.versions.length - 1];
       const entryText = [
@@ -89,13 +171,44 @@ export function buildTransferRecommendations(params: {
         .filter(Boolean)
         .join(" ");
       const entryTokens = toTokens(entryText);
-      const lexicalScore = overlapScore(activeTokens, entryTokens);
-      const confidence = Number(entry?.usage_stats?.transfer_confidence || 0.7);
-      const statusPenalty = entry.status === "deprecated" || entry.status === "cancelled" ? 0.18 : 0;
-      const score = Math.max(
+      const semanticMatch = overlapScore(activeTokens, entryTokens);
+      const structureSignals = entryStructureSignals({
+        entry,
+        entryText,
+        versionUpdatedAt: version?.updated_at,
+      });
+      const structuralMatch = overlapScoreArray(taskSignals, structureSignals);
+      const adopted = Number(entry.usage_stats?.adopted_count || 0);
+      const ignored = Number(entry.usage_stats?.ignored_count || 0);
+      const prior = adopted / Math.max(1, adopted + ignored + 1);
+      const usagePrior = Math.max(
         0,
-        Math.min(1, lexicalScore * 0.62 + confidence * 0.32 + (entry.usage_stats?.adopted_count || 0) * 0.01 - statusPenalty)
+        Math.min(1, prior * 0.62 + Number(entry?.usage_stats?.transfer_confidence || 0.7) * 0.38)
       );
+      const stalenessPenalty = Math.max(0, Math.min(0.45, daysSince(version?.updated_at || version?.created_at) / 900));
+      const statusPenalty = entry.status === "deprecated" || entry.status === "cancelled" ? 0.22 : 0;
+      const score = algoV3
+        ? Math.max(
+            0,
+            Math.min(
+              1,
+              semanticMatch * 0.52 +
+                structuralMatch * 0.2 +
+                usagePrior * 0.18 -
+                stalenessPenalty * 0.1 -
+                statusPenalty
+            )
+          )
+        : Math.max(
+            0,
+            Math.min(
+              1,
+              semanticMatch * 0.62 +
+                Number(entry?.usage_stats?.transfer_confidence || 0.7) * 0.32 +
+                (entry.usage_stats?.adopted_count || 0) * 0.01 -
+                statusPenalty
+            )
+          );
       const mode = modeFromEntry(entry);
       const candidateId = clean(`${entry.motif_type_id}::${entry.current_version_id}`, 220);
       const decisionStatus = decisionStatusForCandidate(params.existingState, candidateId);
@@ -134,12 +247,29 @@ export function buildTransferRecommendations(params: {
         decision_status: decisionStatus,
         decision_at: decisionAt,
         created_at: now,
+        _semantic_match: semanticMatch,
+        _structural_match: structuralMatch,
+        _tokens: Array.from(entryTokens).slice(0, 28),
       } as MotifTransferRecommendation;
     })
     .sort((a, b) => b.match_score - a.match_score || a.motif_type_id.localeCompare(b.motif_type_id));
 
-  if (!candidates.length) return [];
-  const desiredCount = Math.min(maxCount, candidates.length);
-  const minCount = candidates.length >= 2 ? Math.min(2, desiredCount) : 1;
-  return candidates.slice(0, Math.max(minCount, desiredCount));
+  if (!scoredCandidates.length) return [];
+  const desiredCount = Math.min(maxCount, scoredCandidates.length);
+  const minCount = scoredCandidates.length >= 2 ? Math.min(2, desiredCount) : 1;
+  const selected = (algoV3
+    ? mmrSelect(
+        scoredCandidates,
+        Math.max(minCount, desiredCount),
+        0.72,
+        (x: any) => Number(x.match_score || 0),
+        (a: any, b: any) => overlapScoreArray(a?._tokens || [], b?._tokens || [])
+      )
+    : scoredCandidates.slice(0, Math.max(minCount, desiredCount))
+  ).sort((a, b) => b.match_score - a.match_score || a.motif_type_id.localeCompare(b.motif_type_id));
+
+  return selected.map((x: any) => {
+    const { _semantic_match, _structural_match, _tokens, ...rest } = x || {};
+    return rest as MotifTransferRecommendation;
+  });
 }

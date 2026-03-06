@@ -1,12 +1,9 @@
-# CogInstrument Algorithm (AGENTS Strict Alignment v2)
+# CogInstrument Algorithm (AGENTS Strict Alignment v3)
 
-Last updated: 2026-03-05
+Last updated: 2026-03-06
+Algorithm version: `v3`
 
-This document describes the implemented runtime and invariants for:
-
-- concepts -> motifs -> motif links -> reasoning
-- planning state and portfolio export
-- frontend save and visualization behavior
+This document is the source-of-truth for runtime behavior and invariants.
 
 ## 1. Runtime Chain (Per Turn)
 
@@ -14,234 +11,269 @@ Canonical entrypoint:
 
 - `conginstrument/src/services/cognitiveModel.ts`
 
-Processing order:
+Pipeline stages (`algorithm_pipeline`):
 
-1. Normalize graph schema and concept node state.
-2. Reconcile `concepts_from_user` from graph + user evidence.
-3. Build pair/triad motifs from typed dependencies.
-4. Enforce motif coverage invariant on reasoning-eligible edges only.
-5. Reconcile motif links.
-6. Build motif reasoning view.
-7. Reconcile contexts.
-8. Update planning states (`travel_plan_state`, `task_detection`, `cognitive_state`, `portfolio_document_state`).
-9. Apply conflict gate if unresolved hard conflicts exist.
+1. `normalize_graph_schema`
+2. `concept_probabilistic_fusion`
+3. `motif_generation_and_selection`
+4. `reasoning_edge_coverage`
+5. `reasoning_view_projection`
 
-Coverage convergence is bounded (`maxRounds=2`) to avoid repair loops.
+Every turn response and graph-save response includes:
+
+- `algorithm_version: "v3"`
+- `algorithm_pipeline` snapshot
 
 ## 2. Three-Layer Boundary Contract
 
 ### 2.1 User-grounded cognitive layer
 
-Contains only user-grounded structures:
+Contains only user-grounded cognition:
 
-- concepts extracted from user messages (or explicit user confirmation)
-- typed dependencies among these concepts
-- motif instances built from these dependencies
+- concepts from user utterance/explicit user confirmation
+- typed dependencies over those concepts
+- motif instances derived from those dependencies
 
-Assistant suggestions are not written directly into this layer.
+Assistant suggestions are not directly written into this layer.
 
 ### 2.2 Assistant planning layer
 
-Contains assistant/co-authored planning artifacts in `travel_plan_state`:
+Contains assistant/co-authored planning state (`travel_plan_state`):
 
-- itinerary drafts and options
-- transport/stay/food/risk/budget notes
-- open questions
-- export-ready text
+- itinerary drafts and alternatives
+- transport/stay/food/risk/budget/open questions
+- export-ready planning text
 
-`source_map` default is `assistant_proposed`.
-Only explicit user confirmation upgrades items to `user_confirmed`.
+Default `source_map` is `assistant_proposed`.
+Only explicit user confirmation upgrades to `user_confirmed`.
 
 ### 2.3 Portfolio/PDF layer
 
-Contains multi-task aggregation (`portfolio_document_state`):
+Contains task-level aggregation (`portfolio_document_state`):
 
-- per-task trip sections
-- merged export order and outline
-- combined export-ready text and metadata
+- trip sections per task
+- merged outline and combined export text
+- final PDF metadata
 
-Final export uses portfolio sections (single-trip remains compatible).
+Final export uses this layer instead of raw cognitive graph fragments.
 
-## 3. Concepts -> Motifs -> Links -> Reasoning
+## 3. Probabilistic Concept Fusion
 
-### 3.1 Concept extraction
+Implementation:
 
-Concepts remain typed and user-evidence-bounded:
+- `conginstrument/src/services/concepts.ts`
 
-- `belief`
-- `constraint`
-- `preference`
-- `factual_assertion`
+### 3.1 Typed DFA first, freeform fallback
 
-When evidence is uncertain, concepts stay uncertain or become clarification targets instead of forced user-grounded facts.
+Semantic key normalization order:
 
-### 3.2 Motif generation
+1. typed slot DFA (`destination/duration/budget/constraint/...`)
+2. fallback freeform signature (`slot:freeform:*`)
 
-Motifs are reconciled from graph dependencies and compression rules:
+### 3.2 Posterior formula
 
-- pair motifs from direct typed dependencies
-- triad motifs from compositional structures
-- redundancy pruning / chain compression / conflict semantics
+For each semantic bucket:
 
-User edits are preserved through overlay logic.
+`P(concept) = σ(0.34*rule + 0.24*function_call + 0.18*history_consistency + 0.14*lexical_specificity + 0.10*topology_support - penalty_assistant_only)`
 
-### 3.3 Reasoning-eligible coverage invariant
+Where:
 
-Coverage is NOT enforced on all causal edges.
-It is enforced only on reasoning-eligible edges.
+- `rule`: slot + statement score baseline
+- `function_call`: function-slot extraction signal
+- `history_consistency`: cross-node textual consistency in bucket
+- `lexical_specificity`: token informativeness and numeric specificity
+- `topology_support`: local graph degree support
+- `penalty_assistant_only`: down-weight if evidence only comes from assistant-side tokens
 
-Covered relations:
+### 3.3 Posterior thresholds
 
-- `enable`
-- `constraint`
-- `determine`
+- `P >= 0.72` -> `resolved`
+- `0.55 <= P < 0.72` -> `pending`
+- `P < 0.55` -> dropped (unless locked)
 
-#### Eligibility pipeline
+### 3.4 Alias clustering
 
-Implemented in:
+Within same `(family, scope, polarity)`:
+
+- merge if `Jaccard >= 0.84` OR `normalized_levenshtein >= 0.90`
+
+Additional concept fields:
+
+- `posterior`
+- `entropy`
+- `alias_group_id`
+- `support_sources`
+
+## 4. Reasoning Edge Eligibility (v3)
+
+Implementation:
 
 - `conginstrument/src/services/motif/conceptMotifs.ts`
 - `conginstrument/src/services/motif/relationValidator.ts`
 
-For each edge candidate:
+### 4.1 Edge score formula
 
-1. Hard skip rules remove metadata-only/non-reasoning pairs (for example destination/sub-location to duration bookkeeping patterns).
-2. Deterministic score is computed:
-   - family compatibility
-   - grounding strength
-   - lexical entailment
-   - topology support
-3. If score is in boundary zone, validator performs secondary decision (`validateBoundaryReasoningEdge`).
-4. Only accepted edges enter required coverage set.
+`S_edge = 0.40*family + 0.22*grounding + 0.16*lexical + 0.12*topology + 0.10*history_agreement`
 
-#### Edge-level coverage condition
+Thresholds:
 
-For required edge `(u -> v, type)`, coverage holds iff at least one non-cancelled motif has:
+- `enable >= 0.63`
+- `constraint >= 0.65`
+- `determine >= 0.69`
 
-- same relation class `type`
-- `u` in source role
-- `v` in target role
+Boundary zone:
 
+- `threshold ± 0.06` -> secondary boundary validation
+
+### 4.2 High-impact gating + optional LLM adjudication
+
+Boundary LLM adjudication is attempted only when all conditions hold:
+
+- edge is in boundary zone
+- edge is high-impact (top-centrality + coverage-gap weighted)
+- feature flag enabled (`CI_EDGE_LLM_BOUNDARY=1`)
+
+Default is rule-only path (`CI_EDGE_LLM_BOUNDARY=0`).
+
+### 4.3 Coverage invariant
+
+Coverage is enforced only for reasoning-eligible causal edges (`enable/constraint/determine`).
 Uncovered required edges trigger deterministic `edge_repair` motifs.
-
-#### Invariant report
 
 `motifInvariantReport` now includes:
 
-- `requiredCausalEdges`
-- `coveredCausalEdges`
-- `uncoveredCausalEdges`
-- `repairedMotifCount`
-- `componentCount`
-- `excludedNonReasoningEdges`
-- `excludedByReason`
-- `llmValidatedEdges`
-- `llmRejectedEdges`
+- `repairRatio`
+- `boundaryChecks`
+- `boundaryLlmCalls`
+- `highImpactEdges`
+- legacy fields (`required/covered/uncovered/repaired/...`)
 
-`ConceptMotif` metadata includes:
+## 5. Motif Set Optimization
 
-- `coverage_origin` (`native` | `edge_repair`)
-- `subgraph_verified`
-- `reasoning_eligible`
-- `coverage_skip_reason`
+Implementation:
 
-### 3.4 Travel strategy subtree linking (multi-family)
+- `conginstrument/src/services/motif/conceptMotifs.ts`
 
-Implemented in:
+### 5.1 Objective
 
-- `conginstrument/src/services/graphUpdater/intentSignals.ts`
-- `conginstrument/src/services/graphUpdater/slotFunctionCall.ts`
-- `conginstrument/src/services/graphUpdater/slotStateMachine.ts`
+For candidate motif set `M`:
 
-When limiting factors exist, strategy nodes are linked as directed subtrees by semantic family:
+`J(M) = 0.45*Coverage + 0.22*Confidence + 0.14*Transferability - 0.11*Redundancy - 0.08*ConflictPenalty`
 
-- `health -> activity/diet/lodging` (medical constraints driving execution strategy)
-- `mobility -> activity/lodging` (low-hassle, low-fatigue, senior-friendly execution)
-- `safety -> lodging/strategy constraints` (safer area/night-risk mitigation)
-- `language -> logistics/lodging` (communication barriers driving transport simplicity)
-- `logistics -> lodging/pace` (transfer complexity constraining itinerary execution)
-- `religion/diet/legal -> corresponding operational constraints`
+A greedy selector chooses active motifs by descending objective score with constraints.
 
-Direction is fixed from limiting factor root to strategy targets.
-Forest is allowed: each family can form its own subtree component.
+### 5.2 Constraints
 
-### 3.5 Function-call assisted graph accuracy
+- max active motifs per anchor: `3`
+- keep hard conflict motifs visible for conflict handling
+- cancelled motifs do not participate in coverage
 
-Function-call slot extraction is used to improve graph precision before state-machine linking:
+Additional motif fields:
 
-- constraints now support semantic `kind` hints (`legal/safety/mobility/logistics/diet/religion/other`)
-- prompts explicitly instruct extraction of subtree-critical patterns:
-  - low-hassle / not-too-tiring / senior-friendly
-  - safer lodging area / avoid scams
-  - near-metro / transfer-light transport convenience
-- deterministic parser remains primary; function-call output fills semantic gaps.
+- `selection_score`
+- `uncertainty`
+- `state_transition_reason`
+- `support_count`
 
-## 4. Forest Semantics and Stable Layout
+## 6. Lifecycle Automaton
 
-Motif graph is allowed to be a forest (multi-component DAG, no single root required).
+Implementation:
 
-Frontend layout:
+- `motifLifecycleTransition` in `conceptMotifs.ts`
 
-- component decomposition
-- SCC compression + layered order inside component
-- component packing grid
-- stable node position cache by `motifId` to prevent full reflow on hide/show
+States:
 
-Implemented in:
+- `active`
+- `uncertain`
+- `deprecated`
+- `cancelled`
 
-- `conginstrument-web/src/components/flow/MotifReasoningCanvas.tsx`
+Events:
 
-## 5. Save Interaction Rules (Frontend)
+- `evidence_up`
+- `evidence_down`
+- `explicit_negation`
+- `conflict_resolved`
+- `transfer_failure`
+- `manual_disable`
 
-### 5.1 Plan state panel
+All lifecycle transitions are routed through this explicit automaton.
 
-- default collapsed
-- collapsed state must not consume composer area
+## 7. IS2 Question Prioritization (Impact-Driven)
 
-### 5.2 Auto-save before send
+Implementation:
 
-If graph edits are unsaved and user sends a new turn:
+- `conginstrument/src/services/motif/questionPlanner.ts`
 
-1. run silent save first (`saveReason=auto_before_turn`, `requestAdvice=false`)
-2. continue turn only on save success
-3. block send on save failure
+Impact score:
 
-### 5.3 Virtual structure message policy
+`Impact = Uncertainty * BetweennessCentrality * CoverageGapWeight * TransferRisk`
 
-- manual save: append frontend-only user message `已更改coginstrument结构`
-- auto-before-turn save: do NOT append this message
+Question order remains:
 
-Implemented in:
+1. deprecated conflict
+2. transfer mismatch / revision pending
+3. uncertain motif
 
-- `conginstrument-web/src/App.tsx`
-- `conginstrument-web/src/components/FlowPanel.tsx`
+Rate limit remains one question per turn.
 
-## 6. Task and Portfolio State
+## 8. Transfer Retrieval with MMR
 
-- task switch creates a new task track and new portfolio trip section
-- previous trip sections are preserved (no overwrite)
-- final PDF export uses portfolio aggregation by trip sections
+Implementation:
 
-## 7. Conflict Gate
+- `conginstrument/src/services/motifTransfer/retrieval.ts`
 
-Unresolved hard conflicts block normal advice generation until clarified/resolved.
+Base retrieval score:
 
-## 8. Regression Baseline
+`R = 0.52*semantic_match + 0.20*structural_match + 0.18*usage_prior - 0.10*staleness_penalty`
+
+Final top-k uses MMR (`lambda=0.72`) to reduce near-duplicate suggestions.
+
+## 9. Feature Flags
+
+- `CI_ALGO_V3` (deployment gate for v3 rollout)
+- `CI_EDGE_LLM_BOUNDARY` (optional boundary adjudication)
+
+Recommended rollout:
+
+1. `CI_ALGO_V3=1`, `CI_EDGE_LLM_BOUNDARY=0`
+2. staged enable `CI_EDGE_LLM_BOUNDARY=1`
+
+## 10. Complexity (Per Turn)
+
+Let:
+
+- `N` = concept nodes
+- `E` = edges
+- `M` = motifs
+
+Approximate bounds:
+
+- concept derivation + posterior: `O(N + E)`
+- alias clustering: `O(C^2)` per family bucket (small C after bucketing)
+- motif build + dedup + selection: `O(M log M)`
+- coverage eligibility scan: `O(E * k^2)` where `k` is mapped concept multiplicity (small in practice)
+- MMR retrieval: `O(K^2)` for candidate top-k (k <= 4)
+
+## 11. Regression Baseline
 
 Backend:
 
-- `npm run test:motif-pipeline`
+- `npm run test:graph-regression`
 - `npm run test:prd-realignment`
 - `npm run test:motif-compression`
-- `npm run test:graph-regression`
+- `npm run test:motif-pipeline`
+- `npm run test:motif-transfer-e2e`
+- `npm run test:algorithm-v3`
 
 Frontend:
 
 - `npm run build`
+- existing Playwright E2E for Mode C / End Task
 
 Acceptance focus:
 
-- non-reasoning edges (example metadata destination/duration bindings) are excluded from repair
-- health subtree remains stable across turns
-- motif hide/show does not wipe reasoning forest
-- collapsed plan panel does not push chat input area
+- no evidence-boundary breakage (assistant text not leaked as user-grounded concepts)
+- lower repair ratio on stable tasks
+- conflict gate remains functional under v3 selection
+- transfer candidate list remains 2-4 and less redundant
