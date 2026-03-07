@@ -1160,6 +1160,57 @@ const cases: Case[] = [
     },
   },
   {
+    name: "taipei lunch-rest refinement should keep orthogonal constraints active and avoid motif conflict prompt",
+    run: async () => {
+      const turns = [
+        "这次想带妈妈去台北4天，预算每人1万，不吃生食，膝盖也不太好。",
+        "另外不想太赶，最好少换酒店。",
+        "妈妈午饭后要休息。",
+      ];
+      let graph: any = { id: "g_taipei_lunch_rest", version: 1, nodes: [], edges: [] };
+      const recentTurns: Array<{ role: "user" | "assistant"; content: string }> = [];
+
+      for (let i = 0; i < turns.length; i += 1) {
+        const userText = turns[i];
+        recentTurns.push({ role: "user", content: userText });
+        const patch = await generateGraphPatch({
+          graph,
+          userText,
+          recentTurns,
+          stateContextUserTurns: turns.slice(0, i + 1),
+          assistantText: "收到",
+          locale: "zh-CN",
+        });
+        graph = applyPatchWithGuards(graph, patch).newGraph;
+        recentTurns.push({ role: "assistant", content: "收到" });
+      }
+
+      const model = buildCognitiveModel({ graph, locale: "zh-CN" });
+      const gate = buildConflictGatePayload(model.motifs, "zh-CN");
+      const plan = planMotifQuestion({
+        motifs: model.motifs,
+        concepts: model.concepts,
+        recentTurns,
+        locale: "zh-CN" as any,
+      });
+
+      assert.equal(gate, null);
+      assert.equal(plan.question, null);
+      for (const label of ["另外不想太赶", "最好少换酒店", "不吃生食"]) {
+        assert.equal(
+          model.motifs.some((m) => m.status === "active" && m.title.includes(label)),
+          true,
+          `${label} should stay active after lunch-rest refinement`
+        );
+        assert.equal(
+          model.motifs.some((m) => m.status === "deprecated" && m.title.includes(label)),
+          false,
+          `${label} should not be objective-pruned`
+        );
+      }
+    },
+  },
+  {
     name: "partial city allocation should preserve prior overall duration",
     run: () => {
       const merged = extractIntentSignalsWithRecency(

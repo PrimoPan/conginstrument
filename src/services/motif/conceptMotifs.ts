@@ -131,6 +131,7 @@ type MotifLifecycleEvent =
   | "manual_disable";
 
 const MAX_ACTIVE_MOTIFS_PER_ANCHOR = 3;
+const MAX_ACTIVE_GOAL_MOTIFS_PER_ANCHOR = 6;
 
 function cleanText(input: any, max = 200): string {
   return String(input ?? "")
@@ -2369,7 +2370,7 @@ function applyRelayChainCompression(
   return additions.length ? [...patched, ...additions] : patched;
 }
 
-function capActiveMotifsPerAnchor(motifs: ConceptMotif[]): ConceptMotif[] {
+function capActiveMotifsPerAnchor(motifs: ConceptMotif[], conceptById: Map<string, ConceptItem>): ConceptMotif[] {
   const groups = new Map<string, ConceptMotif[]>();
   for (const m of motifs) {
     if (!m.anchorConceptId || m.status !== "active" || m.resolved) continue;
@@ -2378,13 +2379,14 @@ function capActiveMotifsPerAnchor(motifs: ConceptMotif[]): ConceptMotif[] {
   }
 
   const patch = new Map<string, string>();
-  for (const list of groups.values()) {
-    if (list.length <= MAX_ACTIVE_MOTIFS_PER_ANCHOR) continue;
+  for (const [anchorConceptId, list] of groups.entries()) {
+    const anchorLimit = activeMotifLimitForAnchor(anchorConceptId, conceptById);
+    if (list.length <= anchorLimit) continue;
     const sorted = list
       .slice()
       .sort((a, b) => motifPriorityScore(b) - motifPriorityScore(a) || a.id.localeCompare(b.id));
-    for (const m of sorted.slice(MAX_ACTIVE_MOTIFS_PER_ANCHOR)) {
-      patch.set(m.id, `density_pruned:max_${MAX_ACTIVE_MOTIFS_PER_ANCHOR}`);
+    for (const m of sorted.slice(anchorLimit)) {
+      patch.set(m.id, `density_pruned:max_${anchorLimit}`);
     }
   }
 
@@ -2498,6 +2500,12 @@ function motifRedundancyPenalty(keyCount: number): number {
   return Math.min(1, (keyCount - 1) * 0.42);
 }
 
+function activeMotifLimitForAnchor(anchorConceptId: string, conceptById: Map<string, ConceptItem>): number {
+  const family = canonicalConceptFamily(conceptById.get(anchorConceptId));
+  if (family === "goal") return MAX_ACTIVE_GOAL_MOTIFS_PER_ANCHOR;
+  return MAX_ACTIVE_MOTIFS_PER_ANCHOR;
+}
+
 export function motifObjectiveScore(params: {
   motif: ConceptMotif;
   redundancyGroupSize: number;
@@ -2562,8 +2570,9 @@ export function selectMotifSetGreedy(motifs: ConceptMotif[], conceptById: Map<st
 
   for (const motif of candidates) {
     const anchor = cleanText(motif.anchorConceptId, 120) || "none";
+    const anchorLimit = activeMotifLimitForAnchor(anchor, conceptById);
     const current = Number(selectedByAnchor.get(anchor) || 0);
-    if (current >= MAX_ACTIVE_MOTIFS_PER_ANCHOR) continue;
+    if (current >= anchorLimit) continue;
     const sourceSig = sourceSigById.get(motif.id) || "none";
     const dedupKey = `${motifDependencyClass(motif)}|${anchor}|${sourceSig}`;
     if (selectedKey.has(dedupKey)) continue;
@@ -3404,7 +3413,7 @@ export function reconcileMotifsWithGraph(params: {
   const objectiveSelected = isAlgoV3Enabled()
     ? selectMotifSetGreedy(chainCompressed, conceptById)
     : chainCompressed;
-  const densityCapped = capActiveMotifsPerAnchor(objectiveSelected);
+  const densityCapped = capActiveMotifsPerAnchor(objectiveSelected, conceptById);
   const softPrunedCollapsed = convertSoftDeprecationsToCancelled(densityCapped).map((m) => {
     if (m.status !== "deprecated" && m.status !== "cancelled") return m;
     if (m.novelty === "new") return m;
