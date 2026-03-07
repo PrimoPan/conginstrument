@@ -1604,6 +1604,7 @@ export function normalizeDestination(raw: string): string {
     /(?:看|观)(?:一场|一下|一次|场)?(?:球|比赛|演唱会|演出|展览|赛事)$/i,
     ""
   );
+  s = s.replace(/\s*(?:是因为|因为|because)\s*.+$/i, "");
   s = s.replace(
     /(?:参加|观看|去看|打卡)(?:一场|一下|一次|场)?(?:比赛|演唱会|演出|展览|赛事)$/i,
     ""
@@ -1638,6 +1639,7 @@ export function normalizeDestination(raw: string): string {
 export function isLikelyDestinationCandidate(x: string): boolean {
   const s = normalizeDestination(x);
   if (!s) return false;
+  if (/(?:^|[\s])(?:是因为|因为|because)(?:[\s]|$)/i.test(String(x || ""))) return false;
   if (/^(?:剩下|其余|余下|机动|过渡|中转)$/.test(s)) return false;
   if (/去/.test(s)) return false;
   if (/^(?:整体|整体还是|总时长|总时长还是|总时长还是按|总行程|总行程还是|全程|整个行程|一共|总共|总计|但总时长还是)/.test(s)) {
@@ -1673,6 +1675,10 @@ export function isLikelyDestinationCandidate(x: string): boolean {
   if (/(现场观看|现场观赛|现场看|去现场|到现场|去.*观看|看.*现场)$/.test(s)) return false;
   if (/(参加|参会|开会|会议|玩|旅游|旅行|度假|计划|安排)$/i.test(s)) return false;
   if (/(看|观).{0,4}(球|赛|比赛|演出|展)|球迷|演唱会|音乐会|球票|门票/i.test(s)) return false;
+  if (/(看袋鼠|看考拉|看企鹅|看鲸|看海豚|野生动物|wildlife|kangaroo|koala|penguin|whale|dolphin)/i.test(s)) {
+    return false;
+  }
+  if (NATURE_TOPIC_RE.test(s) || /海滩|beach/i.test(s)) return false;
   if (/(西班牙语地区|英语地区|法语地区|德语地区|语地区)/i.test(s)) return false;
   if (/(?:人(?:特别)?多|人很多|很多人|游客多|人潮|人流(?:很|太)?多|太挤|拥挤|拥堵|嘈杂|吵闹|排长队|排队很长)/i.test(s)) {
     return false;
@@ -2229,7 +2235,7 @@ export function normalizePreferenceStatement(raw: string, locale?: AppLocale) {
   const hasCulture = CULTURE_PREF_RE.test(s);
   const hasNature = NATURE_TOPIC_RE.test(s);
   const dislikeNature = hasNature && /不感兴趣|不喜欢|避免|不要|不能|厌恶/.test(s);
-  if (!hasCulture && !dislikeNature) return null;
+  if (!hasCulture && !hasNature) return null;
   if (!PREFERENCE_MARKER_RE.test(s) && !HARD_REQUIRE_RE.test(s) && !HARD_CONSTRAINT_RE.test(s)) return null;
 
   const hard = HARD_REQUIRE_RE.test(s) || HARD_CONSTRAINT_RE.test(s);
@@ -2243,6 +2249,10 @@ export function normalizePreferenceStatement(raw: string, locale?: AppLocale) {
         ? en
           ? "Scenic preference: cultural attractions first"
           : "景点偏好：人文景观优先"
+        : hasNature
+          ? en
+            ? "Scenic preference: prioritize beaches and natural outdoor scenery"
+            : "景点偏好：海边与自然风光优先"
         : en
           ? "Scenic preference: avoid pure nature-only attractions when possible"
           : "景点偏好：尽量避免纯自然景观";
@@ -2369,12 +2379,13 @@ export function normalizeActivityPreferenceStatement(raw: string, locale?: AppLo
   if (!s) return null;
   const hasSports = /球迷|看球|观赛|比赛|球赛|主场|客场|德比|门票|球票|足球|篮球|赛事/i.test(s);
   const hasEvent = /演唱会|音乐会|演出|展览|看展|live\s*show|concert|match|game/i.test(s);
+  const hasWildlife = /看(?:袋鼠|考拉|企鹅|鲸|海豚|动物)|野生动物|wildlife|kangaroo|koala|penguin|whale|dolphin/i.test(s);
   const hasLowIntensity = HEALTH_STRATEGY_ACTIVITY_RE.test(s);
-  if (!hasSports && !hasEvent && !hasLowIntensity) return null;
+  if (!hasSports && !hasEvent && !hasWildlife && !hasLowIntensity) return null;
   if (
     !HARD_REQUIRE_RE.test(s) &&
     !HARD_CONSTRAINT_RE.test(s) &&
-    !/喜欢|偏好|热爱|粉丝|球迷|想看|一定要|必须|务必|绝对|希望|尽量|减少|选择|采用|低强度|轻松|避免|不要|不能|不宜|不想太赶|别太赶|不要太赶|节奏别太赶|行程别太赶/i.test(
+    !/喜欢|偏好|热爱|粉丝|球迷|想看|想去|一定要|必须|务必|绝对|希望|尽量|减少|选择|采用|低强度|轻松|避免|不要|不能|不宜|不想太赶|别太赶|不要太赶|节奏别太赶|行程别太赶|因为|是因为|because/i.test(
       s
     )
   ) {
@@ -2400,6 +2411,10 @@ export function normalizeActivityPreferenceStatement(raw: string, locale?: AppLo
     ? en
       ? "Activity preference: low-intensity itinerary with reduced exertion"
       : "活动偏好：低强度行程，减少体力负担"
+    : hasWildlife
+    ? en
+      ? "Activity preference: prioritize wildlife experiences"
+      : "活动偏好：野生动物体验优先"
     : hasSports
     ? team
       ? en
@@ -2494,7 +2509,7 @@ function isVenueOrExperienceRequirement(text: string): boolean {
   const s = cleanStatement(text || "", 120);
   if (!s) return false;
   const hasExperienceCue =
-    /球迷|看球|观赛|比赛|球赛|主场|客场|门票|球票|圣西罗|stadium|arena|演唱会|音乐会|演出|展览|看展|concert|match|game/i.test(
+    /球迷|看球|观赛|比赛|球赛|主场|客场|门票|球票|圣西罗|stadium|arena|演唱会|音乐会|演出|展览|看展|concert|match|game|看袋鼠|看考拉|看企鹅|看鲸|看海豚|野生动物|wildlife|kangaroo|koala|penguin|whale|dolphin/i.test(
       s
     );
   const hasRiskCue =

@@ -99,6 +99,20 @@ function statementSimilarity(a: string, b: string): number {
   return Math.max(0, Math.min(1, jac + bonus));
 }
 
+const EXPLICIT_EVENT_CUE_RE =
+  /(看球|观赛|球迷|比赛|赛事|体育|球场|stadium|arena|match|game|演唱会|演出|concert|show|看展|展览|conference|chi|汇报|演讲|答辩|野生动物|wildlife|袋鼠|考拉|企鹅|鲸|海豚|kangaroo|koala|penguin|whale|dolphin)/i;
+const EXPLICIT_VENUE_CUE_RE =
+  /(球场|stadium|arena|场馆|会场|会展中心|conference center|展馆|展厅|剧院|theatre|theater|museum|博物馆|动物园|zoo|保护区|reserve|码头|pier)/i;
+
+function activityCanAnchorToSubLocation(activityNode: ConceptNode, subLocationNode: ConceptNode | null): boolean {
+  if (!subLocationNode) return false;
+  const sim = statementSimilarity(activityNode.statement, subLocationNode.statement);
+  if (sim >= 0.22) return true;
+  const activityText = normalizedTopicText(activityNode.statement);
+  const subLocationText = normalizedTopicText(subLocationNode.statement);
+  return EXPLICIT_EVENT_CUE_RE.test(activityText) && EXPLICIT_VENUE_CUE_RE.test(subLocationText);
+}
+
 function inferPreferredSlot(node: ConceptNode, healthNode: ConceptNode | null): string | null {
   const s = cleanText(node.statement);
   if (!s) return null;
@@ -742,7 +756,7 @@ function rebalanceIntentTopology(
     let anchorId = rootId;
     if (slotFamily(slot) === "activity_preference") {
       const bestSubLocation = pickBestSlotNode(slotNodes, "sub_location", node.statement);
-      if (bestSubLocation) anchorId = bestSubLocation.id;
+      if (activityCanAnchorToSubLocation(node, bestSubLocation)) anchorId = bestSubLocation!.id;
       else {
         const bestDestination = pickBestSlotNode(slotNodes, "destination", node.statement);
         if (bestDestination) anchorId = bestDestination.id;
