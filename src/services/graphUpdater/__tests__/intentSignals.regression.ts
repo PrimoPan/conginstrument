@@ -20,6 +20,7 @@ import { buildConflictGatePayload } from "../../motif/conflictGate.js";
 import { planUncertaintyQuestion } from "../../uncertainty/questionPlanner.js";
 import { sanitizeGraphPatchStrict } from "../../patchGuard.js";
 import { reconcileConceptsWithGraph, stableConceptIdFromSemanticKey } from "../../concepts.js";
+import { rebalanceIntentTopology } from "../../../core/graph/topology.js";
 import {
   isMotifLowConfidence,
   motifLowConfidenceThreshold,
@@ -28,6 +29,10 @@ import {
 import { reconcileMotifLinks } from "../../motif/motifLinks.js";
 import { buildMotifReasoningView } from "../../motif/reasoningView.js";
 import { planMotifQuestion } from "../../motif/questionPlanner.js";
+import {
+  applyManualGraphOverrides,
+  rebuildManualGraphOverrides,
+} from "../../../routes/conversations.js";
 
 type Case = {
   name: string;
@@ -342,6 +347,18 @@ const cases: Case[] = [
       assert.equal(s.durationDays, 3);
       const segCities = (s.cityDurations || []).map((x) => x.city);
       assert.deepEqual(segCities, ["米兰"]);
+    },
+  },
+  {
+    name: "parallel motivations should stay as activity/scenic preferences, not chained destinations",
+    run: () => {
+      const s = extractIntentSignals(
+        "我想规划澳大利亚旅行，我想去澳大利亚是因为看袋鼠，我想去海边。"
+      );
+      assert.deepEqual(s.destinations || [], ["澳大利亚"]);
+      assert.equal(s.destination, "澳大利亚");
+      assert.match(String(s.activityPreference || ""), /野生动物|wildlife/i);
+      assert.match(String(s.scenicPreference || ""), /海边|自然风光|beaches?|outdoor/i);
     },
   },
   {
@@ -3316,6 +3333,202 @@ const cases: Case[] = [
       assert.ok(first.question);
       assert.equal(second.question, null);
       assert.equal(/recently_asked/.test(String(second.rationale)), true);
+    },
+  },
+  {
+    name: "activity preference should fall back to destination when sub-location is only weakly related",
+    run: () => {
+      const nodes = [
+        {
+          id: "goal",
+          type: "belief",
+          layer: "intent",
+          statement: "意图：制定澳大利亚旅行计划",
+          status: "confirmed",
+          confidence: 0.9,
+          importance: 0.9,
+          key: "slot:goal",
+        },
+        {
+          id: "dest",
+          type: "factual_assertion",
+          statement: "目的地：澳大利亚",
+          status: "confirmed",
+          confidence: 0.88,
+          importance: 0.82,
+          key: "slot:destination:australia",
+        },
+        {
+          id: "sub",
+          type: "factual_assertion",
+          statement: "子地点：邦迪海滩（澳大利亚）",
+          status: "confirmed",
+          confidence: 0.8,
+          importance: 0.7,
+          key: "slot:sub_location:australia:bondi_beach",
+        },
+        {
+          id: "act",
+          type: "preference",
+          statement: "活动偏好：野生动物体验优先",
+          status: "confirmed",
+          confidence: 0.82,
+          importance: 0.74,
+          key: "slot:activity_preference",
+        },
+      ] as any[];
+      const nodesById = new Map(nodes.map((node) => [node.id, node]));
+      const edgesById = new Map();
+      const touched = new Set(nodes.map((node) => node.id));
+
+      rebalanceIntentTopology(nodesById as any, edgesById as any, touched);
+
+      const activityEdge = Array.from(edgesById.values()).find((edge: any) => edge.from === "act");
+      assert.equal(activityEdge?.to, "dest");
+    },
+  },
+  {
+    name: "activity preference can still anchor to explicit venue sub-location",
+    run: () => {
+      const nodes = [
+        {
+          id: "goal",
+          type: "belief",
+          layer: "intent",
+          statement: "意图：安排米兰观赛旅行",
+          status: "confirmed",
+          confidence: 0.9,
+          importance: 0.9,
+          key: "slot:goal",
+        },
+        {
+          id: "dest",
+          type: "factual_assertion",
+          statement: "目的地：米兰",
+          status: "confirmed",
+          confidence: 0.88,
+          importance: 0.82,
+          key: "slot:destination:milan",
+        },
+        {
+          id: "sub",
+          type: "factual_assertion",
+          statement: "子地点：圣西罗球场（米兰）",
+          status: "confirmed",
+          confidence: 0.8,
+          importance: 0.72,
+          key: "slot:sub_location:milan:san_siro",
+        },
+        {
+          id: "act",
+          type: "preference",
+          statement: "活动偏好：体育赛事优先",
+          status: "confirmed",
+          confidence: 0.82,
+          importance: 0.74,
+          key: "slot:activity_preference",
+        },
+      ] as any[];
+      const nodesById = new Map(nodes.map((node) => [node.id, node]));
+      const edgesById = new Map();
+      const touched = new Set(nodes.map((node) => node.id));
+
+      rebalanceIntentTopology(nodesById as any, edgesById as any, touched);
+
+      const activityEdge = Array.from(edgesById.values()).find((edge: any) => edge.from === "act");
+      assert.equal(activityEdge?.to, "sub");
+    },
+  },
+  {
+    name: "manual edge overrides should preserve deletions and type changes across later patches",
+    run: () => {
+      const prevGraph = {
+        id: "g_override",
+        version: 1,
+        nodes: [
+          {
+            id: "goal",
+            type: "belief",
+            layer: "intent",
+            statement: "意图：制定澳大利亚旅行计划",
+            status: "confirmed",
+            confidence: 0.9,
+            importance: 0.9,
+            key: "slot:goal",
+          },
+          {
+            id: "dest",
+            type: "factual_assertion",
+            statement: "目的地：澳大利亚",
+            status: "confirmed",
+            confidence: 0.88,
+            importance: 0.82,
+            key: "slot:destination:australia",
+          },
+          {
+            id: "sub",
+            type: "factual_assertion",
+            statement: "子地点：邦迪海滩（澳大利亚）",
+            status: "confirmed",
+            confidence: 0.8,
+            importance: 0.72,
+            key: "slot:sub_location:australia:bondi_beach",
+          },
+          {
+            id: "act",
+            type: "preference",
+            statement: "活动偏好：野生动物体验优先",
+            status: "confirmed",
+            confidence: 0.82,
+            importance: 0.74,
+            key: "slot:activity_preference",
+          },
+        ],
+        edges: [
+          { id: "e_dest_goal", from: "dest", to: "goal", type: "enable", confidence: 0.8 },
+          { id: "e_sub_dest", from: "sub", to: "dest", type: "determine", confidence: 0.74 },
+          { id: "e_act_sub", from: "act", to: "sub", type: "determine", confidence: 0.74 },
+        ],
+      } as any;
+      const nextGraph = {
+        ...prevGraph,
+        edges: [
+          { id: "e_dest_goal", from: "dest", to: "goal", type: "enable", confidence: 0.8 },
+          { id: "e_sub_dest", from: "sub", to: "dest", type: "determine", confidence: 0.74 },
+          { id: "e_act_dest", from: "act", to: "dest", type: "constraint", confidence: 0.74 },
+        ],
+      } as any;
+      const overrides = rebuildManualGraphOverrides({
+        prevGraph,
+        nextGraph,
+        existing: { edges: [] },
+        updatedAt: "2026-03-07T00:00:00.000Z",
+      });
+
+      const replayedGraph = applyManualGraphOverrides(
+        {
+          ...prevGraph,
+          edges: [
+            { id: "e_dest_goal", from: "dest", to: "goal", type: "enable", confidence: 0.8 },
+            { id: "e_sub_dest", from: "sub", to: "dest", type: "determine", confidence: 0.74 },
+            { id: "e_act_sub_recreated", from: "act", to: "sub", type: "determine", confidence: 0.74 },
+            { id: "e_act_dest_wrong_type", from: "act", to: "dest", type: "enable", confidence: 0.7 },
+          ],
+        } as any,
+        overrides
+      );
+
+      assert.equal(
+        replayedGraph.edges.some((edge: any) => edge.from === "act" && edge.to === "sub"),
+        false
+      );
+      const preserved = replayedGraph.edges.find((edge: any) => edge.from === "act" && edge.to === "dest");
+      assert.ok(preserved);
+      assert.equal(preserved?.type, "constraint");
+      assert.equal(
+        overrides.edges.some((edge) => edge.state === "removed" && edge.fromRef.includes("activity_preference")),
+        true
+      );
     },
   },
 ];

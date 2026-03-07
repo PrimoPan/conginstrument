@@ -4,7 +4,7 @@ import { authMiddleware, AuthedRequest } from "../middleware/auth.js";
 import { collections } from "../db/mongo.js";
 import { generateTurn, generateTurnStreaming } from "../services/llm.js";
 import { applyPatchWithGuards, normalizeGraphSnapshot } from "../core/graph.js";
-import type { CDG } from "../core/graph.js";
+import type { CDG, ConceptNode, EdgeType } from "../core/graph.js";
 import { config } from "../server/config.js";
 import { generateAssistantTextNonStreaming } from "../services/chatResponder.js";
 import { buildCognitiveModel } from "../services/cognitiveModel.js";
@@ -31,6 +31,7 @@ import {
 } from "../services/planningState.js";
 import { normalizeLocale, isEnglishLocale, type AppLocale } from "../i18n/locale.js";
 import type { ConceptItem } from "../services/concepts.js";
+import { semanticKeyForNode } from "../services/concepts.js";
 import {
   applyTransferDecision,
   confirmModifiedInjection,
@@ -115,6 +116,201 @@ function graphComparablePayload(g: CDG) {
 
 function graphChanged(a: CDG, b: CDG): boolean {
   return JSON.stringify(graphComparablePayload(a)) !== JSON.stringify(graphComparablePayload(b));
+}
+
+export type ManualGraphOverrideEdge = {
+  fromRef: string;
+  toRef: string;
+  type: EdgeType;
+  confidence: number;
+  state: "active" | "removed";
+  updatedAt: string;
+};
+
+export type ManualGraphOverrides = {
+  edges: ManualGraphOverrideEdge[];
+};
+
+export function emptyManualGraphOverrides(): ManualGraphOverrides {
+  return { edges: [] };
+}
+
+function cleanOverrideRef(input: unknown, max = 180): string {
+  return String(input ?? "").trim().slice(0, max);
+}
+
+export function normalizeManualGraphOverrides(raw: any): ManualGraphOverrides {
+  const edges = Array.isArray(raw?.edges) ? raw.edges : [];
+  const seen = new Set<string>();
+  const out: ManualGraphOverrideEdge[] = [];
+  for (const edge of edges) {
+    const fromRef = cleanOverrideRef(edge?.fromRef);
+    const toRef = cleanOverrideRef(edge?.toRef);
+    const type = cleanOverrideRef(edge?.type) as EdgeType;
+    const state = cleanOverrideRef(edge?.state) as ManualGraphOverrideEdge["state"];
+    if (!fromRef || !toRef || fromRef === toRef) continue;
+    if (!["enable", "constraint", "determine", "conflicts_with"].includes(type)) continue;
+    if (state !== "active" && state !== "removed") continue;
+    const key = `${fromRef}|${toRef}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push({
+      fromRef,
+      toRef,
+      type,
+      confidence: Number.isFinite(Number(edge?.confidence)) ? Math.max(0, Math.min(1, Number(edge.confidence))) : 0.72,
+      state,
+      updatedAt: cleanOverrideRef(edge?.updatedAt, 48) || new Date().toISOString(),
+    });
+  }
+  return { edges: out };
+}
+
+function nodeRefForOverride(node: ConceptNode | null | undefined): string {
+  if (!node) return "";
+  const directKey = cleanOverrideRef((node as any).key);
+  if (directKey) return directKey;
+  const semanticKey = cleanOverrideRef(semanticKeyForNode(node));
+  if (semanticKey) return semanticKey;
+  const nodeId = cleanOverrideRef(node.id, 120);
+  return nodeId ? `id:${nodeId}` : "";
+}
+
+function edgePairRefKey(fromRef: string, toRef: string): string {
+  return `${fromRef}|${toRef}`;
+}
+
+function resolveNodeIdFromOverrideRef(graph: CDG, ref: string): string {
+  const target = cleanOverrideRef(ref);
+  if (!target) return "";
+  if (target.startsWith("id:")) {
+    const nodeId = cleanOverrideRef(target.slice(3), 120);
+    return (graph.nodes || []).some((node) => node.id === nodeId) ? nodeId : "";
+  }
+  const byKey = (graph.nodes || []).find((node) => cleanOverrideRef((node as any).key) === target);
+  if (byKey?.id) return byKey.id;
+  const bySemantic = (graph.nodes || []).find((node) => cleanOverrideRef(semanticKeyForNode(node)) === target);
+  return bySemantic?.id || "";
+}
+
+function edgeOverridesFromGraph(graph: CDG): Map<string, ManualGraphOverrideEdge> {
+  const nodeById = new Map((graph.nodes || []).map((node) => [node.id, node]));
+  const map = new Map<string, ManualGraphOverrideEdge>();
+  for (const edge of graph.edges || []) {
+    const fromRef = nodeRefForOverride(nodeById.get(edge.from));
+    const toRef = nodeRefForOverride(nodeById.get(edge.to));
+    if (!fromRef || !toRef || fromRef === toRef) continue;
+    map.set(edgePairRefKey(fromRef, toRef), {
+      fromRef,
+      toRef,
+      type: edge.type,
+      confidence: Number.isFinite(Number(edge.confidence)) ? Math.max(0, Math.min(1, Number(edge.confidence))) : 0.72,
+      state: "active",
+      updatedAt: new Date().toISOString(),
+    });
+  }
+  return map;
+}
+
+export function rebuildManualGraphOverrides(params: {
+  prevGraph: CDG;
+  nextGraph: CDG;
+  existing: ManualGraphOverrides;
+  updatedAt: string;
+}): ManualGraphOverrides {
+  const prevPairs = edgeOverridesFromGraph(params.prevGraph);
+  const nextPairs = edgeOverridesFromGraph(params.nextGraph);
+  const merged = new Map<string, ManualGraphOverrideEdge>();
+
+  for (const edge of normalizeManualGraphOverrides(params.existing).edges) {
+    merged.set(edgePairRefKey(edge.fromRef, edge.toRef), edge);
+  }
+
+  for (const [pairKey, nextEdge] of nextPairs.entries()) {
+    const prevEdge = prevPairs.get(pairKey);
+    if (!prevEdge) {
+      merged.set(pairKey, { ...nextEdge, state: "active", updatedAt: params.updatedAt });
+      continue;
+    }
+    const existingOverride = merged.get(pairKey);
+    if (prevEdge.type !== nextEdge.type) {
+      merged.set(pairKey, { ...nextEdge, state: "active", updatedAt: params.updatedAt });
+      continue;
+    }
+    if (existingOverride?.state === "active") {
+      merged.set(pairKey, {
+        ...existingOverride,
+        type: nextEdge.type,
+        confidence: nextEdge.confidence,
+      });
+    }
+  }
+
+  for (const [pairKey, prevEdge] of prevPairs.entries()) {
+    if (nextPairs.has(pairKey)) continue;
+    merged.set(pairKey, {
+      ...prevEdge,
+      state: "removed",
+      updatedAt: params.updatedAt,
+    });
+  }
+
+  const edges = Array.from(merged.values()).filter((edge) => !!edge.fromRef && !!edge.toRef && edge.fromRef !== edge.toRef);
+  return normalizeManualGraphOverrides({ edges });
+}
+
+export function applyManualGraphOverrides(graph: CDG, rawOverrides: ManualGraphOverrides | null | undefined): CDG {
+  const overrides = normalizeManualGraphOverrides(rawOverrides);
+  if (!overrides.edges.length) return graph;
+  const nodeById = new Map((graph.nodes || []).map((node) => [node.id, node]));
+  const overridesByPair = new Map(overrides.edges.map((edge) => [edgePairRefKey(edge.fromRef, edge.toRef), edge]));
+  const nextEdges = [];
+  const presentPairs = new Set<string>();
+
+  for (const edge of graph.edges || []) {
+    const fromRef = nodeRefForOverride(nodeById.get(edge.from));
+    const toRef = nodeRefForOverride(nodeById.get(edge.to));
+    if (!fromRef || !toRef) {
+      nextEdges.push(edge);
+      continue;
+    }
+    const pairKey = edgePairRefKey(fromRef, toRef);
+    if (presentPairs.has(pairKey)) continue;
+    presentPairs.add(pairKey);
+    const override = overridesByPair.get(pairKey);
+    if (override?.state === "removed") continue;
+    if (override?.state === "active") {
+      nextEdges.push({
+        ...edge,
+        type: override.type,
+        confidence: override.confidence,
+      });
+      continue;
+    }
+    nextEdges.push(edge);
+  }
+
+  for (const override of overrides.edges) {
+    if (override.state !== "active") continue;
+    const pairKey = edgePairRefKey(override.fromRef, override.toRef);
+    if (presentPairs.has(pairKey)) continue;
+    const fromId = resolveNodeIdFromOverrideRef(graph, override.fromRef);
+    const toId = resolveNodeIdFromOverrideRef(graph, override.toRef);
+    if (!fromId || !toId || fromId === toId) continue;
+    presentPairs.add(pairKey);
+    nextEdges.push({
+      id: `e_override_${Date.now()}_${Math.random().toString(16).slice(2)}`,
+      from: fromId,
+      to: toId,
+      type: override.type,
+      confidence: override.confidence,
+    });
+  }
+
+  return {
+    ...graph,
+    edges: nextEdges,
+  };
 }
 
 function parseBoolFlag(v: any): boolean {
@@ -823,6 +1019,7 @@ type TurnRuntimeBase = {
   motifs: any[];
   motifLinks: any[];
   contexts: any[];
+  manualGraphOverrides: ManualGraphOverrides;
   recentDocs: any[];
   recentTurns: Array<{ role: "user" | "assistant"; content: string }>;
   stateContextUserTurns: string[];
@@ -881,6 +1078,9 @@ async function buildTurnRuntimeBase(params: {
     motifs: forceTaskSwitch ? [] : (params.conv as any).motifs || [],
     motifLinks: forceTaskSwitch ? [] : (params.conv as any).motifLinks || [],
     contexts: forceTaskSwitch ? [] : (params.conv as any).contexts || [],
+    manualGraphOverrides: forceTaskSwitch
+      ? emptyManualGraphOverrides()
+      : normalizeManualGraphOverrides((params.conv as any).manualGraphOverrides),
     recentDocs: recent,
     recentTurns,
     stateContextUserTurns,
@@ -1081,6 +1281,7 @@ async function persistConversationModel(params: {
   turnNumber?: number;
   latestUserText?: string;
   planningBootstrapHints?: PlanningBootstrapHints | null;
+  manualGraphOverrides?: ManualGraphOverrides | null;
 }): Promise<PersistedConversationSnapshot> {
   const motifsWithTransfer = applyTransferStateToMotifs({
     motifs: annotateMotifExtractionMeta({
@@ -1139,6 +1340,7 @@ async function persistConversationModel(params: {
         portfolioDocumentState: planning.portfolioDocumentState,
         motifTransferState: params.motifTransferState || readMotifTransferState(null),
         taskLifecycle: params.taskLifecycle || readTaskLifecycle(null),
+        manualGraphOverrides: normalizeManualGraphOverrides(params.manualGraphOverrides),
         updatedAt: params.updatedAt,
       },
     }
@@ -1339,6 +1541,7 @@ convRouter.post("/", asyncRoute(async (req: AuthedRequest, res) => {
     validationStatus: "unasked",
     motifTransferState: readMotifTransferState(null),
     taskLifecycle: readTaskLifecycle(null),
+    manualGraphOverrides: emptyManualGraphOverrides(),
     planningBootstrapHints,
     travelPlanState: defaultTravelPlanState({
       locale,
@@ -1632,6 +1835,12 @@ convRouter.put("/:id/graph", asyncRoute(async (req: AuthedRequest, res) => {
     version: prevGraph.version,
   });
   normalized.id = prevGraph.id;
+  const manualGraphOverrides = rebuildManualGraphOverrides({
+    prevGraph,
+    nextGraph: normalized,
+    existing: normalizeManualGraphOverrides((conv as any).manualGraphOverrides),
+    updatedAt: new Date().toISOString(),
+  });
   const model = buildCognitiveModel({
     graph: normalized,
     prevConcepts: conv.concepts || [],
@@ -1702,6 +1911,7 @@ convRouter.put("/:id/graph", asyncRoute(async (req: AuthedRequest, res) => {
         portfolioDocumentState: planning.portfolioDocumentState,
         motifTransferState,
         taskLifecycle,
+        manualGraphOverrides,
         updatedAt: now,
       },
     }
@@ -2123,6 +2333,7 @@ convRouter.post("/:id/turn", asyncRoute(async (req: AuthedRequest, res) => {
       turnNumber,
       latestUserText: userText,
       planningBootstrapHints: retrievalHints,
+      manualGraphOverrides: turnBase.manualGraphOverrides,
     });
 
     return res.json({
@@ -2156,8 +2367,9 @@ convRouter.post("/:id/turn", asyncRoute(async (req: AuthedRequest, res) => {
   });
 
   const merged = applyPatchWithGuards(graph, out.graph_patch);
+  const graphWithOverrides = applyManualGraphOverrides(merged.newGraph, turnBase.manualGraphOverrides);
   const model = buildCognitiveModel({
-    graph: merged.newGraph,
+    graph: graphWithOverrides,
     prevConcepts: baseConcepts,
     baseConcepts,
     baseMotifs,
@@ -2165,7 +2377,7 @@ convRouter.post("/:id/turn", asyncRoute(async (req: AuthedRequest, res) => {
     baseContexts,
     locale,
   });
-  model.graph.version = merged.newGraph.version + (graphChanged(merged.newGraph, model.graph) ? 1 : 0);
+  model.graph.version = graphWithOverrides.version + (graphChanged(graphWithOverrides, model.graph) ? 1 : 0);
 
   if (revisionProbe.followupQuestion) {
     out.assistant_text = appendFollowupQuestion(String(out.assistant_text || ""), revisionProbe.followupQuestion);
@@ -2248,6 +2460,7 @@ convRouter.post("/:id/turn", asyncRoute(async (req: AuthedRequest, res) => {
     turnNumber,
     latestUserText: userText,
     planningBootstrapHints: retrievalHints,
+    manualGraphOverrides: turnBase.manualGraphOverrides,
   });
 
   res.json({
@@ -2376,6 +2589,7 @@ convRouter.post("/:id/turn/stream", asyncRoute(async (req: AuthedRequest, res) =
       turnNumber,
       latestUserText: userText,
       planningBootstrapHints: retrievalHints,
+      manualGraphOverrides: turnBase.manualGraphOverrides,
     });
 
     res.status(200);
@@ -2468,8 +2682,9 @@ convRouter.post("/:id/turn/stream", asyncRoute(async (req: AuthedRequest, res) =
     }
 
     const merged = applyPatchWithGuards(graph, out.graph_patch);
+    const graphWithOverrides = applyManualGraphOverrides(merged.newGraph, turnBase.manualGraphOverrides);
     const model = buildCognitiveModel({
-      graph: merged.newGraph,
+      graph: graphWithOverrides,
       prevConcepts: baseConcepts,
       baseConcepts,
       baseMotifs,
@@ -2477,7 +2692,7 @@ convRouter.post("/:id/turn/stream", asyncRoute(async (req: AuthedRequest, res) =
       baseContexts,
       locale,
     });
-    model.graph.version = merged.newGraph.version + (graphChanged(merged.newGraph, model.graph) ? 1 : 0);
+    model.graph.version = graphWithOverrides.version + (graphChanged(graphWithOverrides, model.graph) ? 1 : 0);
 
     if (
       shouldEvaluateTransferRecommendations({
@@ -2556,6 +2771,7 @@ convRouter.post("/:id/turn/stream", asyncRoute(async (req: AuthedRequest, res) =
       turnNumber,
       latestUserText: userText,
       planningBootstrapHints: retrievalHints,
+      manualGraphOverrides: turnBase.manualGraphOverrides,
     });
 
     sseSend(res, "done", {
@@ -2596,8 +2812,9 @@ convRouter.post("/:id/turn/stream", asyncRoute(async (req: AuthedRequest, res) =
         }
 
         const merged2 = applyPatchWithGuards(graph, out2.graph_patch);
+        const graphWithOverrides2 = applyManualGraphOverrides(merged2.newGraph, turnBase.manualGraphOverrides);
         const model2 = buildCognitiveModel({
-          graph: merged2.newGraph,
+          graph: graphWithOverrides2,
           prevConcepts: baseConcepts,
           baseConcepts,
           baseMotifs,
@@ -2605,7 +2822,8 @@ convRouter.post("/:id/turn/stream", asyncRoute(async (req: AuthedRequest, res) =
           baseContexts,
           locale,
         });
-        model2.graph.version = merged2.newGraph.version + (graphChanged(merged2.newGraph, model2.graph) ? 1 : 0);
+        model2.graph.version =
+          graphWithOverrides2.version + (graphChanged(graphWithOverrides2, model2.graph) ? 1 : 0);
 
         if (
           shouldEvaluateTransferRecommendations({
@@ -2684,6 +2902,7 @@ convRouter.post("/:id/turn/stream", asyncRoute(async (req: AuthedRequest, res) =
           turnNumber,
           latestUserText: userText,
           planningBootstrapHints: retrievalHints,
+          manualGraphOverrides: turnBase.manualGraphOverrides,
         });
 
         sseSend(res, "done", {

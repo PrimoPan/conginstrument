@@ -39,6 +39,7 @@ export type ConversationDoc = {
     reopenedAt?: string;
     updatedAt?: string;
   };
+  manualGraphOverrides?: any;
 };
 
 export type TurnDoc = {

@@ -1,8 +1,8 @@
 export const RISK_HEALTH_RE =
-  /心脏|心肺|冠心|心血管|高血压|糖尿病|哮喘|慢性病|手术|过敏|孕|老人|老年|儿童|行动不便|不能爬山|不能久走|危险|安全|急救|摔倒|health|medical|heart|cardiac|safety|risk/i;
+  /心脏|心肺|冠心|心血管|高血压|糖尿病|哮喘|慢性病|手术|过敏|孕|老人|老年|儿童|行动不便|不能爬山|不能久走|焦虑|惊恐|抑郁|危险|安全|急救|摔倒|health|medical|heart|cardiac|anxiety|panic|depression|safety|risk/i;
 
 export const MEDICAL_HEALTH_RE =
-  /心脏|心肺|冠心|冠脉|冠状动脉|心血管|支架|心梗|高血压|糖尿病|哮喘|慢性病|手术|过敏|孕|行动不便|不能爬山|不能久走|health|medical|heart|cardiac|stent/i;
+  /心脏|心肺|冠心|冠脉|冠状动脉|心血管|支架|心梗|高血压|糖尿病|哮喘|慢性病|手术|过敏|孕|行动不便|不能爬山|不能久走|焦虑|惊恐|抑郁|health|medical|heart|cardiac|anxiety|panic|depression|stent/i;
 
 export const HEALTH_STRATEGY_ACTIVITY_RE =
   /低强度|慢节奏|轻松|少走路|少步行|减少体力|不要太累|不想太累|不太折腾|不要太折腾|少折腾|不想太赶|不要太赶|别太赶|节奏别太赶|行程别太赶|不宜剧烈|避免剧烈|low[-\s]?intensity|light[-\s]?activity|low[-\s]?exertion|avoid overexertion|low[-\s]?hassle/i;
