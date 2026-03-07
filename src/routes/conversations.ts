@@ -689,8 +689,8 @@ async function buildBootstrapGraphAndPlan(params: {
 
   const summary = destination
     ? isEnglishLocale(params.locale)
-      ? `New trip to ${destination}. Start the first turn to establish current-task rules before reviewing past motifs.`
-      : `已创建前往${destination}的新旅行规划。请先开始第一轮对话，再评审历史规则建议。`
+      ? `New trip to ${destination}. Start with this trip's needs first. After the first assistant reply, the sidebar will quietly suggest a few past patterns you may want to keep.`
+      : `已创建前往${destination}的新旅行规划。你先说这次的需求；首轮 assistant 回复后，右侧会静默推荐几条可能还能沿用的历史思路。`
     : isEnglishLocale(params.locale)
     ? "A new trip planning session is created. Start chatting to establish the current task."
     : "已创建新的旅行规划会话，请先开始对话以建立当前任务语义。";

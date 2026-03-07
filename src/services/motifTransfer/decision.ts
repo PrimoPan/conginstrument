@@ -128,8 +128,11 @@ export function applyTransferDecision(params: {
     params.action === "modify"
       ? t(
           params.locale,
-          `已记录「修改后采用」。请确认：这次是否沿用这条规则？「${clean(params.revisedText || params.recommendation.motif_type_title, 120)}」`,
-          `Recorded as "modify before adopt". Please confirm: should this rule apply now? "${clean(
+          `我先记下你修改后的版本了。确认一下：这次要按「${clean(
+            params.revisedText || params.recommendation.motif_type_title,
+            120
+          )}」这条思路继续规划吗？`,
+          `I saved your revised version. Confirm: should this trip continue with "${clean(
             params.revisedText || params.recommendation.motif_type_title,
             120
           )}"`
