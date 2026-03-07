@@ -71,6 +71,7 @@ export type ConceptMotif = {
   conceptIds: string[];
   anchorConceptId: string;
   title: string;
+  display_title?: string;
   description: string;
   confidence: number;
   supportEdgeIds: string[];
@@ -201,9 +202,14 @@ function normalizeMotifInstanceStatus(raw: any, fallback: MotifInstanceStatus = 
 
 function normalizeMotifLifecycleStatus(raw: any, fallback: MotifLifecycleStatus = "active"): MotifLifecycleStatus {
   const s = cleanText(raw, 24).toLowerCase();
-  if (s === "disabled") return "cancelled";
+  if (s === "disabled") return "disabled";
   if (s === "active" || s === "uncertain" || s === "deprecated" || s === "cancelled") return s;
   return fallback;
+}
+
+function isInactiveMotifStatus(raw: any): boolean {
+  const s = normalizeMotifLifecycleStatus(raw, "active");
+  return s === "cancelled" || s === "disabled";
 }
 
 function t(locale: AppLocale | undefined, zh: string, en: string): string {
@@ -1285,6 +1291,7 @@ function normalizeMotifs(input: any): ConceptMotif[] {
       conceptIds,
       anchorConceptId,
       title: cleanText((raw as any)?.title, 160),
+      display_title: cleanText((raw as any)?.display_title, 160) || undefined,
       description: cleanText((raw as any)?.description, 240),
       confidence: clamp01((raw as any)?.confidence, 0.7),
       supportEdgeIds: uniq(
@@ -1475,7 +1482,7 @@ export function motifLifecycleTransition(params: {
 }): { status: MotifLifecycleStatus; reason: string } {
   const current = normalizeMotifLifecycleStatus(params.current, "active");
   const reason = cleanText(params.fallbackReason, 180) || params.event;
-  if (params.event === "manual_disable") return { status: "cancelled", reason };
+  if (params.event === "manual_disable") return { status: "disabled", reason };
   if (params.event === "transfer_failure") return { status: "uncertain", reason };
   if (params.event === "explicit_negation") return { status: "deprecated", reason };
   if (params.event === "conflict_resolved") {
@@ -1524,11 +1531,10 @@ function inferBaseStatus(m: ConceptMotif, prev: ConceptMotif | undefined, concep
   }
 
   if (prev?.status === "disabled" && !!prev.resolved && !allPaused) {
-    return motifLifecycleTransition({
-      current: "cancelled",
-      event: "manual_disable",
-      fallbackReason: prev.statusReason || "legacy_user_disabled",
-    });
+    return {
+      status: "disabled",
+      reason: prev.statusReason || "legacy_user_disabled",
+    };
   }
   const dep = motifDependencyClass(m);
   const threshold = motifLowConfidenceThreshold(dep);
@@ -1546,9 +1552,9 @@ function inferBaseStatus(m: ConceptMotif, prev: ConceptMotif | undefined, concep
   });
 }
 
-function isUserEditableStatus(status: MotifLifecycleStatus | undefined): status is "active" | "cancelled" {
+function isUserEditableStatus(status: MotifLifecycleStatus | undefined): status is "active" | "disabled" {
   const s = normalizeMotifLifecycleStatus(status, "active");
-  return s === "active" || s === "cancelled";
+  return s === "active" || s === "disabled";
 }
 
 function sanitizeMotifStructure(params: {
@@ -1615,6 +1621,7 @@ function applyUserEditableOverlay(params: {
   return {
     ...current,
     title: cleanText(prev.title, 160) || current.title,
+    display_title: cleanText(prev.display_title, 160) || current.display_title,
     description: cleanText(prev.description, 240) || current.description,
     relation,
     dependencyClass: relation,
@@ -1903,7 +1910,7 @@ function applyRedundancyDeprecation(motifs: ConceptMotif[], conceptById: Map<str
   const groups = new Map<string, ConceptMotif[]>();
   for (const m of motifs) {
     if (m.resolved) continue;
-    if (normalizeMotifLifecycleStatus(m.status, "active") === "cancelled") continue;
+    if (isInactiveMotifStatus(m.status)) continue;
     if (!m.anchorConceptId) continue;
     const signature = `${motifDependencyClass(m)}|${m.anchorConceptId}|${sourceFamilySignature(m, conceptById)}`;
     if (!groups.has(signature)) groups.set(signature, []);
@@ -1974,7 +1981,7 @@ function applyRelationConflictDeprecation(motifs: ConceptMotif[], conceptById: M
   const candidates = motifs.filter(
     (m) =>
       !m.resolved &&
-      normalizeMotifLifecycleStatus(m.status, "active") !== "cancelled" &&
+      !isInactiveMotifStatus(m.status) &&
       m.status !== "deprecated" &&
       !!m.anchorConceptId
   );
@@ -2427,7 +2434,7 @@ function isSystemRedundantCancelledReason(reason: string): boolean {
 
 function shouldExposeMotifInOutput(motif: ConceptMotif): boolean {
   const status = normalizeMotifLifecycleStatus(motif.status, "active");
-  if (status !== "cancelled") return true;
+  if (!isInactiveMotifStatus(status)) return true;
   const reason = cleanText(motif.statusReason, 220).toLowerCase();
   if (!reason) return motif.resolvedBy === "user";
   if (motif.resolvedBy === "user") return true;
@@ -2559,7 +2566,7 @@ export function selectMotifSetGreedy(motifs: ConceptMotif[], conceptById: Map<st
   const selectedKey = new Set<string>();
 
   const candidates = withScore
-    .filter((m) => m.status === "active" && !m.resolved && m.status !== "cancelled")
+    .filter((m) => m.status === "active" && !m.resolved && !isInactiveMotifStatus(m.status))
     .slice()
     .sort(
       (a, b) =>
@@ -3057,7 +3064,7 @@ function motifSourceIdsForCoverage(motif: ConceptMotif): string[] {
 
 function edgeCoveredByMotifs(edge: RequiredCausalCoverageEdge, motifs: ConceptMotif[]): boolean {
   for (const motif of motifs || []) {
-    if (motif.status === "cancelled") continue;
+    if (isInactiveMotifStatus(motif.status)) continue;
     const relation = normalizeDependencyClass(motif.dependencyClass || motif.relation, motif.relation);
     if (relation !== edge.relation) continue;
     const target = cleanText(motif.anchorConceptId, 120);
@@ -3205,7 +3212,7 @@ function buildEdgeRepairMotif(params: {
 function motifComponentCount(motifs: ConceptMotif[]): number {
   const activeIds = uniq(
     (motifs || [])
-      .filter((m) => m.status !== "cancelled")
+      .filter((m) => !isInactiveMotifStatus(m.status))
       .map((m) => cleanText(m.id, 120))
       .filter(Boolean),
     1000
@@ -3215,7 +3222,7 @@ function motifComponentCount(motifs: ConceptMotif[]): number {
   for (const id of activeIds) adj.set(id, new Set<string>());
   const motifsByConcept = new Map<string, string[]>();
   for (const motif of motifs || []) {
-    if (motif.status === "cancelled") continue;
+    if (isInactiveMotifStatus(motif.status)) continue;
     for (const cid of motif.conceptIds || []) {
       const conceptId = cleanText(cid, 120);
       if (!conceptId) continue;
@@ -3375,6 +3382,7 @@ export function reconcileMotifsWithGraph(params: {
       // Motif semantics can change even when the motif id stays stable.
       // Keep derived copy fresh, and only let explicit user edits override later.
       title: m.title,
+      display_title: cleanText(prev?.display_title, 160) || undefined,
       description: m.description,
       status,
       statusReason: inferred.reason || prev?.statusReason,
@@ -3415,9 +3423,9 @@ export function reconcileMotifsWithGraph(params: {
     : chainCompressed;
   const densityCapped = capActiveMotifsPerAnchor(objectiveSelected, conceptById);
   const softPrunedCollapsed = convertSoftDeprecationsToCancelled(densityCapped).map((m) => {
-    if (m.status !== "deprecated" && m.status !== "cancelled") return m;
+    if (m.status !== "deprecated" && !isInactiveMotifStatus(m.status)) return m;
     if (m.novelty === "new") return m;
-    if (m.status === "cancelled") {
+    if (isInactiveMotifStatus(m.status)) {
       return { ...m, novelty: "updated" as MotifChangeState };
     }
     return { ...m, novelty: "updated" as MotifChangeState, resolved: false, resolvedAt: undefined, resolvedBy: undefined };
@@ -3485,7 +3493,7 @@ export function reconcileMotifsWithGraph(params: {
 export function attachMotifIdsToConcepts(concepts: ConceptItem[], motifs: ConceptMotif[]): ConceptItem[] {
   const motifIdsByConcept = new Map<string, string[]>();
   for (const m of motifs || []) {
-    if (m.status === "cancelled") continue;
+    if (isInactiveMotifStatus(m.status)) continue;
     for (const cid of m.conceptIds || []) {
       if (!motifIdsByConcept.has(cid)) motifIdsByConcept.set(cid, []);
       motifIdsByConcept.get(cid)!.push(m.id);
