@@ -554,6 +554,9 @@ data: {"assistantText":"...","graphPatch":{"ops":[]},"graph":{"id":"65f1...","ve
 - 用户手动停用 motif 时写入 `disabled`；`cancelled` 保留给被覆盖的历史 motif、系统剪枝、或不再成立的旧规则。
 - 多轮 refinement turn 会优先保留图中已确认的 destination scope；如果本轮只是补充节奏、住宿、交通等约束，而没有明确目的地更新 cue，就不会把这些补充句误提升成新的目的地。
 - lodging / safety / transit convenience 这类细化约束在 `intentSignals` 阶段会被剥离掉前置目的地脚手架（如“大阪这次也还是…”），避免把 refinement 句错误写成 destination 或粗糙 generic constraint。
+- “前文 A，后文非 A”的修订式否定现在会优先走 `revokedConstraintAxes / revokedPreferenceAxes`，而不是新建一个反向 constraint/preference 节点；典型覆盖包括 `一开始想划船，后来不想划船了`、`本来想住高星酒店，后来不想住了`、`Originally ... but now I do not want ... anymore`。
+- `转机 / transfer / layover / connection` 这类 logistics 约束不再通过兜底逻辑误投射成 lodging preference；只有安全、交通便利、少换酒店、无障碍等真正住宿筛选信号才会映射到 `slot:lodging`。
+- destination surface 会尽量保留用户原始书写：英文小写地名会稳定成 title case（如 `seoul -> Seoul`），而非 CJK 查询不会被 geo 解析器回写成中文别名。
 
 ---
 

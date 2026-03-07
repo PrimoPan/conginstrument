@@ -560,6 +560,96 @@ const scenarios: ScenarioDefinition[] = [
     },
   },
   {
+    name: "domestic -> domestic revision clauses revoke earlier boating and high-star asks without destination drift across 8+8 turns",
+    locale: "zh-CN",
+    firstTask: {
+      name: "xiamen_family_trip",
+      turns: [
+        "想带爸妈去厦门5天，节奏轻一点，不要太赶。",
+        "预算控制在1万8左右。",
+        "酒店最好靠地铁，周边吃饭方便。",
+        "鼓浪屿可以去，但不想每天都跑很多点。",
+        "希望至少留一天散步和喝茶。",
+        "不要频繁换酒店。",
+        "晚上早点回住处，第二天轻松一点。",
+        "如果下雨，希望有室内备选。",
+      ],
+    },
+    secondTask: {
+      name: "qiandaohu_family_trip",
+      turns: [
+        "重新规划一个新任务，想带家人去千岛湖4天，整体慢一点，一开始想划船也想坐游船。",
+        "预算大概1万5。",
+        "酒店想住得稳一点，本来还想住高星酒店。",
+        "其实一开始想划船，后来不想划船了，只想散步喝茶就好。",
+        "本来想住高星酒店，后来不想住高星酒店了，交通方便更重要。",
+        "如果下雨，希望有明确的室内替代。",
+        "最后一天留足返程缓冲，不要安排太满。",
+        "晚上也别太晚，第二天轻松一点。",
+      ],
+    },
+    secondTaskShouldSwitch: true,
+    validate: ({ firstTask, secondTask }) => {
+      assert.ok(hasDestination(firstTask.graph, "厦门"));
+      assert.ok(hasDestination(secondTask.graph, "千岛湖"));
+      assert.equal(hasDestination(secondTask.graph, "厦门"), false);
+      assert.ok(planHasDestination(secondTask.plan, "千岛湖"));
+      assert.equal(planHasDestination(secondTask.plan, "厦门"), false);
+
+      const statements = (secondTask.graph.nodes || []).map((node) => String(node.statement || ""));
+      assert.equal(statements.some((text) => /划船|游船|boat|boating|ferry|cruise/i.test(text)), false);
+      assert.equal(statements.some((text) => /高星|五星|five-star|luxury hotel/i.test(text)), false);
+    },
+  },
+  {
+    name: "domestic -> international revision clauses should not turn transfer revocation into lodging across 8+8 turns",
+    locale: "zh-CN",
+    firstTask: {
+      name: "qingdao_couple_trip",
+      turns: [
+        "想和伴侣去青岛4天，看海散步为主，不要太赶。",
+        "预算控制在1万2左右。",
+        "酒店靠地铁或者火车站，回程方便。",
+        "海鲜想吃，但不要特别贵。",
+        "不追求景点密度，海边慢慢走和咖啡店都可以。",
+        "尽量少打车，多靠步行和地铁。",
+        "最后一天留足返程缓冲。",
+        "如果天气不好，也给我一点室内替代。",
+      ],
+    },
+    secondTask: {
+      name: "vienna_mother_trip_zh",
+      turns: [
+        "重新规划一个新任务，想带妈妈去维也纳6天，整体轻松一点。",
+        "预算总共3万左右。",
+        "酒店靠主火车站或者机场快线方便，一开始觉得可以接受转机。",
+        "但后来不想转机了，最好直达，别把这个要求写成住宿偏好。",
+        "最多换一次酒店，最后两晚住稳一点。",
+        "如果下雨，希望有明确的室内替代。",
+        "妈妈不想爬太多楼梯，电梯更重要。",
+        "最后一天安排轻一点，方便回程。",
+      ],
+    },
+    secondTaskShouldSwitch: true,
+    validate: ({ firstTask, secondTask }) => {
+      assert.ok(hasDestination(firstTask.graph, "青岛"));
+      assert.ok(hasDestination(secondTask.graph, "维也纳"));
+      assert.equal(hasDestination(secondTask.graph, "青岛"), false);
+      assert.ok(planHasDestination(secondTask.plan, "维也纳"));
+      assert.equal(planHasDestination(secondTask.plan, "青岛"), false);
+
+      const lodgingStatements = (secondTask.graph.nodes || [])
+        .filter((node) => String(node.key || "").startsWith("slot:lodging"))
+        .map((node) => String(node.statement || ""));
+      assert.equal(lodgingStatements.some((text) => /转机|换乘|transfer|layover|connection/i.test(text)), false);
+
+      const limitingStatements = (secondTask.graph.nodes || [])
+        .filter((node) => String(node.key || "").startsWith("slot:constraint:limiting:"))
+        .map((node) => String(node.statement || ""));
+      assert.equal(limitingStatements.some((text) => /转机|换乘|transfer|layover|connection/i.test(text)), false);
+    },
+  },
+  {
     name: "english 4+4 tasks keep destination boundaries stable with lightweight refinements",
     locale: "en-US",
     firstTask: {

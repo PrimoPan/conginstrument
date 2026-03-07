@@ -87,7 +87,7 @@ function normalizeMcpResult(query: string, raw: any): McpResolvedPlace | null {
 
   return {
     query,
-    label: hasCjk(query) ? normalizeDestination(query) || label : label,
+    label: hasCjk(query) ? normalizeDestination(query) || label : normalizeDestination(query) || label,
     parentCity,
     cityAnchor,
     isCityLevel,
@@ -139,7 +139,7 @@ export async function resolvePlaceByMcp(query: string): Promise<McpResolvedPlace
         tool: "resolve_place",
         input: {
           query: q,
-          locale: "zh-CN,en",
+          locale: hasCjk(q) ? "zh-CN,en" : "en,zh-CN",
         },
       }),
     });
@@ -160,4 +160,3 @@ export async function resolvePlaceByMcp(query: string): Promise<McpResolvedPlace
     timeout.clear();
   }
 }
-

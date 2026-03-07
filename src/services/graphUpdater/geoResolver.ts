@@ -197,7 +197,7 @@ async function resolvePlace(query: string): Promise<ResolvedPlace | null> {
     format: "jsonv2",
     addressdetails: "1",
     limit: "5",
-    "accept-language": "zh-CN,en",
+    "accept-language": hasCjk(q) ? "zh-CN,en" : "en,zh-CN",
   });
   const url = `${GEO_ENDPOINT}/search?${params.toString()}`;
 
@@ -254,7 +254,10 @@ async function resolvePlace(query: string): Promise<ResolvedPlace | null> {
 function preferSurface(raw: string, resolved: string): string {
   const r = normalizeDestination(raw);
   const g = normalizeDestination(resolved);
+  if (!r) return g;
   if (hasCjk(r)) return r;
+  if (!hasCjk(r) && hasCjk(g)) return r;
+  if (!hasCjk(r)) return r;
   return g || r;
 }
 
@@ -319,7 +322,8 @@ export async function resolveIntentSignalsGeo(params: {
     const r = resolvedOf(n);
     if (r?.isSubLocation && r.parentCity) {
       cityRemap.set(n.toLowerCase(), r.parentCity);
-      return preferSurface(raw || n, r.parentCity);
+      if (hasCjk(n)) return n;
+      return normalizeDestination(r.parentCity);
     }
     if (r?.cityAnchor && r.isCityLevel) {
       return preferSurface(raw || n, r.cityAnchor);

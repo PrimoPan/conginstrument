@@ -5,6 +5,7 @@ import {
   extractIntentSignals,
   extractIntentSignalsWithRecency,
   mergeIntentSignals,
+  normalizeDestination,
 } from "../intentSignals.js";
 import { analyzeConstraintConflicts } from "../conflictAnalyzer.js";
 import { buildBudgetLedgerFromUserTurns } from "../../travelPlan/budgetLedger.js";
@@ -12,6 +13,7 @@ import { buildTravelPlanState } from "../../travelPlan/state.js";
 import { buildSlotStateMachine } from "../slotStateMachine.js";
 import { compileSlotStateToPatch } from "../slotGraphCompiler.js";
 import { sanitizeIntentSignals } from "../signalSanitizer.js";
+import { resolveIntentSignalsGeo } from "../geoResolver.js";
 import { slotsToSignals } from "../slotFunctionCall.js";
 import { generateGraphPatch } from "../../graphUpdater.js";
 import { applyPatchWithGuards } from "../../../core/graph/patchApply.js";
@@ -38,6 +40,10 @@ type Case = {
   name: string;
   run: () => void | Promise<void>;
 };
+
+function cleanedGenericTexts(signals: { genericConstraints?: Array<{ text?: string }> }) {
+  return (signals.genericConstraints || []).map((item) => String(item?.text || ""));
+}
 
 const cases: Case[] = [
   {
@@ -803,6 +809,137 @@ const cases: Case[] = [
         (inDestination.destinations || []).some((item) => /new task|start/i.test(String(item))),
         false
       );
+    },
+  },
+  {
+    name: "normalizeDestination should stabilize lowercase latin place surfaces",
+    run: () => {
+      assert.equal(normalizeDestination("seoul"), "Seoul");
+      assert.equal(normalizeDestination("rio de janeiro"), "Rio de Janeiro");
+      assert.equal(normalizeDestination("buenos aires"), "Buenos Aires");
+    },
+  },
+  {
+    name: "english lowercase destination should keep title-cased surface in extracted signals",
+    run: () => {
+      const out = extractIntentSignals("Plan a 4-day seoul trip with my parents.", {
+        locale: "en-US",
+      });
+      assert.equal(out.destination, "Seoul");
+      assert.deepEqual(out.destinations, ["Seoul"]);
+    },
+  },
+  {
+    name: "geo resolver should keep english surface when remote label returns translated alias",
+    run: async () => {
+      const originalFetch = globalThis.fetch;
+      globalThis.fetch = (async () =>
+        new Response(
+          JSON.stringify([
+            {
+              name: "维也纳",
+              class: "place",
+              type: "city",
+              importance: 0.92,
+              address: { city: "维也纳", country: "Austria" },
+            },
+          ]),
+          { status: 200, headers: { "Content-Type": "application/json" } }
+        )) as any;
+      try {
+        const out = await resolveIntentSignalsGeo({
+          signals: {
+            destination: "Vienna",
+            destinations: ["Vienna"],
+            destinationEvidence: "Vienna",
+            destinationEvidences: ["Vienna"],
+          },
+        });
+        assert.equal(out.destination, "Vienna");
+        assert.deepEqual(out.destinations, ["Vienna"]);
+      } finally {
+        globalThis.fetch = originalFetch;
+      }
+    },
+  },
+  {
+    name: "geo resolver should title-case lowercase english labels from remote responses",
+    run: async () => {
+      const originalFetch = globalThis.fetch;
+      globalThis.fetch = (async () =>
+        new Response(
+          JSON.stringify([
+            {
+              name: "seoul",
+              class: "place",
+              type: "city",
+              importance: 0.91,
+              address: { city: "seoul", country: "South Korea" },
+            },
+          ]),
+          { status: 200, headers: { "Content-Type": "application/json" } }
+        )) as any;
+      try {
+        const out = await resolveIntentSignalsGeo({
+          signals: {
+            destination: "Seoul",
+            destinations: ["Seoul"],
+            destinationEvidence: "Seoul",
+            destinationEvidences: ["Seoul"],
+          },
+        });
+        assert.equal(out.destination, "Seoul");
+        assert.deepEqual(out.destinations, ["Seoul"]);
+      } finally {
+        globalThis.fetch = originalFetch;
+      }
+    },
+  },
+  {
+    name: "travel plan state should title-case lowercase english destination labels from graph nodes",
+    run: () => {
+      const plan = buildTravelPlanState({
+        locale: "en-US",
+        taskId: "task_lowercase_dest",
+        previous: null,
+        turns: [
+          {
+            createdAt: "2026-03-08T10:00:00.000Z",
+            userText: "Plan a 4-day seoul trip with my parents.",
+            assistantText: "Day 1 arrive. Day 2 easy pace.",
+          },
+        ],
+        concepts: [],
+        motifs: [],
+        graph: {
+          id: "g_lowercase_dest",
+          version: 1,
+          nodes: [
+            {
+              id: "n_goal",
+              type: "belief",
+              layer: "intent",
+              statement: "Intent: travel to seoul for 4 days",
+              status: "confirmed",
+              confidence: 0.92,
+              importance: 0.88,
+              key: "slot:goal",
+            },
+            {
+              id: "n_dest",
+              type: "factual_assertion",
+              layer: "requirement",
+              statement: "Destination: seoul",
+              status: "confirmed",
+              confidence: 0.9,
+              importance: 0.84,
+              key: "slot:destination:seoul",
+            },
+          ],
+          edges: [],
+        } as any,
+      });
+      assert.deepEqual(plan.destination_scope, ["Seoul"]);
     },
   },
   {
@@ -2534,6 +2671,84 @@ const cases: Case[] = [
     },
   },
   {
+    name: "natural boating preference revocation should clear activity axis without generic constraint leak",
+    run: () => {
+      const merged = extractIntentSignalsWithRecency(
+        "想带家人去千岛湖，想划船，也想坐游船。",
+        "这次不想划船了"
+      );
+      assert.deepEqual(merged.revokedPreferenceAxes, ["preference:activity"]);
+      assert.equal(cleanedGenericTexts(merged).some((text) => /划船|游船|boat|boating|ferry|cruise/i.test(text)), false);
+
+      const state = buildSlotStateMachine({
+        userText: "这次不想划船了",
+        recentTurns: [
+          { role: "user", content: "想带家人去千岛湖，想划船，也想坐游船。" },
+          { role: "assistant", content: "收到" },
+          { role: "user", content: "这次不想划船了" },
+        ],
+        signals: merged,
+      });
+      assert.equal(state.nodes.some((n: any) => String(n?.slotKey || "") === "slot:activity_preference"), false);
+      assert.equal(
+        state.nodes.some(
+          (n: any) =>
+            String(n?.slotKey || "").startsWith("slot:constraint:limiting:") &&
+            /划船|游船|boat|boating|ferry|cruise/i.test(String(n?.statement || ""))
+        ),
+        false
+      );
+    },
+  },
+  {
+    name: "natural lodging preference revocation should not leak into generic constraints",
+    run: () => {
+      const merged = extractIntentSignalsWithRecency(
+        "这次想住高星酒店，位置方便一点。",
+        "这次不想住高星酒店了"
+      );
+      assert.deepEqual(merged.revokedPreferenceAxes, ["preference:lodging"]);
+      assert.equal(cleanedGenericTexts(merged).some((text) => /高星|酒店|住宿|hotel|lodging/i.test(text)), false);
+    },
+  },
+  {
+    name: "natural scenic preference revocation should not leak into generic constraints",
+    run: () => {
+      const merged = extractIntentSignalsWithRecency(
+        "我想看人文景点和博物馆。",
+        "这次不想看人文景点了"
+      );
+      assert.deepEqual(merged.revokedPreferenceAxes, ["preference:scenic"]);
+      assert.equal(cleanedGenericTexts(merged).some((text) => /人文|文化|景点|博物馆|culture|scenic/i.test(text)), false);
+    },
+  },
+  {
+    name: "natural event preference revocation should not leak into generic constraints",
+    run: () => {
+      const merged = extractIntentSignalsWithRecency(
+        "想看演唱会。",
+        "这次不想看演唱会了"
+      );
+      assert.deepEqual(merged.revokedPreferenceAxes, ["preference:activity"]);
+      assert.equal(cleanedGenericTexts(merged).some((text) => /演唱会|concert|show|event/i.test(text)), false);
+    },
+  },
+  {
+    name: "same-turn boating revision wording should clear activity axis without replacement",
+    run: () => {
+      const latest = extractIntentSignals("一开始想划船，后来不想划船了");
+      assert.deepEqual(latest.revokedPreferenceAxes, ["preference:activity"]);
+      assert.equal(cleanedGenericTexts(latest).some((text) => /划船|游船|boat|boating|ferry|cruise/i.test(text)), false);
+
+      const state = buildSlotStateMachine({
+        userText: "一开始想划船，后来不想划船了",
+        recentTurns: [{ role: "user", content: "一开始想划船，后来不想划船了" }],
+        signals: latest,
+      });
+      assert.equal(state.nodes.some((n: any) => String(n?.slotKey || "") === "slot:activity_preference"), false);
+    },
+  },
+  {
     name: "latest opposite limiting factor should revoke previous axis without creating opposite node",
     run: () => {
       const merged = extractIntentSignalsWithRecency(
@@ -2557,6 +2772,71 @@ const cases: Case[] = [
       });
       assert.equal(boatNodes.length, 0);
       assert.equal((merged.revokedConstraintAxes || []).length > 0, true);
+    },
+  },
+  {
+    name: "revision-style car revocation wording should remove prior constraint without replacement",
+    run: () => {
+      const merged = extractIntentSignalsWithRecency(
+        "限制因素：一定要坐车",
+        "一开始觉得要坐车，后来不想坐车了"
+      );
+      assert.deepEqual(merged.revokedConstraintAxes, ["other:car"]);
+      assert.equal(cleanedGenericTexts(merged).some((text) => /坐车|乘车|car|taxi|drive/i.test(text)), false);
+
+      const state = buildSlotStateMachine({
+        userText: "一开始觉得要坐车，后来不想坐车了",
+        recentTurns: [
+          { role: "user", content: "限制因素：一定要坐车" },
+          { role: "assistant", content: "收到" },
+          { role: "user", content: "一开始觉得要坐车，后来不想坐车了" },
+        ],
+        signals: merged,
+      });
+      assert.equal(
+        state.nodes.some(
+          (n: any) =>
+            String(n?.slotKey || "").startsWith("slot:constraint:limiting:") &&
+            /坐车|乘车|car|taxi|drive/i.test(String(n?.statement || ""))
+        ),
+        false
+      );
+    },
+  },
+  {
+    name: "revision-style transfer revocation should not leak into lodging or logistics nodes",
+    run: () => {
+      const latest = extractIntentSignals("这次不想转机了");
+      assert.deepEqual(latest.revokedConstraintAxes, ["logistics:转机"]);
+      assert.equal(latest.lodgingPreference, undefined);
+      assert.equal(cleanedGenericTexts(latest).some((text) => /转机|换乘|transfer|layover|connection/i.test(text)), false);
+
+      const merged = extractIntentSignalsWithRecency(
+        "限制因素：一定要转机",
+        "一开始觉得要转机，后来不想转机了"
+      );
+      assert.deepEqual(merged.revokedConstraintAxes, ["logistics:转机"]);
+      assert.equal(merged.lodgingPreference, undefined);
+      assert.equal(cleanedGenericTexts(merged).some((text) => /转机|换乘|transfer|layover|connection/i.test(text)), false);
+
+      const state = buildSlotStateMachine({
+        userText: "一开始觉得要转机，后来不想转机了",
+        recentTurns: [
+          { role: "user", content: "限制因素：一定要转机" },
+          { role: "assistant", content: "收到" },
+          { role: "user", content: "一开始觉得要转机，后来不想转机了" },
+        ],
+        signals: merged,
+      });
+      assert.equal(state.nodes.some((n: any) => String(n?.slotKey || "") === "slot:lodging"), false);
+      assert.equal(
+        state.nodes.some(
+          (n: any) =>
+            String(n?.slotKey || "").startsWith("slot:constraint:limiting:") &&
+            /转机|换乘|transfer|layover|connection/i.test(String(n?.statement || ""))
+        ),
+        false
+      );
     },
   },
   {
@@ -2671,6 +2951,43 @@ const cases: Case[] = [
         return key.startsWith("slot:constraint:limiting:") && /坐车|乘车|car|taxi|drive/i.test(statement);
       });
       assert.equal(carNodes.length, 0);
+    },
+  },
+  {
+    name: "revision-style lodging revocation should keep orthogonal scenic preference active",
+    run: () => {
+      const merged = extractIntentSignalsWithRecency(
+        "我想看博物馆，也想住高星酒店。",
+        "后来不想住高星酒店了，但博物馆还想看。"
+      );
+      assert.deepEqual(merged.revokedPreferenceAxes, ["preference:lodging"]);
+      assert.equal(!!merged.scenicPreference, true);
+      assert.equal(merged.lodgingPreference, undefined);
+
+      const state = buildSlotStateMachine({
+        userText: "后来不想住高星酒店了，但博物馆还想看。",
+        recentTurns: [
+          { role: "user", content: "我想看博物馆，也想住高星酒店。" },
+          { role: "assistant", content: "收到" },
+          { role: "user", content: "后来不想住高星酒店了，但博物馆还想看。" },
+        ],
+        signals: merged,
+      });
+      assert.equal(state.nodes.some((n: any) => String(n?.slotKey || "") === "slot:scenic_preference"), true);
+      assert.equal(state.nodes.some((n: any) => String(n?.slotKey || "") === "slot:lodging"), false);
+    },
+  },
+  {
+    name: "english revision-style transfer revocation should clear history without replacement",
+    run: () => {
+      const merged = extractIntentSignalsWithRecency(
+        "Constraint: a transfer is fine.",
+        "Originally I thought a transfer was fine, but now I do not want a transfer anymore.",
+        { locale: "en-US" }
+      );
+      assert.deepEqual(merged.revokedConstraintAxes, ["logistics:transfer"]);
+      assert.equal(cleanedGenericTexts(merged).some((text) => /transfer|layover|connection/i.test(text)), false);
+      assert.equal(merged.lodgingPreference, undefined);
     },
   },
   {

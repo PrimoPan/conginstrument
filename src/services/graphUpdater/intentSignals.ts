@@ -255,6 +255,48 @@ function formatCriticalEvidence(locale: AppLocale | undefined, reason: string, d
   return isEnglishLocale(locale) ? `${reason} for ${days} days (hard constraint)` : `${reason} ${days}天（硬约束）`;
 }
 
+const LATIN_DESTINATION_CONNECTORS = new Set([
+  "de",
+  "da",
+  "do",
+  "dos",
+  "das",
+  "del",
+  "della",
+  "di",
+  "du",
+  "la",
+  "le",
+  "el",
+  "al",
+  "of",
+  "and",
+  "the",
+  "van",
+  "von",
+]);
+
+function stabilizeLatinDestinationSurface(raw: string): string {
+  const s = cleanStatement(raw, 48);
+  if (!s) return "";
+  if (/[\u4e00-\u9fff]/.test(s)) return s;
+  if (!/[A-Za-z]/.test(s)) return s;
+  if (!/[a-z]/.test(s)) return s;
+
+  let tokenIndex = 0;
+  return s
+    .split(/(\s+|-)/)
+    .map((part) => {
+      if (!part || /^\s+$/.test(part) || part === "-") return part;
+      if (!/[A-Za-z]/.test(part)) return part;
+      const lower = part.toLowerCase();
+      tokenIndex += 1;
+      if (tokenIndex > 1 && LATIN_DESTINATION_CONNECTORS.has(lower)) return lower;
+      return lower.replace(/(^|['’])([a-z])/g, (_m, prefix, ch) => `${prefix}${ch.toUpperCase()}`);
+    })
+    .join("");
+}
+
 function hasExplicitDurationTotalCue(text: string): boolean {
   const s = cleanStatement(text, 180);
   if (!s) return false;
@@ -1717,7 +1759,7 @@ export function normalizeDestination(raw: string): string {
   s = s.replace(/[吧啊呀呢嘛]+$/g, "");
   const routeScoped = s.match(/^(.{2,16}?)(?:自驾)?(?:小)?(?:环岛|环线|环游|环路|一圈)$/i);
   if (routeScoped?.[1]) s = routeScoped[1];
-  s = s.trim();
+  s = stabilizeLatinDestinationSurface(s.trim());
   return s;
 }
 
@@ -1727,6 +1769,15 @@ function looksLikeNonPlaceSituationPhrase(raw: string): boolean {
   const originalLower = original.toLowerCase();
   const normalizedLower = normalized.toLowerCase();
   if (!original && !normalized) return false;
+
+  if (
+    /^(?:一开始|起初|最初|原本|本来|原先|先前|之前|最开始|刚开始|后来|后面|现在|这次|如今|initially|originally|at first|earlier|used to|but now|now)$/.test(
+      normalized
+    ) ||
+    /^(?:initially|originally|at first|earlier|used to|but now|now)$/.test(normalizedLower)
+  ) {
+    return true;
+  }
 
   if (/^(?:太晚|太早|晚一点|早一点|早点|晚点|晚上|早上|上午|下午|傍晚|深夜)$/.test(normalized)) return true;
   if (/^(?:late|early|later|earlier|evening|morning|afternoon|night|nighttime|bedtime)$/.test(normalizedLower)) {
@@ -2568,12 +2619,14 @@ export function normalizeActivityPreferenceStatement(raw: string, locale?: AppLo
   const hasSports = /球迷|看球|观赛|比赛|球赛|主场|客场|德比|门票|球票|足球|篮球|赛事/i.test(s);
   const hasEvent = /演唱会|音乐会|演出|展览|看展|live\s*show|concert|match|game/i.test(s);
   const hasWildlife = /看(?:袋鼠|考拉|企鹅|鲸|海豚|动物)|野生动物|wildlife|kangaroo|koala|penguin|whale|dolphin/i.test(s);
+  const hasBoating =
+    /划船|坐船|乘船|游船|皮划艇|漂流|boat(?:ing| ride)?|ferry|cruise|kayak|rowing|paddl(?:e|ing)/i.test(s);
   const hasLowIntensity = HEALTH_STRATEGY_ACTIVITY_RE.test(s);
-  if (!hasSports && !hasEvent && !hasWildlife && !hasLowIntensity) return null;
+  if (!hasSports && !hasEvent && !hasWildlife && !hasBoating && !hasLowIntensity) return null;
   if (
     !HARD_REQUIRE_RE.test(s) &&
     !HARD_CONSTRAINT_RE.test(s) &&
-    !/喜欢|偏好|热爱|粉丝|球迷|想看|想去|一定要|必须|务必|绝对|希望|尽量|减少|选择|采用|低强度|轻松|避免|不要|不能|不宜|不想太赶|别太赶|不要太赶|节奏别太赶|行程别太赶|因为|是因为|because/i.test(
+    !/喜欢|偏好|热爱|粉丝|球迷|想看|想去|想划|想坐|想乘|一定要|必须|务必|绝对|希望|尽量|减少|选择|采用|低强度|轻松|避免|不要|不能|不宜|不想太赶|别太赶|不要太赶|节奏别太赶|行程别太赶|因为|是因为|because|boat|boating|cruise|kayak|rowing/i.test(
       s
     )
   ) {
@@ -2603,6 +2656,10 @@ export function normalizeActivityPreferenceStatement(raw: string, locale?: AppLo
     ? en
       ? "Activity preference: prioritize wildlife experiences"
       : "活动偏好：野生动物体验优先"
+    : hasBoating
+    ? en
+      ? "Activity preference: prioritize boating or scenic boat rides"
+      : "活动偏好：划船或游船体验优先"
     : hasSports
     ? team
       ? en
@@ -2693,9 +2750,21 @@ function stripLeadingDestinationContext(raw: string, destinationHints?: string[]
     /^([A-Za-z\u4e00-\u9fff]{2,8})(?=(?:这次|那次|这趟|那趟|也还是|还是|想|希望|最好|尽量|不想|不要|别|更偏))/i
   );
   if (heuristicLead?.[1]) {
-    const candidate = normalizeDestination(heuristicLead[1]);
+    const candidateRaw = cleanStatement(heuristicLead[1], 24);
+    const candidateBase = cleanStatement(
+      candidateRaw.replace(/(?:这次|那次|这趟|那趟|也还是|还是|依然|仍然|继续|不过|但)+$/gi, ""),
+      24
+    );
+    const candidate = normalizeDestination(candidateBase || candidateRaw);
     const remainder = cleanStatement(text.slice(String(heuristicLead[1]).length), 140);
-    if (candidate && isLikelyDestinationCandidate(candidate) && remainder) {
+    const discourseOnlyLead = /^(?:一开始|起初|最初|原本|本来|原先|先前|之前|最开始|刚开始|后来|后面|现在|这次|如今|也还是|还是|依然|仍然|继续|不过|但)+$/i.test(
+      candidateRaw
+    );
+    const candidateHasRevisionCue = /(?:一开始|起初|最初|原本|本来|原先|先前|之前|最开始|刚开始|后来|后面|现在|这次|如今|也还是|还是|依然|仍然|继续|不过|但|不|想|要|希望|最好|尽量|觉得|以为|认为)/.test(
+      candidateRaw
+    );
+    const allowCandidateStrip = !candidateHasRevisionCue || candidateBase !== candidateRaw;
+    if (allowCandidateStrip && !discourseOnlyLead && candidate && isLikelyDestinationCandidate(candidate) && remainder) {
       text = remainder
         .replace(/^(?:也还是|还是|依然|仍然|继续|这次|那次|这趟|那趟|不过|但)\s*/i, "")
         .trim();
@@ -2798,6 +2867,10 @@ const NEGATIVE_PREFIX_RE =
 const POSITIVE_PREFIX_RE =
   /(?:必须|务必|一定|需要|要|应当|应该|优先|尽量|最好|must|need|should|prefer|required|include|with)/gi;
 const NON_NEGATION_IDIOM_RE = /(?:不但|不光|不仅|不止|不得不|不少|不错|不一定|不太|不够)/i;
+const REVISION_HISTORY_CUE_RE =
+  /(?:一开始|起初|最初|原本|本来|原先|先前|之前|最开始|刚开始|initially|originally|at first|earlier|used to)/i;
+const REVISION_CURRENT_CUE_RE =
+  /(?:后来|后面|现在|这次|如今|改主意|改了|改成|改为|no longer|any more|anymore|changed my mind|but now|now)/i;
 const LEADING_NOISE_RE =
   /^(?:我|我们|希望|想|要|需要|必须|务必|一定|请|尽量|最好|优先|一般|通常|可能|也许|先|再|然后|另外|顺便|好的?|好吧|行吧|行|那就|嗯|哦|收到|ok(?:ay)?|alright|限制因素|limiting|factor|constraint)+/i;
 const AXIS_STOPWORDS = new Set([
@@ -2832,6 +2905,30 @@ const AXIS_STOPWORDS = new Set([
   "嗯",
   "哦",
   "收到",
+  "一开始",
+  "起初",
+  "最初",
+  "原本",
+  "本来",
+  "原先",
+  "先前",
+  "之前",
+  "最开始",
+  "刚开始",
+  "后来",
+  "后面",
+  "现在",
+  "这次",
+  "如今",
+  "觉得",
+  "以为",
+  "认为",
+  "initially",
+  "originally",
+  "earlier",
+  "used",
+  "now",
+  "anymore",
   "ok",
   "okay",
   "alright",
@@ -2846,7 +2943,7 @@ const SCENIC_PREF_NEGATION_RE =
 const LODGING_PREF_NEGATION_RE =
   /(?:不住|不要|不要住|不想|不想住|不再|不再住|不考虑|不考虑住|不选|取消|去掉|avoid|don't|do not|no longer)[^，。；;\n]{0,14}(?:酒店|民宿|住宿|房型|星级|高星|青旅|hotel|lodging|accommodation)/i;
 const ACTIVITY_PREF_NEGATION_RE =
-  /(?:不看|不要看|不想看|不再看|不安排|不参加|取消|去掉|avoid|don't|do not|no longer)[^，。；;\n]{0,14}(?:球|比赛|球赛|演出|演唱会|展览|赛事|match|game|concert|show|event)/i;
+  /(?:不看|不要看|不想看|不再看|不安排|不参加|取消|去掉|不想|不要|不再|avoid|don't|do not|no longer)[^，。；;\n]{0,18}(?:球|比赛|球赛|演出|演唱会|展览|赛事|划船|坐船|乘船|游船|皮划艇|漂流|match|game|concert|show|event|boat|boating|ferry|cruise|kayak|rowing|paddl(?:e|ing))/i;
 
 function normalizeAxis(raw: string): string {
   return cleanStatement(raw || "", 80).toLowerCase();
@@ -2885,8 +2982,26 @@ function detectPreferenceRevocationAxesFromText(raw: string): PreferenceAxis[] {
   return out;
 }
 
+function hasRevisionStyleNegationCue(text: string): boolean {
+  const s = cleanStatement(text || "", 160);
+  if (!s || !hasExplicitConstraintNegationCue(s)) return false;
+  if (REVISION_HISTORY_CUE_RE.test(s)) return true;
+  if (REVISION_CURRENT_CUE_RE.test(s)) return true;
+  if (
+    /(?:不想|不要|不住|不坐|不去|不看|不选|不用|不安排|不计划|不考虑|don't|do not|no longer)[^，。；;\n]{0,24}了/i.test(
+      s
+    )
+  ) {
+    return true;
+  }
+  return false;
+}
+
 function normalizeGenericConstraintKind(kind: any, text: string): GenericConstraintKind {
   const raw = cleanStatement(kind || "", 40).toLowerCase();
+  if (/(?:转机|换乘|transfer|transfers|layover|layovers|connection|connections)/i.test(text || "")) {
+    return "logistics";
+  }
   const mapped =
     raw === "security" || raw === "travel_safety" || raw === "safety_risk"
       ? "safety"
@@ -2931,6 +3046,7 @@ function normalizeConstraintAxisText(text: string): string {
 
   const transportAxis = (() => {
     if (/(?:船|渡轮|轮渡|ferry|boat)/i.test(s)) return "boat";
+    if (/(?:转机|换乘|transfer|transfers|layover|layovers|connection|connections)/i.test(s)) return /(?:转机|换乘)/.test(s) ? "转机" : "transfer";
     if (/(?:地铁|捷运|metro|subway)/i.test(s)) return "metro";
     if (/(?:火车|高铁|train|rail)/i.test(s)) return "train";
     if (/(?:飞机|航班|flight|plane|air)/i.test(s)) return "flight";
@@ -2947,6 +3063,10 @@ function normalizeConstraintAxisText(text: string): string {
     .map((part) =>
       part
         .replace(/^(?:好的?|好吧|行吧|行|那就|嗯|哦|收到|ok(?:ay)?|alright)\s*/i, " ")
+        .replace(
+          /(?:一开始|起初|最初|原本|本来|原先|先前|之前|最开始|刚开始|后来|后面|现在|这次|如今|initially|originally|at first|earlier|used to|but now|now)/gi,
+          " "
+        )
         .replace(NEGATIVE_PREFIX_RE, " ")
         .replace(POSITIVE_PREFIX_RE, " ")
         .replace(LEADING_NOISE_RE, " ")
@@ -2997,6 +3117,21 @@ function normalizeGenericConstraintItem(
     polarity,
     axisKey,
   };
+}
+
+function inferNormalizedGenericConstraintFromClause(raw: string): NormalizedGenericConstraint | null {
+  const text = cleanStatement(raw || "", 120);
+  if (!text) return null;
+  const classified = classifyConstraintText({ text, evidence: text });
+  if (!classified || classified.family !== "generic") return null;
+  return normalizeGenericConstraintItem({
+    text: classified.text,
+    evidence: classified.evidence,
+    kind: classified.kind,
+    hard: classified.hard,
+    severity: classified.severity,
+    importance: classified.importance,
+  } as any);
 }
 
 function mergeGenericConstraints(
@@ -3272,6 +3407,22 @@ export function extractIntentSignals(userText: string, opts?: { historyMode?: bo
   const normalizedSentenceParts = sentenceParts(text)
     .map((x) => stripLeadingDestinationContext(x, clauseDestinationHints))
     .filter(Boolean);
+  const constraintClauseMeta = normalizedConstraintClauses.map((clause, index) => {
+    const normalized = inferNormalizedGenericConstraintFromClause(clause);
+    const revisionNegation =
+      !!normalized && hasExplicitConstraintNegationCue(clause) && hasRevisionStyleNegationCue(clause);
+    return {
+      clause,
+      index,
+      normalized,
+      revisionNegation,
+    };
+  });
+  const laterRevisionNegationIndexByAxis = new Map<string, number>();
+  for (const meta of constraintClauseMeta) {
+    if (!meta.revisionNegation || !meta.normalized) continue;
+    laterRevisionNegationIndexByAxis.set(meta.normalized.axisKey, meta.index);
+  }
 
   const duration = inferDurationFromText(text, { historyMode: !!opts?.historyMode, locale: opts?.locale });
   if (duration?.days) {
@@ -3489,11 +3640,21 @@ export function extractIntentSignals(userText: string, opts?: { historyMode?: bo
       importance: clampImportance(params.importance, params.hard ? 0.84 : 0.76),
     });
   };
-  for (const part of normalizedConstraintClauses) {
-    const s = cleanStatement(part, 120);
+  for (const meta of constraintClauseMeta) {
+    const s = cleanStatement(meta.clause, 120);
     if (!s) continue;
+    const laterRevisionNegationIndex =
+      meta.normalized ? laterRevisionNegationIndexByAxis.get(meta.normalized.axisKey) : undefined;
+    if (
+      meta.normalized &&
+      laterRevisionNegationIndex != null &&
+      laterRevisionNegationIndex > meta.index
+    ) {
+      continue;
+    }
     if (/^(预算(?:上限)?|总行程时长|行程时长|城市时长|停留时长|同行人数|目的地)[:：]/.test(s)) continue;
     if (isVenueOrExperienceRequirement(s)) continue;
+    if (detectPreferenceRevocationAxesFromText(s).length) continue;
     const likelyConstraintCue =
       HARD_CONSTRAINT_RE.test(s) ||
       HARD_REQUIRE_RE.test(s) ||
@@ -3559,6 +3720,9 @@ export function extractIntentSignals(userText: string, opts?: { historyMode?: bo
       if (normalized && normalized.polarity === "negative" && hasExplicitConstraintNegationCue(s)) {
         revokedConstraintAxes.add(normalized.axisKey);
       }
+      if (meta.revisionNegation && normalized) {
+        continue;
+      }
       genericConstraints.push({
         text: c.text,
         evidence: c.evidence,
@@ -3612,9 +3776,7 @@ export function extractIntentSignals(userText: string, opts?: { historyMode?: bo
       let priority = 0;
       if (TRANSPORT_CONVENIENCE_RE.test(text)) priority = 5;
       else if (SAFETY_STRATEGY_RE.test(text)) priority = 4;
-      else if (x.kind === "logistics") priority = 3;
       else if (x.kind === "safety") priority = 2;
-      else if (x.kind === "mobility") priority = 1;
       return { item: x, priority };
     })
     .filter((x) => x.priority > 0)
