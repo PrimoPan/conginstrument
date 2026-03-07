@@ -3014,6 +3014,115 @@ const cases: Case[] = [
     },
   },
   {
+    name: "non-conflict deprecated motifs should not trigger conflict question",
+    run: () => {
+      const plan = planMotifQuestion({
+        motifs: [
+          {
+            id: "m_pruned",
+            motif_id: "m_pruned",
+            motif_type: "constraint",
+            motifType: "pair",
+            relation: "constraint",
+            dependencyClass: "constraint",
+            roles: { sources: ["c_pace"], target: "c_goal" },
+            scope: "global",
+            aliases: [],
+            concept_bindings: ["c_pace", "c_goal"],
+            conceptIds: ["c_pace", "c_goal"],
+            anchorConceptId: "c_goal",
+            title: "节奏约束旧关系",
+            description: "d",
+            confidence: 0.82,
+            supportEdgeIds: [],
+            supportNodeIds: [],
+            status: "deprecated",
+            statusReason: "evidence_stable;objective_pruned",
+            causalOperator: "direct_causation",
+            novelty: "historical",
+            updatedAt: new Date().toISOString(),
+            reuseClass: "reusable",
+          },
+        ] as any,
+        concepts: [
+          { id: "c_pace", title: "不想太赶", kind: "constraint", family: "constraint", nodeIds: [], sourceMsgIds: [] },
+          { id: "c_goal", title: "旅行目标", kind: "belief", family: "goal", nodeIds: [], sourceMsgIds: [] },
+        ] as any,
+        recentTurns: [],
+        locale: "zh-CN" as any,
+      });
+      assert.equal(plan.question, null);
+      assert.equal(plan.rationale, "motif_stable");
+    },
+  },
+  {
+    name: "true conflict deprecated motifs should still trigger conflict question",
+    run: () => {
+      const plan = planMotifQuestion({
+        motifs: [
+          {
+            id: "m_conflict",
+            motif_id: "m_conflict",
+            motif_type: "constraint",
+            motifType: "pair",
+            relation: "constraint",
+            dependencyClass: "constraint",
+            roles: { sources: ["c_old"], target: "c_goal" },
+            scope: "global",
+            aliases: [],
+            concept_bindings: ["c_old", "c_goal"],
+            conceptIds: ["c_old", "c_goal"],
+            anchorConceptId: "c_goal",
+            title: "旧关系",
+            description: "d",
+            confidence: 0.85,
+            supportEdgeIds: [],
+            supportNodeIds: [],
+            status: "deprecated",
+            statusReason: "relation_conflict_with:m_keep",
+            causalOperator: "direct_causation",
+            novelty: "historical",
+            updatedAt: new Date().toISOString(),
+            reuseClass: "reusable",
+          },
+          {
+            id: "m_keep",
+            motif_id: "m_keep",
+            motif_type: "constraint",
+            motifType: "pair",
+            relation: "constraint",
+            dependencyClass: "constraint",
+            roles: { sources: ["c_new"], target: "c_goal" },
+            scope: "global",
+            aliases: [],
+            concept_bindings: ["c_new", "c_goal"],
+            conceptIds: ["c_new", "c_goal"],
+            anchorConceptId: "c_goal",
+            title: "保留关系",
+            description: "d",
+            confidence: 0.88,
+            supportEdgeIds: [],
+            supportNodeIds: [],
+            status: "active",
+            causalOperator: "direct_causation",
+            novelty: "new",
+            updatedAt: new Date().toISOString(),
+            reuseClass: "reusable",
+          },
+        ] as any,
+        concepts: [
+          { id: "c_old", title: "旧约束", kind: "constraint", family: "constraint", nodeIds: [], sourceMsgIds: [] },
+          { id: "c_new", title: "新约束", kind: "constraint", family: "constraint", nodeIds: [], sourceMsgIds: [] },
+          { id: "c_goal", title: "旅行目标", kind: "belief", family: "goal", nodeIds: [], sourceMsgIds: [] },
+        ] as any,
+        recentTurns: [],
+        locale: "zh-CN" as any,
+      });
+      assert.equal(/检测到冲突 motif/.test(String(plan.question || "")), true);
+      assert.equal(plan.rationale, "motif_conflict:m_conflict");
+    },
+  },
+  {
     name: "motif uncertain question should use counterfactual template for intervention",
     run: () => {
       const plan = planMotifQuestion({

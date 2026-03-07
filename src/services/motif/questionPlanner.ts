@@ -44,6 +44,15 @@ function isResolvedDeprecated(m: ConceptMotif): boolean {
   return reason.startsWith("user_resolved");
 }
 
+function isBlockingDeprecatedReason(reason: string): boolean {
+  const r = cleanText(reason, 180).toLowerCase();
+  if (!r) return false;
+  if (r.startsWith("relation_conflict_with:")) return true;
+  if (r === "relation_conflicts_with") return true;
+  if (r.startsWith("explicit_negation")) return true;
+  return false;
+}
+
 function motifUncertaintyScore(m: ConceptMotif): number {
   const confidence = Math.max(0, Math.min(1, Number(m.confidence || 0.7)));
   const statusBoost = m.status === "uncertain" ? 1.08 : m.status === "deprecated" ? 1.12 : 0.86;
@@ -252,6 +261,7 @@ export function planMotifQuestion(params: {
 
   const deprecated = motifs
     .filter((m) => m.status === "deprecated" && !isResolvedDeprecated(m))
+    .filter((m) => isBlockingDeprecatedReason(String(m.statusReason || "")))
     .slice()
     .sort(
       (a, b) =>
