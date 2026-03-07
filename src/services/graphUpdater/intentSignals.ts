@@ -1627,6 +1627,7 @@ export function normalizeDestination(raw: string): string {
   s = s.replace(/(不确定要不要去|不确定要不要|不确定是否去|不确定|不是必须|先完全|完全|了)$/i, "");
   s = s.replace(/(地方|区域|位置|片区)(吧|呢|呀|啊)?$/i, "");
   s = s.replace(/(的地方|的区域)$/i, "");
+  s = s.replace(/的+$/g, "");
   s = s.replace(/[吧啊呀呢嘛]+$/g, "");
   const routeScoped = s.match(/^(.{2,16}?)(?:自驾)?(?:小)?(?:环岛|环线|环游|环路|一圈)$/i);
   if (routeScoped?.[1]) s = routeScoped[1];
@@ -1673,6 +1674,9 @@ export function isLikelyDestinationCandidate(x: string): boolean {
   if (/(参加|参会|开会|会议|玩|旅游|旅行|度假|计划|安排)$/i.test(s)) return false;
   if (/(看|观).{0,4}(球|赛|比赛|演出|展)|球迷|演唱会|音乐会|球票|门票/i.test(s)) return false;
   if (/(西班牙语地区|英语地区|法语地区|德语地区|语地区)/i.test(s)) return false;
+  if (/(?:人(?:特别)?多|人很多|很多人|游客多|人潮|人流(?:很|太)?多|太挤|拥挤|拥堵|嘈杂|吵闹|排长队|排队很长)/i.test(s)) {
+    return false;
+  }
   if (/^(更|比较|尽量|优先|最好|稍微)?\s*(安全|安静|方便|便宜|舒适|舒服|热闹|清净|治安|人少|离中心近|靠近中心)$/i.test(s)) {
     return false;
   }

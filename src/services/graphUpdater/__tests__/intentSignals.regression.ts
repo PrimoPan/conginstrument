@@ -1211,6 +1211,27 @@ const cases: Case[] = [
     },
   },
   {
+    name: "crowd-avoidance constraint should not overwrite prior destination",
+    run: () => {
+      const merged = extractIntentSignalsWithRecency(
+        [
+          "我要去台北旅游，预算10000人民币。",
+          "3天。",
+        ].join("\n"),
+        "我有焦虑症，不能去人特别多的地方。"
+      );
+      assert.equal(merged.destination, "台北");
+      assert.deepEqual(merged.destinations, ["台北"]);
+      assert.equal(merged.healthConstraint?.includes("焦虑"), true);
+      assert.equal(
+        (merged.genericConstraints || []).some((x) => String(x.text || "").includes("不能去人特别多的地方")),
+        true
+      );
+      assert.equal((merged.destinations || []).includes("人特别多"), false);
+      assert.equal((merged.destinations || []).includes("人特别多的"), false);
+    },
+  },
+  {
     name: "later neutral turn should not collapse preserved total duration to partial city sum",
     run: () => {
       const merged = extractIntentSignalsWithRecency(
