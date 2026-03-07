@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 
 import type { ConceptItem } from "../concepts.js";
 import { reconcileMotifsWithGraph } from "../motif/conceptMotifs.js";
-import { enrichMotifDisplayTitles, fallbackMotifDisplayTitle } from "../motif/displayTitles.js";
+import { enrichMotifDisplayTitles, fallbackMotifDisplayTitle, pickMotifDisplayTitle } from "../motif/displayTitles.js";
 
 function run(name: string, fn: () => Promise<void> | void) {
   Promise.resolve()
@@ -170,6 +170,162 @@ run("display title helper should reuse prior display title when motif structure 
   });
 
   assert.equal(motifs[0]?.display_title, "携家出游会优先考虑儿童友好选项");
+});
+
+run("pickMotifDisplayTitle should reject generated titles that omit source or target concept names", () => {
+  const concepts: ConceptItem[] = [
+    makeConcept({
+      id: "c_family",
+      title: "携家出游",
+      semanticKey: "slot:people",
+      family: "people",
+      nodeId: "n_people",
+    }),
+    makeConcept({
+      id: "c_target",
+      title: "儿童友好选项",
+      semanticKey: "slot:lodging",
+      family: "lodging",
+      nodeId: "n_target",
+    }),
+  ];
+  const displayTitle = pickMotifDisplayTitle({
+    locale: "zh-CN",
+    concepts,
+    generatedTitle: "家庭旅行的限制因素",
+    motif: {
+      id: "m_reject_generated",
+      motif_id: "m_reject_generated",
+      motif_type: "enable",
+      templateKey: "pair",
+      motifType: "pair",
+      relation: "enable",
+      dependencyClass: "enable",
+      roles: { sources: ["c_family"], target: "c_target" },
+      scope: "global",
+      aliases: [],
+      concept_bindings: ["c_family", "c_target"],
+      conceptIds: ["c_family", "c_target"],
+      anchorConceptId: "c_target",
+      title: "携家出游 supports 儿童友好选项",
+      description: "",
+      confidence: 0.82,
+      supportEdgeIds: [],
+      supportNodeIds: [],
+      status: "active",
+      novelty: "new",
+      updatedAt: "2026-03-07T00:00:00.000Z",
+    },
+  });
+
+  assert.equal(displayTitle, "携家出游会推动儿童友好选项");
+});
+
+run("pickMotifDisplayTitle should keep generated titles that preserve source and target concept names", () => {
+  const concepts: ConceptItem[] = [
+    makeConcept({
+      id: "c_family",
+      title: "携家出游",
+      semanticKey: "slot:people",
+      family: "people",
+      nodeId: "n_people",
+    }),
+    makeConcept({
+      id: "c_target",
+      title: "儿童友好选项",
+      semanticKey: "slot:lodging",
+      family: "lodging",
+      nodeId: "n_target",
+    }),
+  ];
+  const displayTitle = pickMotifDisplayTitle({
+    locale: "zh-CN",
+    concepts,
+    generatedTitle: "携家出游会优先考虑儿童友好选项",
+    motif: {
+      id: "m_keep_generated",
+      motif_id: "m_keep_generated",
+      motif_type: "enable",
+      templateKey: "pair",
+      motifType: "pair",
+      relation: "enable",
+      dependencyClass: "enable",
+      roles: { sources: ["c_family"], target: "c_target" },
+      scope: "global",
+      aliases: [],
+      concept_bindings: ["c_family", "c_target"],
+      conceptIds: ["c_family", "c_target"],
+      anchorConceptId: "c_target",
+      title: "携家出游 supports 儿童友好选项",
+      description: "",
+      confidence: 0.82,
+      supportEdgeIds: [],
+      supportNodeIds: [],
+      status: "active",
+      novelty: "new",
+      updatedAt: "2026-03-07T00:00:00.000Z",
+    },
+  });
+
+  assert.equal(displayTitle, "携家出游会优先考虑儿童友好选项");
+});
+
+run("fallback title should prefer resolvable conceptIds over broken role source refs", () => {
+  const concepts: ConceptItem[] = [
+    makeConcept({
+      id: "c_semantic:slot:constraint:limiting:other:otherpos_constraintnegativeconst_1r6zma5",
+      title: "也不想一直打卡景点",
+      semanticKey: "slot:constraint:limiting:other",
+      family: "generic_constraint",
+      nodeId: "n_source",
+      kind: "constraint",
+    }),
+    makeConcept({
+      id: "c_goal",
+      title: "去京都旅游7天",
+      semanticKey: "slot:goal",
+      family: "goal",
+      nodeId: "n_goal",
+    }),
+  ];
+  const displayTitle = fallbackMotifDisplayTitle({
+    locale: "zh-CN",
+    concepts,
+    motif: {
+      id: "m1",
+      motif_id: "m1",
+      motif_type: "constraint",
+      templateKey: "pair",
+      motifType: "pair",
+      relation: "constraint",
+      dependencyClass: "constraint",
+      roles: {
+        sources: ["slot:constraint:limiting:other:otherpos_constraintnegativeconst_1r6zm"],
+        target: "c_goal",
+      },
+      scope: "global",
+      aliases: [],
+      concept_bindings: [
+        "c_semantic:slot:constraint:limiting:other:otherpos_constraintnegativeconst_1r6zma5",
+        "c_goal",
+      ],
+      conceptIds: [
+        "c_semantic:slot:constraint:limiting:other:otherpos_constraintnegativeconst_1r6zma5",
+        "c_goal",
+      ],
+      anchorConceptId: "c_goal",
+      title: "结构化标题",
+      description: "",
+      confidence: 0.82,
+      supportEdgeIds: [],
+      supportNodeIds: [],
+      status: "active",
+      novelty: "new",
+      updatedAt: "2026-03-07T00:00:00.000Z",
+    },
+  });
+
+  assert.equal(displayTitle, "也不想一直打卡景点会限制去京都旅游7天");
 });
 
 run("reconcileMotifsWithGraph should preserve stored display titles for unchanged motifs", () => {

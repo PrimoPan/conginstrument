@@ -17,13 +17,41 @@ function uniq(arr: string[], max = 8): string[] {
   const out: string[] = [];
   const seen = new Set<string>();
   for (const item of arr || []) {
-    const value = cleanText(item, 80);
+    const value = cleanText(item, 160);
     if (!value || seen.has(value)) continue;
     seen.add(value);
     out.push(value);
     if (out.length >= max) break;
   }
   return out;
+}
+
+function resolveConceptByRef(id: string, conceptById: Map<string, ConceptItem>): ConceptItem | undefined {
+  const raw = cleanText(id, 120);
+  if (!raw) return undefined;
+  const exact = conceptById.get(raw);
+  if (exact) return exact;
+  if (!raw.startsWith("c_semantic:")) {
+    const semantic = conceptById.get(`c_semantic:${raw}`);
+    if (semantic) return semantic;
+  }
+  const normalized = normalizeForMatch(raw);
+  if (!normalized) return undefined;
+  for (const concept of conceptById.values()) {
+    const conceptId = normalizeForMatch(String(concept.id || ""));
+    const semanticKey = normalizeForMatch(String(concept.semanticKey || ""));
+    if (
+      conceptId === normalized ||
+      semanticKey === normalized ||
+      conceptId.endsWith(normalized) ||
+      normalized.endsWith(conceptId) ||
+      semanticKey.endsWith(normalized) ||
+      normalized.endsWith(semanticKey)
+    ) {
+      return concept;
+    }
+  }
+  return undefined;
 }
 
 function localizedRelation(locale: AppLocale | undefined, relation?: string): string {
@@ -34,25 +62,65 @@ function localizedRelation(locale: AppLocale | undefined, relation?: string): st
 }
 
 function conceptTitleFromId(id: string, conceptById: Map<string, ConceptItem>): string {
-  const raw = cleanText(conceptById.get(id)?.title, 80) || cleanText(id, 80);
+  const raw = cleanText(resolveConceptByRef(id, conceptById)?.title, 80) || cleanText(id, 80);
   return raw.replace(/^[^:：]{1,12}[:：]\s*/, "").trim() || raw;
 }
 
 function motifRefs(motif: ConceptMotif, conceptById: Map<string, ConceptItem>) {
+  const conceptIds = uniq((motif.conceptIds || []).map((id) => cleanText(id, 100)).filter(Boolean), 8);
+  const anchorCandidates = uniq(
+    [
+      cleanText(motif.anchorConceptId, 100),
+      cleanText(motif.roles?.target, 100),
+      cleanText(motif.conceptIds?.[motif.conceptIds.length - 1], 100),
+    ].filter(Boolean),
+    4
+  );
   const anchorId =
-    cleanText(motif.anchorConceptId, 100) ||
-    cleanText(motif.roles?.target, 100) ||
-    cleanText(motif.conceptIds?.[motif.conceptIds.length - 1], 100);
-  const sourceIds = uniq(
-    ((motif.roles?.sources || []).length ? motif.roles.sources : (motif.conceptIds || []).filter((id) => id !== anchorId))
+    anchorCandidates.find((id) => !!resolveConceptByRef(id, conceptById)) ||
+    anchorCandidates[0] ||
+    "";
+  const roleSourceIds = uniq(
+    (motif.roles?.sources || [])
       .map((id) => cleanText(id, 100))
       .filter((id) => id && id !== anchorId),
     7
   );
+  const conceptSourceIds = uniq(
+    conceptIds
+      .filter((id) => id && id !== anchorId),
+    7
+  );
+  const sourceIds = (roleSourceIds.length ? roleSourceIds : conceptSourceIds).every((id) => !!resolveConceptByRef(id, conceptById))
+    ? (roleSourceIds.length ? roleSourceIds : conceptSourceIds)
+    : conceptSourceIds.length
+    ? conceptSourceIds
+    : roleSourceIds;
   return {
     sources: sourceIds.map((id) => conceptTitleFromId(id, conceptById)),
     target: anchorId ? conceptTitleFromId(anchorId, conceptById) : "",
   };
+}
+
+function normalizeForMatch(text: string): string {
+  return cleanText(text, 120)
+    .toLowerCase()
+    .replace(/[\s\p{P}\p{S}]+/gu, "");
+}
+
+function generatedTitleMentionsEndpoints(params: {
+  generatedTitle: string;
+  motif: ConceptMotif;
+  concepts: ConceptItem[];
+}): boolean {
+  const conceptById = new Map((params.concepts || []).map((concept) => [concept.id, concept]));
+  const refs = motifRefs(params.motif, conceptById);
+  const normalizedTitle = normalizeForMatch(params.generatedTitle);
+  if (!normalizedTitle || !refs.sources.length || !refs.target) return false;
+  const normalizedTarget = normalizeForMatch(refs.target);
+  const normalizedSources = refs.sources.map((source) => normalizeForMatch(source)).filter((source) => source.length >= 2);
+  if (!normalizedTarget || !normalizedSources.length) return false;
+  return normalizedTitle.includes(normalizedTarget) && normalizedSources.some((source) => normalizedTitle.includes(source));
 }
 
 export function fallbackMotifDisplayTitle(params: {
@@ -85,6 +153,29 @@ export function fallbackMotifDisplayTitle(params: {
     return isEnglishLocale(params.locale) ? `${sourceText} conflicts with ${targetText}` : `${sourceText}会和${targetText}产生冲突`;
   }
   return isEnglishLocale(params.locale) ? `${sourceText} leads to ${targetText}` : `${sourceText}会推动${targetText}`;
+}
+
+export function pickMotifDisplayTitle(params: {
+  motif: ConceptMotif;
+  concepts: ConceptItem[];
+  locale?: AppLocale;
+  generatedTitle?: string;
+}): string {
+  const fallbackTitle = fallbackMotifDisplayTitle({
+    motif: params.motif,
+    concepts: params.concepts,
+    locale: params.locale,
+  });
+  const generatedTitle = cleanText(params.generatedTitle, 80);
+  if (!generatedTitle) return fallbackTitle;
+  if (generatedTitleMentionsEndpoints({
+    generatedTitle,
+    motif: params.motif,
+    concepts: params.concepts,
+  })) {
+    return generatedTitle;
+  }
+  return fallbackTitle;
 }
 
 function motifDisplaySignature(motif: ConceptMotif | undefined, conceptById: Map<string, ConceptItem>): string {
@@ -262,14 +353,12 @@ export async function enrichMotifDisplayTitles(params: {
   });
 
   return next.map((motif) => {
-    const displayTitle =
-      cleanText(generated.get(motif.id), 80) ||
-      cleanText(motif.display_title, 80) ||
-      fallbackMotifDisplayTitle({
-        motif,
-        concepts: params.concepts,
-        locale: params.locale,
-      });
+    const displayTitle = pickMotifDisplayTitle({
+      motif,
+      concepts: params.concepts,
+      locale: params.locale,
+      generatedTitle: cleanText(generated.get(motif.id), 80) || cleanText(motif.display_title, 80),
+    });
     return {
       ...motif,
       display_title: displayTitle,

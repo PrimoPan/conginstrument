@@ -3033,6 +3033,7 @@ convRouter.post("/:id/motif-transfer/decision", asyncRoute(async (req: AuthedReq
   if (!action) return res.status(400).json({ error: "action must be one of adopt/modify/ignore/confirm" });
 
   let motifTransferState = readMotifTransferState((conv as any).motifTransferState);
+  const taskLifecycle = readTaskLifecycle((conv as any).taskLifecycle);
   const candidateId = cleanInput(req.body?.candidate_id, 220);
   if (!candidateId) return res.status(400).json({ error: "candidate_id required" });
   const recommendation =

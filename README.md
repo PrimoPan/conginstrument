@@ -532,6 +532,15 @@ data: {"assistantText":"...","graphPatch":{"ops":[]},"graph":{"id":"65f1...","ve
    - `planMotifQuestion` 仅从 `reuseClass=reusable && status=uncertain` 的 motif 中提问；
      若存在 motif 提问，聊天侧不再拼接第二条 slot 不确定性问题。
 
+### 9.2 跨任务 transfer review（2026-03 对齐）
+
+- 新任务的历史 motif 推荐只会在首轮用户输入后静默出现在侧栏，不会在 bootstrap 前打断。
+- `adopt / modify` 都不会立刻注入当前任务；后端会先把候选置为 `pending_confirmation`，等待用户在 UI 或自然语言里最终确认后再变成 `injected`。
+- 每条 transfer decision 都会记录 `application_scope=trip|local`：
+  - `trip` 表示整趟任务都可沿用；
+  - `local` 表示只在当前子问题里参考。
+- 用户手动停用 motif 时写入 `disabled`；`cancelled` 保留给被覆盖的历史 motif、系统剪枝、或不再成立的旧规则。
+
 ---
 
 ### 10. Mongo 集合与索引
