@@ -34,7 +34,7 @@ import type { ConceptItem } from "../services/concepts.js";
 import { semanticKeyForNode } from "../services/concepts.js";
 import {
   applyTransferDecision,
-  confirmModifiedInjection,
+  confirmTransferInjection,
 } from "../services/motifTransfer/decision.js";
 import { buildTransferRecommendations } from "../services/motifTransfer/retrieval.js";
 import {
@@ -60,6 +60,7 @@ import {
   annotateMotifExtractionMeta,
   normalizeMotifTransferState,
 } from "../services/motifTransfer/state.js";
+import { enrichMotifDisplayTitles } from "../services/motif/displayTitles.js";
 import { asyncRoute } from "./asyncRoute.js";
 
 export const convRouter = Router();
@@ -1267,6 +1268,37 @@ async function safeBuildPlanningStateBundle(params: PlanningStateBundleParams): 
   }
 }
 
+async function applyDisplayTitlesToModel(params: {
+  model: ReturnType<typeof buildCognitiveModel>;
+  previousMotifs?: any[];
+  previousConcepts?: any[];
+  locale: AppLocale;
+}) {
+  const motifs = await enrichMotifDisplayTitles({
+    motifs: Array.isArray(params.model.motifs) ? params.model.motifs : [],
+    concepts: Array.isArray(params.model.concepts) ? params.model.concepts : [],
+    previousMotifs: Array.isArray(params.previousMotifs) ? params.previousMotifs : [],
+    previousConcepts: Array.isArray(params.previousConcepts) ? params.previousConcepts : [],
+    locale: params.locale,
+  });
+  params.model.motifs = motifs;
+  params.model.motifGraph = {
+    ...(params.model.motifGraph || { motifs: [], motifLinks: [] }),
+    motifs,
+  };
+  const titleByMotifId = new Map(motifs.map((motif) => [motif.id, String(motif.display_title || motif.title || "").trim()]));
+  if (params.model.motifReasoningView?.nodes) {
+    params.model.motifReasoningView = {
+      ...params.model.motifReasoningView,
+      nodes: (params.model.motifReasoningView.nodes || []).map((node: any) => ({
+        ...node,
+        title: titleByMotifId.get(String(node?.motifId || "")) || node.title,
+      })),
+    };
+  }
+  return params.model;
+}
+
 async function persistConversationModel(params: {
   conversationId: ObjectId;
   userId: ObjectId;
@@ -1278,6 +1310,7 @@ async function persistConversationModel(params: {
   taskLifecycle?: TaskLifecycleState;
   forceTaskSwitch?: boolean;
   previousMotifs?: any[];
+  previousConcepts?: any[];
   turnNumber?: number;
   latestUserText?: string;
   planningBootstrapHints?: PlanningBootstrapHints | null;
@@ -1299,6 +1332,15 @@ async function persistConversationModel(params: {
       motifs: motifsWithTransfer,
     },
   };
+  await applyDisplayTitlesToModel({
+    model: modelWithTransfer,
+    previousMotifs: params.previousMotifs,
+    previousConcepts: params.previousConcepts,
+    locale: params.locale,
+  });
+  params.model.motifs = modelWithTransfer.motifs;
+  params.model.motifGraph = modelWithTransfer.motifGraph;
+  params.model.motifReasoningView = modelWithTransfer.motifReasoningView;
   const travelPlanState = await computeTravelPlanState({
     conversationId: params.conversationId,
     userId: params.userId,
@@ -1610,6 +1652,12 @@ convRouter.post("/", asyncRoute(async (req: AuthedRequest, res) => {
     state: motifTransferState,
   });
   model.motifGraph = { ...(model.motifGraph || { motifs: [], motifLinks: [] }), motifs: model.motifs };
+  await applyDisplayTitlesToModel({
+    model,
+    previousMotifs: (conv as any).motifs || [],
+    previousConcepts: conv.concepts || [],
+    locale,
+  });
   const persistentMotifLibrary = await listUserMotifLibrary(userId, locale);
   const planning = await safeBuildPlanningStateBundle({
     conversationId: inserted.insertedId,
@@ -1866,6 +1914,12 @@ convRouter.put("/:id/graph", asyncRoute(async (req: AuthedRequest, res) => {
     state: motifTransferState,
   });
   model.motifGraph = { ...(model.motifGraph || { motifs: [], motifLinks: [] }), motifs: model.motifs };
+  await applyDisplayTitlesToModel({
+    model,
+    previousMotifs: (conv as any).motifs || [],
+    previousConcepts: conv.concepts || [],
+    locale,
+  });
   model.graph.version = prevGraph.version + (graphChanged(prevGraph, model.graph) ? 1 : 0);
 
   const requestAdvice = parseBoolFlag(req.body?.requestAdvice);
@@ -2012,6 +2066,12 @@ convRouter.put("/:id/concepts", asyncRoute(async (req: AuthedRequest, res) => {
     state: motifTransferState,
   });
   model.motifGraph = { ...(model.motifGraph || { motifs: [], motifLinks: [] }), motifs: model.motifs };
+  await applyDisplayTitlesToModel({
+    model,
+    previousMotifs: (conv as any).motifs || [],
+    previousConcepts: conv.concepts || [],
+    locale,
+  });
   model.graph.version = prevGraph.version + (graphChanged(prevGraph, model.graph) ? 1 : 0);
   const travelPlanState = await computeTravelPlanState({
     conversationId: oid,
@@ -2275,10 +2335,20 @@ convRouter.post("/:id/turn", asyncRoute(async (req: AuthedRequest, res) => {
     (x) => x.injection_state === "pending_confirmation"
   );
   if (pendingInjection && isAffirmativeForTransfer(userText)) {
-    motifTransferState = confirmModifiedInjection({
+    const confirmed = confirmTransferInjection({
       currentState: motifTransferState,
       candidateId: pendingInjection.candidate_id,
     });
+    motifTransferState = confirmed.state;
+    if (confirmed.decision) {
+      await recordTransferUsage({
+        userId,
+        locale,
+        motifTypeId: pendingInjection.motif_type_id,
+        action: "adopt",
+        confidenceDelta: 0.05,
+      });
+    }
   } else if (pendingInjection && isNegativeForTransfer(userText)) {
     const denied = applyTransferFeedback({
       locale,
@@ -2330,6 +2400,7 @@ convRouter.post("/:id/turn", asyncRoute(async (req: AuthedRequest, res) => {
       taskLifecycle,
       forceTaskSwitch: turnBase.forceTaskSwitch,
       previousMotifs: baseMotifs,
+      previousConcepts: baseConcepts,
       turnNumber,
       latestUserText: userText,
       planningBootstrapHints: retrievalHints,
@@ -2457,6 +2528,7 @@ convRouter.post("/:id/turn", asyncRoute(async (req: AuthedRequest, res) => {
     taskLifecycle,
     forceTaskSwitch: turnBase.forceTaskSwitch,
     previousMotifs: baseMotifs,
+    previousConcepts: baseConcepts,
     turnNumber,
     latestUserText: userText,
     planningBootstrapHints: retrievalHints,
@@ -2530,10 +2602,20 @@ convRouter.post("/:id/turn/stream", asyncRoute(async (req: AuthedRequest, res) =
     (x) => x.injection_state === "pending_confirmation"
   );
   if (pendingInjection && isAffirmativeForTransfer(userText)) {
-    motifTransferState = confirmModifiedInjection({
+    const confirmed = confirmTransferInjection({
       currentState: motifTransferState,
       candidateId: pendingInjection.candidate_id,
     });
+    motifTransferState = confirmed.state;
+    if (confirmed.decision) {
+      await recordTransferUsage({
+        userId,
+        locale,
+        motifTypeId: pendingInjection.motif_type_id,
+        action: "adopt",
+        confidenceDelta: 0.05,
+      });
+    }
   } else if (pendingInjection && isNegativeForTransfer(userText)) {
     const denied = applyTransferFeedback({
       locale,
@@ -2586,6 +2668,7 @@ convRouter.post("/:id/turn/stream", asyncRoute(async (req: AuthedRequest, res) =
       taskLifecycle,
       forceTaskSwitch: turnBase.forceTaskSwitch,
       previousMotifs: baseMotifs,
+      previousConcepts: baseConcepts,
       turnNumber,
       latestUserText: userText,
       planningBootstrapHints: retrievalHints,
@@ -2768,6 +2851,7 @@ convRouter.post("/:id/turn/stream", asyncRoute(async (req: AuthedRequest, res) =
       taskLifecycle,
       forceTaskSwitch: turnBase.forceTaskSwitch,
       previousMotifs: baseMotifs,
+      previousConcepts: baseConcepts,
       turnNumber,
       latestUserText: userText,
       planningBootstrapHints: retrievalHints,
@@ -2899,6 +2983,7 @@ convRouter.post("/:id/turn/stream", asyncRoute(async (req: AuthedRequest, res) =
           taskLifecycle,
           forceTaskSwitch: turnBase.forceTaskSwitch,
           previousMotifs: baseMotifs,
+          previousConcepts: baseConcepts,
           turnNumber,
           latestUserText: userText,
           planningBootstrapHints: retrievalHints,
@@ -2942,10 +3027,10 @@ convRouter.post("/:id/motif-transfer/decision", asyncRoute(async (req: AuthedReq
   const locale = normalizeLocale((conv as any).locale);
   const actionRaw = cleanInput(req.body?.action, 24).toLowerCase();
   const action =
-    actionRaw === "adopt" || actionRaw === "modify" || actionRaw === "ignore"
+    actionRaw === "adopt" || actionRaw === "modify" || actionRaw === "ignore" || actionRaw === "confirm"
       ? (actionRaw as TransferDecisionAction)
       : null;
-  if (!action) return res.status(400).json({ error: "action must be one of adopt/modify/ignore" });
+  if (!action) return res.status(400).json({ error: "action must be one of adopt/modify/ignore/confirm" });
 
   let motifTransferState = readMotifTransferState((conv as any).motifTransferState);
   const candidateId = cleanInput(req.body?.candidate_id, 220);
@@ -2982,6 +3067,48 @@ convRouter.post("/:id/motif-transfer/decision", asyncRoute(async (req: AuthedReq
   const modeOverrideRaw = cleanInput(req.body?.mode_override, 8).toUpperCase();
   const modeOverride: "A" | "B" | "C" | undefined =
     modeOverrideRaw === "A" || modeOverrideRaw === "B" || modeOverrideRaw === "C" ? modeOverrideRaw : undefined;
+  const applicationScope = cleanInput(req.body?.application_scope, 24) === "local" ? "local" : "trip";
+
+  if (action === "confirm") {
+    const confirmed = confirmTransferInjection({
+      currentState: motifTransferState,
+      candidateId,
+    });
+    motifTransferState = confirmed.state;
+    if (!confirmed.decision) {
+      return res.status(409).json({ error: "candidate is not awaiting confirmation" });
+    }
+
+    await recordTransferUsage({
+      userId,
+      locale,
+      motifTypeId: recommendation.motif_type_id,
+      action: "adopt",
+      confidenceDelta: 0.05,
+    });
+
+    const refreshed = await refreshConversationTransferProjection({
+      oid,
+      userId,
+      locale,
+      conv,
+      motifTransferState,
+      taskLifecycle,
+    });
+
+    return res.json({
+      ok: true,
+      decision: confirmed.decision,
+      motifTransferState,
+      ...modelPayload(refreshed.model),
+      travelPlanState: refreshed.travelPlanState,
+      taskDetection: refreshed.planning.taskDetection,
+      cognitiveState: refreshed.planning.cognitiveState,
+      portfolioDocumentState: refreshed.planning.portfolioDocumentState,
+      taskLifecycle,
+      updatedAt: refreshed.updatedAt,
+    });
+  }
 
   const decided = applyTransferDecision({
     locale,
@@ -2991,18 +3118,10 @@ convRouter.post("/:id/motif-transfer/decision", asyncRoute(async (req: AuthedReq
     modeOverride,
     revisedText: cleanInput(req.body?.revised_text, 320),
     note: cleanInput(req.body?.note, 220),
+    applicationScope,
   });
   motifTransferState = decided.state;
 
-  if (action === "adopt") {
-    await recordTransferUsage({
-      userId,
-      locale,
-      motifTypeId: recommendation.motif_type_id,
-      action: "adopt",
-      confidenceDelta: 0.05,
-    });
-  }
   if (action === "ignore") {
     await recordTransferUsage({
       userId,
