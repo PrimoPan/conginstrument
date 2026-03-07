@@ -52,6 +52,21 @@ function dependencyRank(dep: "enable" | "constraint" | "determine"): number {
   return 2;
 }
 
+function isBlockingConflictReason(reason: string): boolean {
+  const r = cleanText(reason, 180).toLowerCase();
+  if (!r) return false;
+  if (r.startsWith("relation_conflict_with:")) return true;
+  if (r === "relation_conflicts_with") return true;
+  if (r.startsWith("explicit_negation")) return true;
+  return false;
+}
+
+function isConflictMotif(m: ConceptMotif): boolean {
+  if (cleanText((m as any)?.relation, 40) === "conflicts_with") return true;
+  if (cleanText((m as any)?.dependencyClass, 40) === "conflicts_with") return true;
+  return isBlockingConflictReason(String((m as any)?.statusReason || (m as any)?.state_transition_reason || ""));
+}
+
 function motifStatePenalty(status: ConceptMotif["status"]): number {
   if (status === "active") return 1;
   if (status === "uncertain") return 0.84;
@@ -145,8 +160,7 @@ function sameAnchorLinkConfidence(a: ConceptMotif, b: ConceptMotif): number {
 }
 
 function autoType(a: ConceptMotif, b: ConceptMotif): MotifLinkType {
-  if (a.status === "deprecated" || b.status === "deprecated") return "conflicts_with";
-  if (a.status === "cancelled" || b.status === "cancelled") return "conflicts_with";
+  if (isConflictMotif(a) || isConflictMotif(b)) return "conflicts_with";
   const anchorA = a.anchorConceptId;
   const anchorB = b.anchorConceptId;
   const aUsesB = !!anchorB && (a.conceptIds || []).includes(anchorB);
@@ -173,7 +187,11 @@ function buildAutoLinks(motifs: ConceptMotif[]): MotifLink[] {
   const out: MotifLink[] = [];
   const seen = new Set<string>();
   const candidates = (motifs || [])
-    .filter((m) => m.status !== "cancelled" && (m.reuseClass || "reusable") === "reusable")
+    .filter((m) => {
+      if ((m.reuseClass || "reusable") !== "reusable") return false;
+      if (m.status === "active" || m.status === "uncertain") return true;
+      return isConflictMotif(m);
+    })
     .slice()
     .sort((a, b) => b.confidence - a.confidence || a.id.localeCompare(b.id))
     .slice(0, 140);

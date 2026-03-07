@@ -58,6 +58,7 @@ function makeMotif(params: {
   dependencyClass?: "enable" | "constraint" | "determine";
   motifType?: "pair" | "triad";
   status?: "active" | "uncertain" | "deprecated" | "disabled" | "cancelled";
+  statusReason?: string;
 }): ConceptMotif {
   const dependencyClass = params.dependencyClass || "enable";
   return {
@@ -82,6 +83,7 @@ function makeMotif(params: {
     supportEdgeIds: [],
     supportNodeIds: [],
     status: params.status || "active",
+    statusReason: params.statusReason,
     resolved: false,
     novelty: "new",
     updatedAt: new Date().toISOString(),
@@ -179,6 +181,52 @@ run("motif link transitive reduction keeps user edge", () => {
   const userEdge = links.find((l) => l.fromMotifId === "m1" && l.toMotifId === "m3");
   assert.ok(userEdge, "expected user edge to remain after reduction");
   assert.equal(userEdge?.source, "user");
+});
+
+run("soft-pruned deprecated motifs should not create fake conflict topology", () => {
+  const motifs: ConceptMotif[] = [
+    makeMotif({
+      id: "m_budget",
+      conceptIds: ["c_budget", "c_goal"],
+      anchorConceptId: "c_goal",
+      confidence: 0.91,
+      dependencyClass: "constraint",
+      status: "active",
+    }),
+    makeMotif({
+      id: "m_pace",
+      conceptIds: ["c_pace", "c_goal"],
+      anchorConceptId: "c_goal",
+      confidence: 0.82,
+      dependencyClass: "constraint",
+      status: "deprecated",
+      statusReason: "evidence_stable;objective_pruned",
+    }),
+    makeMotif({
+      id: "m_real_conflict",
+      conceptIds: ["c_conflict", "c_goal"],
+      anchorConceptId: "c_goal",
+      confidence: 0.8,
+      dependencyClass: "constraint",
+      status: "deprecated",
+      statusReason: "relation_conflict_with:m_budget",
+    }),
+  ];
+
+  const links = reconcileMotifLinks({ motifs, baseLinks: [] });
+  assert.equal(
+    links.some((l) => l.fromMotifId === "m_pace" || l.toMotifId === "m_pace"),
+    false,
+    "objective-pruned motif should not emit auto topology"
+  );
+  assert.equal(
+    links.some(
+      (l) =>
+        (l.fromMotifId === "m_real_conflict" || l.toMotifId === "m_real_conflict") && l.type === "conflicts_with"
+    ),
+    true,
+    "true conflict motif should still emit conflict topology"
+  );
 });
 
 run("same-anchor motifs should form a topology chain instead of remaining isolated", () => {
