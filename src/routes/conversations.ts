@@ -34,6 +34,8 @@ import type { ConceptItem } from "../services/concepts.js";
 import { semanticKeyForNode } from "../services/concepts.js";
 import {
   applyTransferDecision,
+  applyTransferDecisionBatch,
+  confirmTransferInjections,
   confirmTransferInjection,
 } from "../services/motifTransfer/decision.js";
 import { buildTransferRecommendations } from "../services/motifTransfer/retrieval.js";
@@ -3157,6 +3159,141 @@ convRouter.post("/:id/motif-transfer/decision", asyncRoute(async (req: AuthedReq
   });
 }));
 
+convRouter.post("/:id/motif-transfer/batch-decision", asyncRoute(async (req: AuthedRequest, res) => {
+  const userId = req.userId!;
+  const oid = parseObjectId(req.params.id);
+  if (!oid) return res.status(400).json({ error: "invalid conversation id" });
+  const conv = await collections.conversations.findOne({ _id: oid, userId });
+  if (!conv) return res.status(404).json({ error: "conversation not found" });
+  const locale = normalizeLocale((conv as any).locale);
+  const taskLifecycle = readTaskLifecycle((conv as any).taskLifecycle);
+
+  const items = Array.isArray(req.body?.items) ? req.body.items.slice(0, 24) : [];
+  if (!items.length) return res.status(400).json({ error: "items array required" });
+
+  let motifTransferState = readMotifTransferState((conv as any).motifTransferState);
+  const decisions: any[] = [];
+  const followupQuestions: string[] = [];
+
+  for (const raw of items) {
+    const actionRaw = cleanInput(raw?.action, 24).toLowerCase();
+    const action =
+      actionRaw === "adopt" || actionRaw === "modify" || actionRaw === "ignore" || actionRaw === "confirm"
+        ? (actionRaw as TransferDecisionAction)
+        : null;
+    const candidateId = cleanInput(raw?.candidate_id, 220);
+    if (!action || !candidateId) {
+      return res.status(400).json({ error: "each item requires candidate_id and action(adopt/modify/ignore/confirm)" });
+    }
+
+    if (action === "confirm") {
+      const confirmed = confirmTransferInjections({
+        currentState: motifTransferState,
+        candidateIds: [candidateId],
+      });
+      motifTransferState = confirmed.state;
+      if (!confirmed.decisions.length) return res.status(409).json({ error: `candidate ${candidateId} is not awaiting confirmation` });
+      const rec = motifTransferState.recommendations.find((x) => cleanInput(x.candidate_id, 220) === candidateId);
+      if (rec?.motif_type_id) {
+        await recordTransferUsage({
+          userId,
+          locale,
+          motifTypeId: rec.motif_type_id,
+          action: "adopt",
+          confidenceDelta: 0.05,
+        });
+      }
+      decisions.push(...confirmed.decisions);
+      continue;
+    }
+
+    const recommendation =
+      motifTransferState.recommendations.find((x) => cleanInput(x.candidate_id, 220) === candidateId) ||
+      (raw?.recommendation && typeof raw.recommendation === "object"
+        ? {
+            candidate_id: candidateId,
+            motif_type_id: cleanInput(raw.recommendation.motif_type_id, 180),
+            motif_type_title: cleanInput(raw.recommendation.motif_type_title, 180),
+            dependency: cleanInput(raw.recommendation.dependency, 40) || "enable",
+            reusable_description: cleanInput(raw.recommendation.reusable_description, 240),
+            source_task_id: cleanInput(raw.recommendation.source_task_id, 80) || undefined,
+            source_conversation_id: cleanInput(raw.recommendation.source_conversation_id, 80) || undefined,
+            status:
+              cleanInput(raw.recommendation.status, 24) === "active" ||
+              cleanInput(raw.recommendation.status, 24) === "deprecated" ||
+              cleanInput(raw.recommendation.status, 24) === "cancelled"
+                ? cleanInput(raw.recommendation.status, 24)
+                : "uncertain",
+            reason: cleanInput(raw.recommendation.reason, 220),
+            match_score: Number(raw.recommendation.match_score || 0.7),
+            recommended_mode:
+              cleanInput(raw.recommendation.recommended_mode, 8) === "A" ||
+              cleanInput(raw.recommendation.recommended_mode, 8) === "C"
+                ? cleanInput(raw.recommendation.recommended_mode, 8)
+                : "B",
+            decision_status: "pending",
+            created_at: new Date().toISOString(),
+          }
+        : null);
+    if (!recommendation) return res.status(404).json({ error: `recommendation ${candidateId} not found` });
+
+    const decided = applyTransferDecisionBatch({
+      locale,
+      currentState: motifTransferState,
+      items: [
+        {
+          recommendation: recommendation as any,
+          action,
+          modeOverride:
+            cleanInput(raw?.mode_override, 8).toUpperCase() === "A" ||
+            cleanInput(raw?.mode_override, 8).toUpperCase() === "B" ||
+            cleanInput(raw?.mode_override, 8).toUpperCase() === "C"
+              ? (cleanInput(raw?.mode_override, 8).toUpperCase() as any)
+              : undefined,
+          revisedText: cleanInput(raw?.revised_text, 320) || undefined,
+          note: cleanInput(raw?.note, 220) || undefined,
+          applicationScope: cleanInput(raw?.application_scope, 24) === "local" ? "local" : "trip",
+        },
+      ],
+    });
+    motifTransferState = decided.state;
+    decisions.push(...decided.decisions);
+    followupQuestions.push(...decided.followupQuestions);
+    if (action === "ignore") {
+      await recordTransferUsage({
+        userId,
+        locale,
+        motifTypeId: recommendation.motif_type_id,
+        action: "ignore",
+        confidenceDelta: -0.03,
+      });
+    }
+  }
+
+  const refreshed = await refreshConversationTransferProjection({
+    oid,
+    userId,
+    locale,
+    conv,
+    motifTransferState,
+    taskLifecycle,
+  });
+
+  res.json({
+    ok: true,
+    decisions,
+    followupQuestions: Array.from(new Set(followupQuestions.filter(Boolean))),
+    motifTransferState,
+    ...modelPayload(refreshed.model),
+    travelPlanState: refreshed.travelPlanState,
+    taskDetection: refreshed.planning.taskDetection,
+    cognitiveState: refreshed.planning.cognitiveState,
+    portfolioDocumentState: refreshed.planning.portfolioDocumentState,
+    taskLifecycle,
+    updatedAt: refreshed.updatedAt,
+  });
+}));
+
 convRouter.post("/:id/motif-transfer/feedback", asyncRoute(async (req: AuthedRequest, res) => {
   const userId = req.userId!;
   const oid = parseObjectId(req.params.id);
@@ -3293,7 +3430,7 @@ convRouter.post("/:id/motif-library/revise", asyncRoute(async (req: AuthedReques
     return res.status(400).json({ error: "motif_type_id and choice(overwrite/new_version) are required" });
   }
 
-  const revisedEntry = await reviseMotifLibraryEntry({
+  const revisedResult = await reviseMotifLibraryEntry({
     userId,
     locale,
     motifTypeId,
@@ -3318,7 +3455,7 @@ convRouter.post("/:id/motif-library/revise", asyncRoute(async (req: AuthedReques
     sourceTaskId: currentTaskId((conv as any).travelPlanState || null, String(oid)),
     sourceConversationId: String(oid),
   });
-  if (!revisedEntry) return res.status(404).json({ error: "motif library entry not found" });
+  if (!revisedResult) return res.status(404).json({ error: "motif library entry not found" });
 
   let motifTransferState = readMotifTransferState((conv as any).motifTransferState);
   motifTransferState = resolveRevisionRequest({
@@ -3326,6 +3463,9 @@ convRouter.post("/:id/motif-library/revise", asyncRoute(async (req: AuthedReques
     requestId: cleanInput(req.body?.request_id, 80) || undefined,
     motifTypeId,
     choice,
+    targetCandidateIds: Array.isArray(req.body?.target_candidate_ids)
+      ? req.body.target_candidate_ids.map((x: any) => cleanInput(x, 220)).filter(Boolean)
+      : undefined,
   });
   const refreshed = await refreshConversationTransferProjection({
     oid,
@@ -3338,7 +3478,8 @@ convRouter.post("/:id/motif-library/revise", asyncRoute(async (req: AuthedReques
 
   res.json({
     ok: true,
-    revised_entry: revisedEntry,
+    revised_entry: revisedResult.entry,
+    revision_summary: revisedResult.summary,
     motifTransferState,
     ...modelPayload(refreshed.model),
     travelPlanState: refreshed.travelPlanState,

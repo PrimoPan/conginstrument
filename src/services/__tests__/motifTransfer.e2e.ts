@@ -4,6 +4,8 @@ import type { TravelPlanState } from "../travelPlan/state.js";
 import { buildTransferRecommendations } from "../motifTransfer/retrieval.js";
 import {
   applyTransferDecision,
+  applyTransferDecisionBatch,
+  confirmTransferInjections,
   confirmTransferInjection,
 } from "../motifTransfer/decision.js";
 import { applyTransferFeedback } from "../motifTransfer/feedback.js";
@@ -14,6 +16,7 @@ import {
 } from "../motifTransfer/revision.js";
 import { buildTransferredConstraintPrompt, applyTransferStateToMotifs } from "../motifTransfer/application.js";
 import type { MotifLibraryEntryPayload, MotifTransferState } from "../motifTransfer/types.js";
+import { applyRevisionChoiceToVersions } from "../motifTransfer/storage.js";
 
 function run(name: string, fn: () => void | Promise<void>) {
   return Promise.resolve()
@@ -443,6 +446,10 @@ async function main() {
       ),
       "revision request not created"
     );
+    const request = transferState.revisionRequests.find(
+      (x) => x.motif_type_id === adopted!.motif_type_id && x.status === "pending_user_choice"
+    );
+    assert.ok((request?.affected_injections || []).length >= 1, "revision request should expose affected injections");
   });
 
   await run("显式否定触发 IS3 修订协商，并支持 new_version / overwrite 决策", () => {
@@ -465,6 +472,131 @@ async function main() {
     const resolved = transferState.revisionRequests.find((x) => x.request_id === req!.request_id);
     assert.ok(resolved && resolved.status === "resolved");
     assert.equal(resolved?.suggested_action, "new_version");
+  });
+
+  await run("revision propagation can be partially accepted for only selected injected candidates", () => {
+    const now = new Date().toISOString();
+    const candidateA = recommendationFromEntry(motifLibrary[0], 0.89);
+    const candidateB = {
+      ...recommendationFromEntry(motifLibrary[0], 0.78),
+      candidate_id: `${motifLibrary[0].motif_type_id}::parallel_scope`,
+    };
+    const staged = applyTransferDecisionBatch({
+      locale,
+      currentState: {
+        recommendations: [candidateA, candidateB],
+        decisions: [],
+        activeInjections: [],
+        feedbackEvents: [],
+        revisionRequests: [
+          {
+            request_id: "req_partial",
+            motif_type_id: motifLibrary[0].motif_type_id,
+            candidate_id: candidateA.candidate_id,
+            reason: "explicit_negation_detected",
+            detected_text: "这次这条规则只对一部分情况成立",
+            detected_at: now,
+            status: "pending_user_choice",
+            options: ["overwrite", "new_version"],
+            suggested_action: "new_version",
+            affected_injections: [],
+          },
+        ],
+      },
+      items: [
+        { recommendation: candidateA, action: "adopt", applicationScope: "trip" },
+        { recommendation: candidateB, action: "adopt", applicationScope: "local" },
+      ],
+    }).state;
+    const confirmed = confirmTransferInjections({
+      currentState: staged,
+      candidateIds: [candidateA.candidate_id, candidateB.candidate_id],
+    }).state;
+    const withImpacts: MotifTransferState = {
+      ...confirmed,
+      revisionRequests: confirmed.revisionRequests.map((req) =>
+        req.request_id === "req_partial"
+          ? {
+              ...req,
+              affected_injections: confirmed.activeInjections.map((inj) => ({
+                candidate_id: inj.candidate_id,
+                motif_type_id: inj.motif_type_id,
+                motif_type_title: inj.motif_type_title,
+                injection_state: inj.injection_state,
+                application_scope: inj.application_scope,
+                constraint_text: inj.constraint_text,
+              })),
+            }
+          : req
+      ),
+    };
+
+    const partial = resolveRevisionRequest({
+      currentState: withImpacts,
+      requestId: "req_partial",
+      motifTypeId: motifLibrary[0].motif_type_id,
+      choice: "overwrite",
+      targetCandidateIds: [candidateB.candidate_id],
+    });
+    const injA = partial.activeInjections.find((x) => x.candidate_id === candidateA.candidate_id);
+    const injB = partial.activeInjections.find((x) => x.candidate_id === candidateB.candidate_id);
+    assert.equal(injA?.injection_state, "injected");
+    assert.equal(injB?.injection_state, "disabled");
+    const resolved = partial.revisionRequests.find((x) => x.request_id === "req_partial");
+    assert.deepEqual(resolved?.resolved_candidate_ids, [candidateB.candidate_id]);
+  });
+
+  await run("overwrite and new_version keep distinct motif-library semantics", () => {
+    const entry = motifLibrary[0];
+    const currentVersion = entry.versions.find((x) => x.version_id === entry.current_version_id)!;
+    const overwriteVersion = {
+      ...currentVersion,
+      title: "偏好目的地本地住宿（覆盖）",
+      reusable_description: "覆盖旧版本但保留同一版本槽位",
+      updated_at: new Date().toISOString(),
+    };
+    const overwrite = applyRevisionChoiceToVersions({
+      existingEntry: {
+        current_version_id: entry.current_version_id,
+        versions: entry.versions,
+      },
+      nextVersion: overwriteVersion,
+      choice: "overwrite",
+    });
+    assert.equal(overwrite.summary.choice, "overwrite");
+    assert.equal(overwrite.summary.version_created, false);
+    assert.equal(overwrite.currentVersionId, currentVersion.version_id);
+    assert.equal(overwrite.versions.length, entry.versions.length);
+    assert.equal(
+      overwrite.versions.find((x) => x.version_id === currentVersion.version_id)?.title,
+      "偏好目的地本地住宿（覆盖）"
+    );
+
+    const newVersion = {
+      ...currentVersion,
+      version_id: "mv_local_3",
+      version: 3,
+      title: "偏好目的地本地住宿（新版本）",
+      reusable_description: "追加一个新版本，不覆盖原版本。",
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+    };
+    const appended = applyRevisionChoiceToVersions({
+      existingEntry: {
+        current_version_id: entry.current_version_id,
+        versions: entry.versions,
+      },
+      nextVersion: newVersion,
+      choice: "new_version",
+    });
+    assert.equal(appended.summary.choice, "new_version");
+    assert.equal(appended.summary.version_created, true);
+    assert.equal(appended.currentVersionId, "mv_local_3");
+    assert.equal(appended.versions.length, entry.versions.length + 1);
+    assert.equal(
+      appended.versions.find((x) => x.version_id === currentVersion.version_id)?.title,
+      currentVersion.title
+    );
   });
 
   await run("相同的修订追问不应被重复追加到 assistant 回复里", () => {

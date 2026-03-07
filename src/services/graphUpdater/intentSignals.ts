@@ -186,6 +186,36 @@ export function parseCnInt(raw: string): number | null {
   return null;
 }
 
+function parseLooseInt(raw: string): number | null {
+  const normalized = String(raw ?? "")
+    .trim()
+    .toLowerCase()
+    .replace(/-/g, " ");
+  if (!normalized) return null;
+  const cn = parseCnInt(normalized);
+  if (cn != null) return cn;
+  if (/^\d+$/.test(normalized)) return Number(normalized);
+  const map: Record<string, number> = {
+    a: 1,
+    an: 1,
+    one: 1,
+    two: 2,
+    three: 3,
+    four: 4,
+    five: 5,
+    six: 6,
+    seven: 7,
+    eight: 8,
+    nine: 9,
+    ten: 10,
+    eleven: 11,
+    twelve: 12,
+    thirteen: 13,
+    fourteen: 14,
+  };
+  return map[normalized] ?? null;
+}
+
 function formatDayCount(locale: AppLocale | undefined, days: number): string {
   return isEnglishLocale(locale) ? `${days} days` : `${days}天`;
 }
@@ -1382,6 +1412,54 @@ function extractDurationCandidates(text: string): DurationCandidate[] {
       strength,
     });
   }
+  const englishRe =
+    /(?<!day\s)([0-9]{1,3}|a|an|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen)\s*[- ]?\s*(day|days|week|weeks)\b/gi;
+  for (const m of text.matchAll(englishRe)) {
+    if (!m?.[1] || !m?.[2]) continue;
+    const index = Number(m.index) || 0;
+    const base = parseLooseInt(m[1]);
+    if (!base || base <= 0) continue;
+    const unit = String(m[2] || "").toLowerCase();
+    const days = unit.startsWith("week") ? base * 7 : base;
+    if (days <= 0 || days > 120) continue;
+
+    const left = Math.max(0, index - 28);
+    const right = Math.min(text.length, index + String(m[0] || "").length + 36);
+    const ctx = cleanStatement(text.slice(left, right), 140);
+    if (looksLikeTripPhaseCue(ctx)) continue;
+
+    const isTotal = /(trip length|overall|total|in total|entire trip|whole trip|for the trip|plan)/i.test(ctx);
+    const isMeeting = /(conference|workshop|forum|summit|meeting)/i.test(ctx);
+    const isCriticalEvent = hasHardDayReservationSignal(ctx);
+    const isSegment =
+      /(stay|staying|arrive|depart|before|after|segment|itinerary|travel|trip|vacation|city|hotel|nights?|days?\s+in)/i.test(
+        ctx
+      );
+
+    let kind: DurationCandidate["kind"] = "unknown";
+    let strength = 0.58;
+    if (isTotal) {
+      kind = "total";
+      strength = 0.95;
+    } else if (isCriticalEvent) {
+      kind = "critical_event";
+      strength = 0.96;
+    } else if (isMeeting) {
+      kind = "meeting";
+      strength = 0.66;
+    } else if (isSegment) {
+      kind = "segment";
+      strength = 0.7;
+    }
+
+    out.push({
+      days,
+      evidence: cleanStatement(m[0] || m[1], 30),
+      index,
+      kind,
+      strength,
+    });
+  }
   return out;
 }
 
@@ -1915,7 +1993,8 @@ function extractDestinationList(text: string): Array<{ city: string; evidence: s
 
   const englishDestinationRes = [
     /(?:travel to|trip to|go to|visit|head to|fly to|arrive in|stay in)\s+([A-Za-z]{2,24})(?=\s*(?:for|with|and|but|trip|travel|days?|nights?|[,.!?;]|$))/gi,
-    /plan(?:\s+(?:a|an))?(?:\s+[0-9]+(?:-[a-z]+)?\s+day)?\s+([A-Za-z]{2,24})\s+trip/gi,
+    /plan(?:\s+(?:a|an))?(?:\s+(?:[0-9]{1,3}|a|an|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen)\s*[- ]?(?:day|days|week|weeks))?\s+([A-Za-z]{2,24})\s+trip/gi,
+    /plan(?:\s+(?:a|an))?(?:\s+[A-Za-z0-9-]+){0,4}\s+in\s+([A-Za-z]{2,24})(?=\s*(?:with|for|and|but|trip|travel|days?|nights?|[,.!?;]|$))/gi,
   ];
   for (const englishDestinationRe of englishDestinationRes) {
     for (const m of scanText.matchAll(englishDestinationRe)) {

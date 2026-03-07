@@ -784,6 +784,28 @@ const cases: Case[] = [
     },
   },
   {
+    name: "english trip envelopes should capture duration and destination without task-control leakage",
+    run: () => {
+      const hyphenated = extractIntentSignals("Help me plan a six-day Paris trip with my parents.", {
+        locale: "en-US",
+      });
+      assert.equal(hyphenated.durationDays, 6);
+      assert.equal(hyphenated.destination, "Paris");
+      assert.ok((hyphenated.destinations || []).includes("Paris"));
+
+      const inDestination = extractIntentSignals(
+        "Start a new task: plan 8 days in Portugal with my partner, mainly Lisbon and Porto, with a slower rhythm.",
+        { locale: "en-US" }
+      );
+      assert.equal(inDestination.durationDays, 8);
+      assert.ok((inDestination.destinations || []).includes("Portugal"));
+      assert.equal(
+        (inDestination.destinations || []).some((item) => /new task|start/i.test(String(item))),
+        false
+      );
+    },
+  },
+  {
     name: "quantified activity-day phrasing should not create fake destinations",
     run: async () => {
       const zh = extractIntentSignals("希望至少有一天轻松散步和喝茶。", { locale: "zh-CN" });

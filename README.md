@@ -536,9 +536,14 @@ data: {"assistantText":"...","graphPatch":{"ops":[]},"graph":{"id":"65f1...","ve
 
 - 新任务的历史 motif 推荐只会在首轮用户输入后静默出现在侧栏，不会在 bootstrap 前打断。
 - `adopt / modify` 都不会立刻注入当前任务；后端会先把候选置为 `pending_confirmation`，等待用户在 UI 或自然语言里最终确认后再变成 `injected`。
+- 后端提供 `POST /api/conversations/:id/motif-transfer/batch-decision`，支持 UI 做批量 `adopt / ignore / confirm`，但语义仍保持“先入待确认、再最终确认”。
 - 每条 transfer decision 都会记录 `application_scope=trip|local`：
   - `trip` 表示整趟任务都可沿用；
   - `local` 表示只在当前子问题里参考。
+- revision request 现在会显式带上 `affected_injections`，前端可以据此展示 propagation diff，并把修订只传播到用户勾选的那部分当前注入（partial accept）。
+- motif library 的 `overwrite` 与 `new_version` 已分叉：
+  - `overwrite` 会原位覆盖当前版本槽位，不追加 version；
+  - `new_version` 会追加一个新 version，并切换 `current_version_id`。
 - 用户手动停用 motif 时写入 `disabled`；`cancelled` 保留给被覆盖的历史 motif、系统剪枝、或不再成立的旧规则。
 - 多轮 refinement turn 会优先保留图中已确认的 destination scope；如果本轮只是补充节奏、住宿、交通等约束，而没有明确目的地更新 cue，就不会把这些补充句误提升成新的目的地。
 - lodging / safety / transit convenience 这类细化约束在 `intentSignals` 阶段会被剥离掉前置目的地脚手架（如“大阪这次也还是…”），避免把 refinement 句错误写成 destination 或粗糙 generic constraint。

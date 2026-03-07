@@ -2,7 +2,12 @@ import { ObjectId } from "mongodb";
 import { collections } from "../../db/mongo.js";
 import { DEFAULT_LOCALE, type AppLocale } from "../../i18n/locale.js";
 import type { ConceptMotif } from "../motif/conceptMotifs.js";
-import type { MotifLibraryEntryPayload, MotifLibraryVersionPayload } from "./types.js";
+import type {
+  MotifLibraryEntryPayload,
+  MotifLibraryRevisionFieldDiff,
+  MotifLibraryRevisionSummary,
+  MotifLibraryVersionPayload,
+} from "./types.js";
 
 function clean(input: any, max = 240): string {
   return String(input ?? "")
@@ -103,6 +108,118 @@ function buildVersionId(motifTypeId: string, version: number) {
     .replace(/_+/g, "_")
     .replace(/^_+|_+$/g, "");
   return `mv_${safe || "motif"}_${version}`;
+}
+
+function buildRevisionFieldDiffs(params: {
+  current?: MotifLibraryVersionPayload | null;
+  next: MotifLibraryVersionPayload;
+}): MotifLibraryRevisionFieldDiff[] {
+  const current = params.current || null;
+  const next = params.next;
+  const pairs: Array<MotifLibraryRevisionFieldDiff> = [
+    {
+      field: "title",
+      current_value: clean(current?.title, 180) || undefined,
+      next_value: clean(next.title, 180) || undefined,
+    },
+    {
+      field: "dependency",
+      current_value: clean(current?.dependency, 40) || undefined,
+      next_value: clean(next.dependency, 40) || undefined,
+    },
+    {
+      field: "reusable_description",
+      current_value: clean(current?.reusable_description, 260) || undefined,
+      next_value: clean(next.reusable_description, 260) || undefined,
+    },
+    {
+      field: "L1",
+      current_value: clean(current?.abstraction_levels?.L1, 180) || undefined,
+      next_value: clean(next.abstraction_levels?.L1, 180) || undefined,
+    },
+    {
+      field: "L2",
+      current_value: clean(current?.abstraction_levels?.L2, 180) || undefined,
+      next_value: clean(next.abstraction_levels?.L2, 180) || undefined,
+    },
+    {
+      field: "L3",
+      current_value: clean(current?.abstraction_levels?.L3, 180) || undefined,
+      next_value: clean(next.abstraction_levels?.L3, 180) || undefined,
+    },
+    {
+      field: "status",
+      current_value: clean(current?.status, 24) || undefined,
+      next_value: clean(next.status, 24) || undefined,
+    },
+  ];
+  return pairs.filter((item) => (item.current_value || "") !== (item.next_value || ""));
+}
+
+function currentVersionIndex(entry: any): number {
+  const versions = Array.isArray(entry?.versions) ? entry.versions : [];
+  const currentId = clean(entry?.current_version_id, 120);
+  const byId = currentId ? versions.findIndex((x: any) => clean(x?.version_id, 120) === currentId) : -1;
+  if (byId >= 0) return byId;
+  return versions.length > 0 ? versions.length - 1 : -1;
+}
+
+export function applyRevisionChoiceToVersions(params: {
+  existingEntry: {
+    current_version_id?: string;
+    versions?: MotifLibraryVersionPayload[];
+  };
+  nextVersion: MotifLibraryVersionPayload;
+  choice: "overwrite" | "new_version";
+}): {
+  versions: MotifLibraryVersionPayload[];
+  currentVersionId: string;
+  summary: MotifLibraryRevisionSummary;
+} {
+  const versions = Array.isArray(params.existingEntry.versions) ? [...params.existingEntry.versions] : [];
+  const currentIdx = currentVersionIndex(params.existingEntry);
+  const currentVersion = currentIdx >= 0 ? versions[currentIdx] : null;
+  const changedFields = buildRevisionFieldDiffs({ current: currentVersion, next: params.nextVersion });
+  if (params.choice === "overwrite" && currentVersion) {
+    const overwritten: MotifLibraryVersionPayload = {
+      ...currentVersion,
+      title: params.nextVersion.title,
+      dependency: params.nextVersion.dependency,
+      reusable_description: params.nextVersion.reusable_description,
+      abstraction_levels: { ...params.nextVersion.abstraction_levels },
+      status: params.nextVersion.status,
+      source_task_id: params.nextVersion.source_task_id,
+      source_conversation_id: params.nextVersion.source_conversation_id,
+      updated_at: params.nextVersion.updated_at,
+    };
+    versions[currentIdx] = overwritten;
+    return {
+      versions: versions.slice(-60),
+      currentVersionId: clean(overwritten.version_id, 120),
+      summary: {
+        choice: "overwrite",
+        previous_version_id: clean(currentVersion.version_id, 120) || undefined,
+        current_version_id: clean(overwritten.version_id, 120) || undefined,
+        overwritten_version_id: clean(currentVersion.version_id, 120) || undefined,
+        version_created: false,
+        changed_fields: changedFields,
+      },
+    };
+  }
+
+  const appended = [...versions, params.nextVersion].slice(-60);
+  return {
+    versions: appended,
+    currentVersionId: clean(params.nextVersion.version_id, 120),
+    summary: {
+      choice: "new_version",
+      previous_version_id: clean(currentVersion?.version_id, 120) || undefined,
+      current_version_id: clean(params.nextVersion.version_id, 120) || undefined,
+      overwritten_version_id: undefined,
+      version_created: true,
+      changed_fields: changedFields,
+    },
+  };
 }
 
 export function motifVersionMeaningfullyChanged(params: {
@@ -276,7 +393,7 @@ export async function reviseMotifLibraryEntry(params: {
   status?: "active" | "uncertain" | "deprecated" | "cancelled";
   sourceTaskId?: string;
   sourceConversationId?: string;
-}) {
+}): Promise<{ entry: MotifLibraryEntryPayload; summary: MotifLibraryRevisionSummary } | null> {
   const locale = normalizeMotifLocale(params.locale);
   const motifTypeId = clean(params.motifTypeId, 180);
   if (!motifTypeId) return null;
@@ -310,25 +427,29 @@ export async function reviseMotifLibraryEntry(params: {
     created_at: nowText,
     updated_at: nowText,
   };
-  const versions =
-    params.choice === "overwrite"
-      ? [...(existing.versions || []), version].slice(-60)
-      : [...(existing.versions || []), version].slice(-60);
+  const applied = applyRevisionChoiceToVersions({
+    existingEntry: {
+      current_version_id: clean(existing.current_version_id, 120),
+      versions: Array.isArray(existing.versions) ? existing.versions : [],
+    },
+    nextVersion: version,
+    choice: params.choice,
+  });
   await collections.motifLibrary.updateOne(
     { _id: existing._id, userId: params.userId, locale },
     {
       $set: {
         motif_type_title: clean(params.title, 180) || clean(existing.motif_type_title, 180),
         dependency: clean(params.dependency, 40) || clean(existing.dependency, 40) || "enable",
-        current_version_id: version.version_id,
-        versions,
+        current_version_id: applied.currentVersionId,
+        versions: applied.versions,
         status: params.status || clean(existing.status, 24) || "active",
         updatedAt: now,
       },
     }
   );
   const updated = await collections.motifLibrary.findOne({ _id: existing._id, userId: params.userId, locale });
-  return updated ? toPayload(updated) : null;
+  return updated ? { entry: toPayload(updated), summary: applied.summary } : null;
 }
 
 export async function recordTransferUsage(params: {

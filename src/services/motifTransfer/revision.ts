@@ -59,6 +59,16 @@ export function registerRevisionRequestFromUtterance(params: {
   if (existsPending) return { state };
 
   const now = new Date().toISOString();
+  const affectedInjections = state.activeInjections
+    .filter((x) => x.motif_type_id === candidate.motif_type_id)
+    .map((x) => ({
+      candidate_id: x.candidate_id,
+      motif_type_id: x.motif_type_id,
+      motif_type_title: x.motif_type_title,
+      injection_state: x.injection_state,
+      application_scope: x.application_scope,
+      constraint_text: clean(x.constraint_text, 220),
+    }));
   const request: MotifTransferRevisionRequest = {
     request_id: revisionRequestId(),
     candidate_id: candidate.candidate_id,
@@ -69,6 +79,7 @@ export function registerRevisionRequestFromUtterance(params: {
     status: "pending_user_choice",
     options: ["overwrite", "new_version"],
     suggested_action: "new_version",
+    affected_injections: affectedInjections,
   };
   state.revisionRequests = [...state.revisionRequests, request].slice(-80);
   const followupQuestion = t(
@@ -95,6 +106,7 @@ export function resolveRevisionRequest(params: {
   requestId?: string;
   motifTypeId?: string;
   choice: RevisionChoice;
+  targetCandidateIds?: string[];
 }): MotifTransferState {
   const now = new Date().toISOString();
   const state: MotifTransferState = params.currentState
@@ -110,6 +122,21 @@ export function resolveRevisionRequest(params: {
 
   const requestId = clean(params.requestId, 80);
   const motifTypeId = clean(params.motifTypeId, 180);
+  const targetCandidateIds = Array.from(
+    new Set((params.targetCandidateIds || []).map((x) => clean(x, 220)).filter(Boolean))
+  );
+  const affectedCandidateIds =
+    targetCandidateIds.length > 0
+      ? targetCandidateIds
+      : state.revisionRequests
+          .flatMap((x) => {
+            const matchById = requestId && x.request_id === requestId;
+            const matchByType = motifTypeId && x.motif_type_id === motifTypeId;
+            if (!matchById && !matchByType) return [];
+            return (x.affected_injections || []).map((item) => clean(item.candidate_id, 220));
+          })
+          .filter(Boolean);
+
   state.revisionRequests = state.revisionRequests.map((x) => {
     const matchById = requestId && x.request_id === requestId;
     const matchByType = motifTypeId && x.motif_type_id === motifTypeId;
@@ -119,8 +146,31 @@ export function resolveRevisionRequest(params: {
       status: "resolved",
       suggested_action: params.choice,
       detected_at: now,
+      resolved_candidate_ids: affectedCandidateIds,
+      resolution_choice: params.choice,
     };
   });
+  if (affectedCandidateIds.length) {
+    const chosen = new Set(affectedCandidateIds);
+    state.activeInjections = state.activeInjections.map((x) =>
+      chosen.has(clean(x.candidate_id, 220))
+        ? {
+            ...x,
+            injection_state: "disabled",
+            disabled_reason: `revision_${params.choice}`,
+          }
+        : x
+    );
+    state.recommendations = state.recommendations.map((x) =>
+      chosen.has(clean(x.candidate_id, 220))
+        ? {
+            ...x,
+            decision_status: "revised",
+            decision_at: now,
+          }
+        : x
+    );
+  }
   state.lastDecisionAt = now;
   return state;
 }

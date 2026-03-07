@@ -69,6 +69,15 @@ export type MotifTransferFeedbackEvent = {
   created_at: string;
 };
 
+export type MotifTransferRevisionImpact = {
+  candidate_id: string;
+  motif_type_id: string;
+  motif_type_title: string;
+  injection_state: TransferInjectionState;
+  application_scope?: TransferApplicationScope;
+  constraint_text: string;
+};
+
 export type MotifTransferRevisionRequest = {
   request_id: string;
   candidate_id?: string;
@@ -79,6 +88,9 @@ export type MotifTransferRevisionRequest = {
   status: "pending_user_choice" | "resolved";
   options: Array<"overwrite" | "new_version">;
   suggested_action?: "overwrite" | "new_version";
+  affected_injections?: MotifTransferRevisionImpact[];
+  resolved_candidate_ids?: string[];
+  resolution_choice?: "overwrite" | "new_version";
 };
 
 export type MotifTransferState = {
@@ -108,6 +120,21 @@ export type MotifLibraryVersionPayload = {
   source_conversation_id?: string;
   created_at: string;
   updated_at: string;
+};
+
+export type MotifLibraryRevisionFieldDiff = {
+  field: "title" | "dependency" | "reusable_description" | "L1" | "L2" | "L3" | "status";
+  current_value?: string;
+  next_value?: string;
+};
+
+export type MotifLibraryRevisionSummary = {
+  choice: "overwrite" | "new_version";
+  previous_version_id?: string;
+  current_version_id?: string;
+  overwritten_version_id?: string;
+  version_created: boolean;
+  changed_fields: MotifLibraryRevisionFieldDiff[];
 };
 
 export type MotifLibraryEntryPayload = {

@@ -205,6 +205,57 @@ export function confirmTransferInjection(params: {
   return { state, decision };
 }
 
+export function confirmTransferInjections(params: {
+  currentState?: MotifTransferState | null;
+  candidateIds: string[];
+}): { state: MotifTransferState; decisions: MotifTransferDecisionRecord[] } {
+  let state = params.currentState || emptyMotifTransferState();
+  const decisions: MotifTransferDecisionRecord[] = [];
+  for (const rawId of params.candidateIds || []) {
+    const out = confirmTransferInjection({ currentState: state, candidateId: rawId });
+    state = out.state;
+    if (out.decision) decisions.push(out.decision);
+  }
+  return { state, decisions };
+}
+
+export function applyTransferDecisionBatch(params: {
+  locale?: "zh-CN" | "en-US";
+  currentState?: MotifTransferState | null;
+  items: Array<{
+    recommendation: MotifTransferRecommendation;
+    action: Exclude<MotifTransferDecisionAction, "confirm">;
+    modeOverride?: TransferRecommendedMode;
+    revisedText?: string;
+    note?: string;
+    applicationScope?: TransferApplicationScope;
+  }>;
+}): {
+  state: MotifTransferState;
+  decisions: MotifTransferDecisionRecord[];
+  followupQuestions: string[];
+} {
+  let state = params.currentState || emptyMotifTransferState();
+  const decisions: MotifTransferDecisionRecord[] = [];
+  const followupQuestions: string[] = [];
+  for (const item of params.items || []) {
+    const out = applyTransferDecision({
+      locale: params.locale,
+      currentState: state,
+      recommendation: item.recommendation,
+      action: item.action,
+      modeOverride: item.modeOverride,
+      revisedText: item.revisedText,
+      note: item.note,
+      applicationScope: item.applicationScope,
+    });
+    state = out.state;
+    decisions.push(out.decision);
+    if (out.followupQuestion) followupQuestions.push(out.followupQuestion);
+  }
+  return { state, decisions, followupQuestions };
+}
+
 // Backward-compatible alias for older call sites and tests that still expect the
 // pre-confirmation helper to return only the updated state.
 export function confirmModifiedInjection(params: {

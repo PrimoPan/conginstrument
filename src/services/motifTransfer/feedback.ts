@@ -1,6 +1,7 @@
 import type {
   MotifTransferFeedbackEvent,
   MotifTransferFeedbackSignal,
+  MotifTransferRevisionImpact,
   MotifTransferRevisionRequest,
   MotifTransferState,
 } from "./types.js";
@@ -34,6 +35,7 @@ function createRevisionRequest(params: {
   signalText?: string;
   reason: string;
   at: string;
+  affectedInjections?: MotifTransferRevisionImpact[];
 }): MotifTransferRevisionRequest {
   return {
     request_id: revisionId(),
@@ -45,6 +47,7 @@ function createRevisionRequest(params: {
     status: "pending_user_choice",
     options: ["overwrite", "new_version"],
     suggested_action: "new_version",
+    affected_injections: params.affectedInjections?.slice(0, 12) || undefined,
   };
 }
 
@@ -118,6 +121,19 @@ export function applyTransferFeedback(params: {
     const byMotifType = motifTypeId && x.motif_type_id === motifTypeId;
     return (byCandidate || byMotifType) && x.injection_state === "disabled";
   });
+  const affectedInjections =
+    disabledTarget?.motif_type_id
+      ? state.activeInjections
+          .filter((x) => x.motif_type_id === disabledTarget.motif_type_id)
+          .map((x) => ({
+            candidate_id: x.candidate_id,
+            motif_type_id: x.motif_type_id,
+            motif_type_title: x.motif_type_title,
+            injection_state: x.injection_state,
+            application_scope: x.application_scope,
+            constraint_text: clean(x.constraint_text, 220),
+          }))
+      : [];
 
   if (disabledTarget) {
     const existsPending = state.revisionRequests.some(
@@ -135,6 +151,7 @@ export function applyTransferFeedback(params: {
           signalText: params.signalText,
           reason: "transfer_failure_detected",
           at: now,
+          affectedInjections,
         }),
       ].slice(-80);
     }
