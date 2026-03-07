@@ -210,6 +210,10 @@ function readPlanningBootstrapHints(raw: any): PlanningBootstrapHints | null {
   };
 }
 
+function transferRecommendationsEnabled(hints: PlanningBootstrapHints | null | undefined): boolean {
+  return !!cleanInput(hints?.destination, 80);
+}
+
 function taskClosedErrorPayload(taskLifecycle: TaskLifecycleState) {
   return {
     error: "task_closed",
@@ -280,7 +284,9 @@ function parseManualReferences(raw: any): ManualReferenceInput[] {
 function shouldEvaluateTransferRecommendations(params: {
   priorTurnCount: number;
   motifTransferState: MotifTransferState;
+  transferRecommendationsEnabled: boolean;
 }): boolean {
+  if (!params.transferRecommendationsEnabled) return false;
   if (Number(params.priorTurnCount || 0) > 0) return false;
   const existing = params.motifTransferState.recommendations || [];
   return existing.length === 0;
@@ -1285,6 +1291,7 @@ convRouter.post("/", asyncRoute(async (req: AuthedRequest, res) => {
   const locale = normalizeLocale(req.body?.locale);
   const planningBootstrap = parsePlanningBootstrap(req.body?.planningBootstrap);
   const planningBootstrapHints = readPlanningBootstrapHints(planningBootstrap);
+  const nextTransferRecommendationsEnabled = transferRecommendationsEnabled(planningBootstrapHints);
   const defaultTitle = isEnglishLocale(locale) ? "New Conversation" : "新对话";
   const requestedTitle = cleanInput(req.body?.title || defaultTitle, 80) || defaultTitle;
   const now = new Date();
@@ -1424,6 +1431,7 @@ convRouter.post("/", asyncRoute(async (req: AuthedRequest, res) => {
     portfolioDocumentState: planning.portfolioDocumentState,
     motifTransferState,
     taskLifecycle,
+    transferRecommendationsEnabled: nextTransferRecommendationsEnabled,
   });
 }));
 
@@ -1438,6 +1446,9 @@ convRouter.get("/:id", asyncRoute(async (req: AuthedRequest, res) => {
   if (!conv) return res.status(404).json({ error: "conversation not found" });
   const locale = normalizeLocale((conv as any).locale);
   const taskLifecycle = readTaskLifecycle((conv as any).taskLifecycle);
+  const nextTransferRecommendationsEnabled = transferRecommendationsEnabled(
+    readPlanningBootstrapHints((conv as any).planningBootstrapHints)
+  );
 
   const model = buildCognitiveModel({
     graph: conv.graph,
@@ -1480,6 +1491,7 @@ convRouter.get("/:id", asyncRoute(async (req: AuthedRequest, res) => {
     portfolioDocumentState: (conv as any).portfolioDocumentState || planning.portfolioDocumentState,
     motifTransferState,
     taskLifecycle,
+    transferRecommendationsEnabled: nextTransferRecommendationsEnabled,
   });
 }));
 
@@ -1988,6 +2000,7 @@ convRouter.post("/:id/turn", asyncRoute(async (req: AuthedRequest, res) => {
   let motifTransferState = readMotifTransferState((conv as any).motifTransferState);
   let taskLifecycle = readTaskLifecycle((conv as any).taskLifecycle);
   const retrievalHints = readPlanningBootstrapHints((conv as any).planningBootstrapHints);
+  const allowTransferRecommendations = transferRecommendationsEnabled(retrievalHints);
   const manualReferences = parseManualReferences(req.body?.manualReferences);
   if (taskLifecycle.status === "closed") {
     return res.status(409).json(taskClosedErrorPayload(taskLifecycle));
@@ -2125,7 +2138,13 @@ convRouter.post("/:id/turn", asyncRoute(async (req: AuthedRequest, res) => {
     out.assistant_text = `${String(out.assistant_text || "").trim()}\n${revisionProbe.followupQuestion}`.trim();
   }
 
-  if (shouldEvaluateTransferRecommendations({ priorTurnCount: turnBase.recentDocs.length, motifTransferState })) {
+  if (
+    shouldEvaluateTransferRecommendations({
+      priorTurnCount: turnBase.recentDocs.length,
+      motifTransferState,
+      transferRecommendationsEnabled: allowTransferRecommendations,
+    })
+  ) {
     const motifLibrary = await listUserMotifLibrary(userId, locale);
     const currentTaskIdForRetrieval = currentTaskId((conv as any).travelPlanState || null, String(oid));
     const previewTravelPlan = buildTransferEvaluationTravelPlan({
@@ -2231,6 +2250,7 @@ convRouter.post("/:id/turn/stream", asyncRoute(async (req: AuthedRequest, res) =
   let motifTransferState = readMotifTransferState((conv as any).motifTransferState);
   let taskLifecycle = readTaskLifecycle((conv as any).taskLifecycle);
   const retrievalHints = readPlanningBootstrapHints((conv as any).planningBootstrapHints);
+  const allowTransferRecommendations = transferRecommendationsEnabled(retrievalHints);
   const manualReferences = parseManualReferences(req.body?.manualReferences);
   if (taskLifecycle.status === "closed") {
     return res.status(409).json(taskClosedErrorPayload(taskLifecycle));
@@ -2424,7 +2444,13 @@ convRouter.post("/:id/turn/stream", asyncRoute(async (req: AuthedRequest, res) =
     });
     model.graph.version = merged.newGraph.version + (graphChanged(merged.newGraph, model.graph) ? 1 : 0);
 
-    if (shouldEvaluateTransferRecommendations({ priorTurnCount: turnBase.recentDocs.length, motifTransferState })) {
+    if (
+      shouldEvaluateTransferRecommendations({
+        priorTurnCount: turnBase.recentDocs.length,
+        motifTransferState,
+        transferRecommendationsEnabled: allowTransferRecommendations,
+      })
+    ) {
       const motifLibrary = await listUserMotifLibrary(userId, locale);
       const currentTaskIdForRetrieval = currentTaskId((conv as any).travelPlanState || null, String(oid));
       const previewTravelPlan = buildTransferEvaluationTravelPlan({
@@ -2545,7 +2571,13 @@ convRouter.post("/:id/turn/stream", asyncRoute(async (req: AuthedRequest, res) =
         });
         model2.graph.version = merged2.newGraph.version + (graphChanged(merged2.newGraph, model2.graph) ? 1 : 0);
 
-        if (shouldEvaluateTransferRecommendations({ priorTurnCount: turnBase.recentDocs.length, motifTransferState })) {
+        if (
+          shouldEvaluateTransferRecommendations({
+            priorTurnCount: turnBase.recentDocs.length,
+            motifTransferState,
+            transferRecommendationsEnabled: allowTransferRecommendations,
+          })
+        ) {
           const motifLibrary = await listUserMotifLibrary(userId, locale);
           const currentTaskIdForRetrieval = currentTaskId((conv as any).travelPlanState || null, String(oid));
           const previewTravelPlan = buildTransferEvaluationTravelPlan({
