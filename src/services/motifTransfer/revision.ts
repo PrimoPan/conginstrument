@@ -79,6 +79,17 @@ export function registerRevisionRequestFromUtterance(params: {
   return { state, request, followupQuestion };
 }
 
+export function appendFollowupQuestion(baseText: string, followupQuestion?: string): string {
+  const current = String(baseText || "").trim();
+  const followup = clean(followupQuestion, 320);
+  if (!followup) return current;
+  if (!current) return followup;
+  const normalizedCurrent = current.replace(/\s+/g, " ").trim();
+  const normalizedFollowup = followup.replace(/\s+/g, " ").trim();
+  if (normalizedCurrent.includes(normalizedFollowup)) return current;
+  return `${current}\n${followup}`.trim();
+}
+
 export function resolveRevisionRequest(params: {
   currentState?: MotifTransferState | null;
   requestId?: string;

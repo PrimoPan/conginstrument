@@ -49,6 +49,7 @@ import type {
 } from "../services/motifTransfer/types.js";
 import { applyTransferFeedback } from "../services/motifTransfer/feedback.js";
 import {
+  appendFollowupQuestion,
   registerRevisionRequestFromUtterance,
   resolveRevisionRequest,
   type RevisionChoice,
@@ -2167,7 +2168,7 @@ convRouter.post("/:id/turn", asyncRoute(async (req: AuthedRequest, res) => {
   model.graph.version = merged.newGraph.version + (graphChanged(merged.newGraph, model.graph) ? 1 : 0);
 
   if (revisionProbe.followupQuestion) {
-    out.assistant_text = `${String(out.assistant_text || "").trim()}\n${revisionProbe.followupQuestion}`.trim();
+    out.assistant_text = appendFollowupQuestion(String(out.assistant_text || ""), revisionProbe.followupQuestion);
   }
 
   if (
@@ -2457,7 +2458,7 @@ convRouter.post("/:id/turn/stream", asyncRoute(async (req: AuthedRequest, res) =
     if (closed) return;
 
     if (revisionProbe.followupQuestion) {
-      const appended = `${String(out.assistant_text || "").trim()}\n${revisionProbe.followupQuestion}`.trim();
+      const appended = appendFollowupQuestion(String(out.assistant_text || ""), revisionProbe.followupQuestion);
       const delta = appended.slice(String(out.assistant_text || "").length);
       if (delta) {
         sentAnyToken = true;
@@ -2591,7 +2592,7 @@ convRouter.post("/:id/turn/stream", asyncRoute(async (req: AuthedRequest, res) =
         });
 
         if (revisionProbe.followupQuestion) {
-          out2.assistant_text = `${String(out2.assistant_text || "").trim()}\n${revisionProbe.followupQuestion}`.trim();
+          out2.assistant_text = appendFollowupQuestion(String(out2.assistant_text || ""), revisionProbe.followupQuestion);
         }
 
         const merged2 = applyPatchWithGuards(graph, out2.graph_patch);

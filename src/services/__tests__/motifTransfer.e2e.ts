@@ -8,6 +8,7 @@ import {
 } from "../motifTransfer/decision.js";
 import { applyTransferFeedback } from "../motifTransfer/feedback.js";
 import {
+  appendFollowupQuestion,
   registerRevisionRequestFromUtterance,
   resolveRevisionRequest,
 } from "../motifTransfer/revision.js";
@@ -460,6 +461,15 @@ async function main() {
     const resolved = transferState.revisionRequests.find((x) => x.request_id === req!.request_id);
     assert.ok(resolved && resolved.status === "resolved");
     assert.equal(resolved?.suggested_action, "new_version");
+  });
+
+  await run("相同的修订追问不应被重复追加到 assistant 回复里", () => {
+    const assistantText =
+      "为了确保规则准确，请确认限制因素“膝盖也不太好，别太赶”是硬约束，还是可协商偏好？";
+    const followupQuestion =
+      "请确认限制因素“膝盖也不太好，别太赶”是硬约束，还是可协商偏好？";
+    const appended = appendFollowupQuestion(assistantText, followupQuestion);
+    assert.equal(appended, assistantText);
   });
 
   await run("注入约束提示仅包含 injected 规则，并可映射到 motif 字段", () => {
