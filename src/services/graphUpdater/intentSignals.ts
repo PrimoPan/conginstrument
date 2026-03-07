@@ -1339,6 +1339,7 @@ function extractDurationCandidates(text: string): DurationCandidate[] {
     const left = Math.max(0, index - 20);
     const right = Math.min(text.length, index + String(m[0] || "").length + 28);
     const ctx = cleanStatement(text.slice(left, right), 120);
+    if (looksLikeTripPhaseCue(ctx)) continue;
     if ((prevChar === "前" || prevChar === "后") && !/(玩|待|停留|旅行|旅游|出行|行程|参会|开会|会议)/i.test(ctx)) {
       continue;
     }
@@ -1636,9 +1637,89 @@ export function normalizeDestination(raw: string): string {
   return s;
 }
 
+function looksLikeNonPlaceSituationPhrase(raw: string): boolean {
+  const original = cleanStatement(raw, 48);
+  const normalized = normalizeDestination(raw);
+  const originalLower = original.toLowerCase();
+  const normalizedLower = normalized.toLowerCase();
+  if (!original && !normalized) return false;
+
+  if (/^(?:太晚|太早|晚一点|早一点|早点|晚点|晚上|早上|上午|下午|傍晚|深夜)$/.test(normalized)) return true;
+  if (/^(?:late|early|later|earlier|evening|morning|afternoon|night|nighttime|bedtime)$/.test(normalizedLower)) {
+    return true;
+  }
+
+  const paceOrRestRe =
+    /(休息|午休|睡眠|体力|状态|节奏|强度|稳一点|轻一点|轻松一点|太晚|太早|晚一点|早一点|rest|nap|sleep|energy|fatigue|pace|pacing|rhythm|intensity|late night|too late|too early|lighter|easier|slow(?:er)?|gentler)/i;
+  if (paceOrRestRe.test(original) || paceOrRestRe.test(normalized) || paceOrRestRe.test(originalLower) || paceOrRestRe.test(normalizedLower)) {
+    return true;
+  }
+
+  const familyOrTravelerRe =
+    /(爸妈|父母|妈妈|爸爸|家人|老人|孩子|娃|小朋友|同行|parents?|mom|mum|dad|kids?|children|family|traveler|travellers)/i;
+  const stateOrConstraintRe =
+    /(休息|状态|体力|睡眠|稳一点|轻松一点|别太晚|不要太晚|rest|sleep|condition|energy|fatigue|pace|lighter|late night)/i;
+  if (
+    (familyOrTravelerRe.test(original) || familyOrTravelerRe.test(normalized) || familyOrTravelerRe.test(originalLower)) &&
+    (stateOrConstraintRe.test(original) || stateOrConstraintRe.test(normalized) || stateOrConstraintRe.test(originalLower))
+  ) {
+    return true;
+  }
+
+  const quantifiedPlanningCueRe =
+    /^(?:希望|想|最好|至少|起码|留出|保留|预留|安排|给|希望能|想要|prefer|want|leave|keep|save|at least)\s*(?:至少|起码|minimum)?\s*(?:有|留|留出|保留|keep|leave)?$/i;
+  if (
+    quantifiedPlanningCueRe.test(original) ||
+    quantifiedPlanningCueRe.test(normalized) ||
+    quantifiedPlanningCueRe.test(originalLower) ||
+    quantifiedPlanningCueRe.test(normalizedLower)
+  ) {
+    return true;
+  }
+
+  return false;
+}
+
+function looksLikeAbstractTravelModePhrase(raw: string): boolean {
+  const original = cleanStatement(raw, 72);
+  const normalized = normalizeDestination(raw);
+  const combined = `${original} ${normalized}`.toLowerCase();
+  if (!combined.trim()) return false;
+  if (
+    /(在地体验|当地体验|当地生活|城市生活|生活感|体验感|不要太硬核|太硬核|硬核一点|local experience|local life|city life|street life|daily life|vibe|atmosphere|feel of the city|too hardcore|hardcore)/i.test(
+      combined
+    )
+  ) {
+    return true;
+  }
+  return /(体验|生活|氛围|步调|节奏|experience|life|vibe|atmosphere)$/i.test(normalized) || /(太硬核|hardcore)/i.test(original);
+}
+
+function looksLikeTaskControlPhrase(raw: string): boolean {
+  const original = cleanStatement(raw, 64);
+  const normalized = normalizeDestination(raw);
+  const combined = `${original} ${normalized}`.toLowerCase();
+  if (!combined.trim()) return false;
+  return /(重新规划|新任务|下一趟|再规划一趟|重新开始|重开|新的行程|新的旅行|another trip|new task|start over|restart|fresh plan)/i.test(
+    combined
+  );
+}
+
+function looksLikeTripPhaseCue(raw: string): boolean {
+  const text = cleanStatement(raw, 72);
+  if (!text) return false;
+  return /(回程前|返程前|离开前|出发前|临走前|返航前|回家前|departure day|before departure|before leaving|before flying home|last night before|night before departure|return leg|on the way back)/i.test(
+    text
+  );
+}
+
 export function isLikelyDestinationCandidate(x: string): boolean {
   const s = normalizeDestination(x);
   if (!s) return false;
+  if (looksLikeNonPlaceSituationPhrase(x) || looksLikeNonPlaceSituationPhrase(s)) return false;
+  if (looksLikeAbstractTravelModePhrase(x) || looksLikeAbstractTravelModePhrase(s)) return false;
+  if (looksLikeTaskControlPhrase(x) || looksLikeTaskControlPhrase(s)) return false;
+  if (looksLikeTripPhaseCue(x) || looksLikeTripPhaseCue(s)) return false;
   if (/(?:^|[\s])(?:是因为|因为|because)(?:[\s]|$)/i.test(String(x || ""))) return false;
   if (/^(?:剩下|其余|余下|机动|过渡|中转)$/.test(s)) return false;
   if (/去/.test(s)) return false;
@@ -1663,7 +1744,7 @@ export function isLikelyDestinationCandidate(x: string): boolean {
   if (/^(?:更|比较|稍微|尽量|优先|最好)?\s*(?:慢|快|轻松|悠闲|休闲|紧凑|宽松|松弛|舒服|舒适|放松|赶)\s*(?:一点|一些)?(?:也可以|也行)?$/i.test(s)) {
     return false;
   }
-  if (/(妈妈|爸爸|父母|家人|老人|孩子|娃|可以)/.test(s)) return false;
+  if (/(爸妈|妈妈|爸爸|父母|家人|老人|孩子|娃|可以|parents?|mom|mum|dad|kids?|children)/i.test(s)) return false;
   if (/(多住一点|少住一点|多待一点|少待一点|压缩一些|都保留|不用单独算|还是问题|先别塞满|别塞满)/.test(s)) return false;
   if (/(一个人|两个人|三个人|[0-9一二三四五六七八九十两]{1,2}个?人|独自|单人|全家|一家)/i.test(s)) return false;
   if (/^(?:我|我们)(?:去)?/.test(s)) return false;
@@ -1771,9 +1852,17 @@ function extractDestinationList(text: string): Array<{ city: string; evidence: s
     (m) => "，".repeat(m.length)
   );
   const push = (raw: string, evidence: string, index: number) => {
+    if (looksLikeNonPlaceSituationPhrase(raw)) return;
+    if (looksLikeAbstractTravelModePhrase(raw) || looksLikeAbstractTravelModePhrase(evidence)) return;
+    if (looksLikeTaskControlPhrase(raw) || looksLikeTaskControlPhrase(evidence)) return;
+    if (looksLikeTripPhaseCue(raw) || looksLikeTripPhaseCue(evidence)) return;
     const expanded = expandCompoundDestinations(raw);
     if (expanded.length >= 2) {
       for (const city of expanded) {
+        if (looksLikeNonPlaceSituationPhrase(city)) continue;
+        if (looksLikeAbstractTravelModePhrase(city)) continue;
+        if (looksLikeTaskControlPhrase(city)) continue;
+        if (looksLikeTripPhaseCue(city)) continue;
         out.push({
           city,
           evidence: cleanStatement(evidence || raw, 30),
@@ -1829,6 +1918,17 @@ function extractDestinationList(text: string): Array<{ city: string; evidence: s
   for (const m of scanText.matchAll(transitRe)) {
     if (!m?.[1]) continue;
     push(m[1], m[0] || m[1], Number(m.index) || 0);
+  }
+
+  const englishDestinationRes = [
+    /(?:travel to|trip to|go to|visit|head to|fly to|arrive in|stay in)\s+([A-Za-z]{2,24})(?=\s*(?:for|with|and|but|trip|travel|days?|nights?|[,.!?;]|$))/gi,
+    /plan(?:\s+(?:a|an))?(?:\s+[0-9]+(?:-[a-z]+)?\s+day)?\s+([A-Za-z]{2,24})\s+trip/gi,
+  ];
+  for (const englishDestinationRe of englishDestinationRes) {
+    for (const m of scanText.matchAll(englishDestinationRe)) {
+      if (!m?.[1]) continue;
+      push(m[1], m[0] || m[1], Number(m.index) || 0);
+    }
   }
 
   const pairRe =
@@ -1942,6 +2042,7 @@ function extractCityDurationSegments(
     if (/^(所以|因此|然后|另外|此外|这|那|此次|本次)/.test(city)) continue;
     const idx = Number(m.index) || 0;
     const snippet = cleanStatement(m[0] || `${city} ${formatDayCount(locale, days)}`, 80);
+    if (looksLikeTripPhaseCue(snippet)) continue;
     if (hasRelativeDayOffset(snippet, city)) continue;
     if (hasHardDayReservationSignal(snippet) && days <= 2) continue;
     if (isCompoundTripEnvelopeDuration(snippet, city)) continue;
@@ -1971,6 +2072,7 @@ function extractCityDurationSegments(
     const idx = Number(m.index) || 0;
     const right = Math.min(scanText.length, idx + String(m[0] || "").length + 26);
     const ctx = cleanStatement(scanText.slice(idx, right), 80);
+    if (looksLikeTripPhaseCue(ctx)) continue;
     if (hasRelativeDayOffset(ctx, city)) continue;
     if (hasHardDayReservationSignal(ctx) && days <= 2) continue;
     if (isCompoundTripEnvelopeDuration(ctx, city)) continue;
@@ -1995,6 +2097,9 @@ function extractCityDurationSegments(
     if (!isLikelyDestinationCandidate(city)) continue;
     const idx = Number(m.index) || 0;
     const ctx = cleanStatement(m[0] || `${city} ${formatDayCount(locale, days)}`, 60);
+    if (looksLikeTripPhaseCue(ctx)) continue;
+    if (hasRelativeDayOffset(ctx, city)) continue;
+    if (hasHardDayReservationSignal(ctx) && days <= 2) continue;
     out.push({
       city,
       days,

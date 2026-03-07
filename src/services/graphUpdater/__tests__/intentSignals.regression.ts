@@ -626,6 +626,339 @@ const cases: Case[] = [
     },
   },
   {
+    name: "late-night pacing refinement should not be mistaken for new destinations",
+    run: async () => {
+      const signals = extractIntentSignals("晚上别安排太晚，爸妈休息要稳一点。");
+      assert.equal((signals.destinations || []).length, 0);
+      assert.equal(signals.destination, undefined);
+      assert.equal(
+        (signals.genericConstraints || []).some((item) => /安排太晚/.test(String(item.text || ""))),
+        true
+      );
+
+      const baseGraph = {
+        id: "g_hangzhou_rest_guard",
+        version: 1,
+        nodes: [
+          {
+            id: "n_goal",
+            type: "belief",
+            layer: "intent",
+            key: "slot:goal",
+            statement: "意图：去杭州旅游5天",
+            status: "confirmed",
+            confidence: 0.9,
+            importance: 0.88,
+          },
+          {
+            id: "n_dest_hz",
+            type: "factual_assertion",
+            layer: "requirement",
+            key: "slot:destination:杭州",
+            statement: "目的地: 杭州",
+            status: "confirmed",
+            confidence: 0.9,
+            importance: 0.84,
+          },
+        ],
+        edges: [
+          {
+            id: "e_dest_goal",
+            from: "n_dest_hz",
+            to: "n_goal",
+            type: "enable",
+            confidence: 0.84,
+          },
+        ],
+      } as any;
+
+      const patch = await generateGraphPatch({
+        graph: baseGraph,
+        userText: "晚上别安排太晚，爸妈休息要稳一点。",
+        recentTurns: [
+          { role: "user", content: "想带父母和孩子去杭州玩5天，节奏轻一点，不要太累。" },
+          { role: "assistant", content: "收到，我们先按杭州轻松行程来聊。" },
+        ],
+        stateContextUserTurns: [
+          "想带父母和孩子去杭州玩5天，节奏轻一点，不要太累。",
+          "晚上别安排太晚，爸妈休息要稳一点。",
+        ],
+        assistantText: "",
+        locale: "zh-CN",
+      });
+      const applied = applyPatchWithGuards(baseGraph, patch).newGraph;
+      const destinationStatements = (applied.nodes || [])
+        .map((node) => String((node as any)?.statement || ""))
+        .filter((statement) => /^目的地[:：]/.test(statement))
+        .sort();
+      const goalNode = (applied.nodes || []).find((node) => String((node as any)?.key || "") === "slot:goal");
+      assert.deepEqual(destinationStatements, ["目的地: 杭州"]);
+      assert.equal(String(goalNode?.statement || ""), "意图：去杭州旅游5天");
+    },
+  },
+  {
+    name: "english pacing-and-rest refinement should not be mistaken for new destinations",
+    run: async () => {
+      const signals = extractIntentSignals(
+        "Please keep evenings lighter and avoid late nights; my parents need steadier rest.",
+        { locale: "en-US" }
+      );
+      assert.equal((signals.destinations || []).length, 0);
+      assert.equal(signals.destination, undefined);
+
+      const baseGraph = {
+        id: "g_milan_rest_guard",
+        version: 1,
+        nodes: [
+          {
+            id: "n_goal",
+            type: "belief",
+            layer: "intent",
+            key: "slot:goal",
+            statement: "Intent: travel to Milan for 5 days",
+            status: "confirmed",
+            confidence: 0.9,
+            importance: 0.88,
+          },
+          {
+            id: "n_dest_milan",
+            type: "factual_assertion",
+            layer: "requirement",
+            key: "slot:destination:Milan",
+            statement: "Destination: Milan",
+            status: "confirmed",
+            confidence: 0.9,
+            importance: 0.84,
+          },
+        ],
+        edges: [
+          {
+            id: "e_dest_goal",
+            from: "n_dest_milan",
+            to: "n_goal",
+            type: "enable",
+            confidence: 0.84,
+          },
+        ],
+      } as any;
+
+      const patch = await generateGraphPatch({
+        graph: baseGraph,
+        userText: "Please keep evenings lighter and avoid late nights; my parents need steadier rest.",
+        recentTurns: [
+          { role: "user", content: "Plan a 5-day Milan trip for my parents with a gentle pace." },
+          { role: "assistant", content: "Sure, we will keep Milan as the anchor and refine the pace." },
+        ],
+        stateContextUserTurns: [
+          "Plan a 5-day Milan trip for my parents with a gentle pace.",
+          "Please keep evenings lighter and avoid late nights; my parents need steadier rest.",
+        ],
+        assistantText: "",
+        locale: "en-US",
+      });
+      const applied = applyPatchWithGuards(baseGraph, patch).newGraph;
+      const destinationStatements = (applied.nodes || [])
+        .map((node) => String((node as any)?.statement || ""))
+        .filter((statement) => /^Destination[:：]/i.test(statement))
+        .sort();
+      const goalNode = (applied.nodes || []).find((node) => String((node as any)?.key || "") === "slot:goal");
+      assert.deepEqual(destinationStatements, ["Destination: Milan"]);
+      assert.match(String(goalNode?.statement || ""), /Milan/i);
+      assert.equal(/late|rest/i.test(String(goalNode?.statement || "")), false);
+    },
+  },
+  {
+    name: "task-control phrasing should not leak into destination slots",
+    run: () => {
+      const zh = extractIntentSignals("重新规划一个新任务，想和伴侣去青岛4天，看海散步为主，不要太赶。", {
+        locale: "zh-CN",
+      });
+      assert.deepEqual(zh.destinations, ["青岛"]);
+      assert.equal(zh.destination, "青岛");
+
+      const en = extractIntentSignals("Start over with a new task and go to Kyoto with a gentle pace.", {
+        locale: "en-US",
+      });
+      assert.ok((en.destinations || []).includes("Kyoto"));
+      assert.equal((en.destinations || []).some((item) => /new task|start over/i.test(String(item))), false);
+    },
+  },
+  {
+    name: "quantified activity-day phrasing should not create fake destinations",
+    run: async () => {
+      const zh = extractIntentSignals("希望至少有一天轻松散步和喝茶。", { locale: "zh-CN" });
+      assert.equal((zh.destinations || []).length, 0);
+      assert.equal(zh.destination, undefined);
+
+      const en = extractIntentSignals("I want at least one easy day for walking and tea.", { locale: "en-US" });
+      assert.equal((en.destinations || []).length, 0);
+      assert.equal(en.destination, undefined);
+
+      const baseGraph = {
+        id: "g_chengdu_light_day",
+        version: 1,
+        nodes: [
+          {
+            id: "n_goal",
+            type: "belief",
+            layer: "intent",
+            key: "slot:goal",
+            statement: "意图：去成都旅游5天",
+            status: "confirmed",
+            confidence: 0.9,
+            importance: 0.88,
+          },
+          {
+            id: "n_dest_cd",
+            type: "factual_assertion",
+            layer: "requirement",
+            key: "slot:destination:成都",
+            statement: "目的地: 成都",
+            status: "confirmed",
+            confidence: 0.9,
+            importance: 0.84,
+          },
+          {
+            id: "n_duration_total",
+            type: "constraint",
+            layer: "requirement",
+            key: "slot:duration_total",
+            statement: "总行程时长: 5天",
+            status: "confirmed",
+            confidence: 0.9,
+            importance: 0.82,
+          },
+        ],
+        edges: [],
+      } as any;
+      const patch = await generateGraphPatch({
+        graph: baseGraph,
+        userText: "希望至少有一天轻松散步和喝茶。",
+        recentTurns: [
+          { role: "user", content: "想带爸妈去成都5天，第一次去，不想太折腾。" },
+          { role: "assistant", content: "收到，我们先按成都轻松行程来聊。" },
+        ],
+        stateContextUserTurns: [
+          "想带爸妈去成都5天，第一次去，不想太折腾。",
+          "希望至少有一天轻松散步和喝茶。",
+        ],
+        assistantText: "",
+        locale: "zh-CN",
+      });
+      const applied = applyPatchWithGuards(baseGraph, patch).newGraph;
+      const destinationStatements = (applied.nodes || [])
+        .map((node) => String((node as any)?.statement || ""))
+        .filter((statement) => /^目的地[:：]/.test(statement))
+        .sort();
+      const goalNode = (applied.nodes || []).find((node) => String((node as any)?.key || "") === "slot:goal");
+      assert.deepEqual(destinationStatements, ["目的地: 成都"]);
+      assert.equal(String(goalNode?.statement || ""), "意图：去成都旅游5天");
+    },
+  },
+  {
+    name: "trip-phase buffer phrasing should not create fake destinations or reset total duration",
+    run: async () => {
+      const zh = extractIntentSignals("回程前一晚要特别稳，不折腾换酒店。", { locale: "zh-CN" });
+      assert.equal((zh.destinations || []).length, 0);
+      assert.equal(zh.destination, undefined);
+      assert.equal(zh.durationDays, undefined);
+
+      const en = extractIntentSignals("The night before departure should stay stable; do not switch hotels.", {
+        locale: "en-US",
+      });
+      assert.equal((en.destinations || []).length, 0);
+      assert.equal(en.destination, undefined);
+
+      const baseGraph = {
+        id: "g_osaka_departure_guard",
+        version: 1,
+        nodes: [
+          {
+            id: "n_goal",
+            type: "belief",
+            layer: "intent",
+            key: "slot:goal",
+            statement: "意图：去大阪和京都旅游7天",
+            status: "confirmed",
+            confidence: 0.9,
+            importance: 0.88,
+          },
+          {
+            id: "n_dest_osaka",
+            type: "factual_assertion",
+            layer: "requirement",
+            key: "slot:destination:大阪",
+            statement: "目的地: 大阪",
+            status: "confirmed",
+            confidence: 0.9,
+            importance: 0.84,
+          },
+          {
+            id: "n_dest_kyoto",
+            type: "factual_assertion",
+            layer: "requirement",
+            key: "slot:destination:京都",
+            statement: "目的地: 京都",
+            status: "confirmed",
+            confidence: 0.9,
+            importance: 0.84,
+          },
+          {
+            id: "n_duration_total",
+            type: "constraint",
+            layer: "requirement",
+            key: "slot:duration_total",
+            statement: "总行程时长: 7天",
+            status: "confirmed",
+            confidence: 0.9,
+            importance: 0.82,
+          },
+        ],
+        edges: [],
+      } as any;
+      const patch = await generateGraphPatch({
+        graph: baseGraph,
+        userText: "回程前一晚要特别稳，不折腾换酒店。",
+        recentTurns: [
+          { role: "user", content: "重新规划一个新任务，想带孩子去大阪和京都7天，整体轻松一点。" },
+          { role: "assistant", content: "收到，我们先按大阪和京都的轻松亲子行程来聊。" },
+        ],
+        stateContextUserTurns: [
+          "重新规划一个新任务，想带孩子去大阪和京都7天，整体轻松一点。",
+          "回程前一晚要特别稳，不折腾换酒店。",
+        ],
+        assistantText: "",
+        locale: "zh-CN",
+      });
+      const applied = applyPatchWithGuards(baseGraph, patch).newGraph;
+      const destinationStatements = (applied.nodes || [])
+        .map((node) => String((node as any)?.statement || ""))
+        .filter((statement) => /^目的地[:：]/.test(statement))
+        .sort();
+      const goalNode = (applied.nodes || []).find((node) => String((node as any)?.key || "") === "slot:goal");
+      const durationNode = (applied.nodes || []).find(
+        (node) => String((node as any)?.key || "") === "slot:duration_total"
+      );
+      assert.deepEqual(destinationStatements, ["目的地: 京都", "目的地: 大阪"]);
+      assert.equal(String(goalNode?.statement || ""), "意图：去大阪和京都旅游7天");
+      assert.equal(String(durationNode?.statement || ""), "总行程时长: 7天");
+    },
+  },
+  {
+    name: "abstract experience phrasing should not create fake destinations",
+    run: () => {
+      const zh = extractIntentSignals("希望安排里有一些在地体验，但不要太硬核。", { locale: "zh-CN" });
+      assert.equal((zh.destinations || []).length, 0);
+      assert.equal(zh.destination, undefined);
+
+      const en = extractIntentSignals("I want some local experience, but nothing too hardcore.", {
+        locale: "en-US",
+      });
+      assert.equal((en.destinations || []).length, 0);
+      assert.equal(en.destination, undefined);
+    },
+  },
+  {
     name: "full city allocation should replace coarse destination even if partial-allocation flag is set",
     run: () => {
       const merged = mergeIntentSignals(

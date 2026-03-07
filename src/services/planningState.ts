@@ -246,8 +246,12 @@ function motifLibraryEntryMatchesTask(
 const LODGING_FOCUS_RE = /(多住一点|住久一点|多待一点|多留一点|重点住|优先住|主要住)/i;
 const CONTINUATION_REFINEMENT_RE =
   /(整体还是|总时长还是|总时长还是按|还是按|不是必须|先不|先完全去掉|完全去掉|去掉|删掉|移除|保留|都保留|继续|也可以|也行|最后\s*[0-9一二三四五六七八九十两]{0,2}\s*晚|按.+(?:住|晚)|以.+为主住|就按|那就按|先按|先以|来想|不用单独算|最多半天|中转|过渡|先别塞满)/i;
-const FRESH_TRIP_CUE_RE =
-  /(?:我想|我们想|想|准备|打算).{0,8}(?:去|安排|规划|计划)|(?:重新规划|新任务|下一趟|再规划一趟|another trip|new task|start over|plan a new trip)/i;
+const EXPLICIT_RESTART_RE = /(重新规划|新任务|下一趟|再规划一趟|another trip|new task|start over|plan a new trip)/i;
+const SOFT_FRESH_TRIP_CUE_RE = /(?:我想|我们想|想|准备|打算).{0,8}(?:去|安排|规划|计划)/i;
+const BROAD_DESTINATION_RE =
+  /(中国|美国|英国|法国|德国|意大利|西班牙|葡萄牙|荷兰|比利时|瑞士|奥地利|日本|韩国|新加坡|泰国|马来西亚|印度尼西亚|澳大利亚|加拿大|新西兰|阿联酋|摩洛哥|冰岛|欧洲|亚洲|非洲|北美|南美|中东|关西|北海道|东南亚|北欧|南欧|西欧|东欧|japan|china|usa|united states|uk|united kingdom|france|germany|italy|spain|portugal|netherlands|belgium|switzerland|austria|singapore|thailand|malaysia|indonesia|australia|canada|new zealand|uae|morocco|iceland|europe|asia|africa|north america|south america|middle east|kansai|hokkaido|southeast asia|nordics?)/i;
+const DESTINATION_BREAKDOWN_RE =
+  /(优先|priority|prioriti(?:s|z)e|主要|mainly|重点|focus on|base in|中转|stopover|transit|过渡|not required|optional|不是必须|先不|去掉|删掉)/i;
 
 function tr(locale: AppLocale, zh: string, en: string): string {
   return isEnglishLocale(locale) ? en : zh;
@@ -263,17 +267,30 @@ function shouldCarryPreviousDestinationsForRefinement(params: {
 }): boolean {
   const latestUserText = clean(params.latestUserText, 320);
   if (!latestUserText || !params.currentDestinations.length || !params.previousDestinations.length) return false;
-  if (FRESH_TRIP_CUE_RE.test(latestUserText)) return false;
   const destinationEvidenceText = uniqStrings(
     [...(params.destinationEvidences || []), latestUserText].map((x) => clean(x, 120)),
     8
   ).join(" ");
   const hasLodgingFocus = LODGING_FOCUS_RE.test(destinationEvidenceText);
   const hasCityAllocation = (params.cityDurations || []).some((seg) => !!clean(seg?.city, 60) && Number(seg?.days) > 0);
+  const previousIsBroadAnchor =
+    params.previousDestinations.length > 0 &&
+    params.previousDestinations.every((dest) => BROAD_DESTINATION_RE.test(clean(dest, 80)));
+  const currentHasBroadAnchor = params.currentDestinations.some((dest) => BROAD_DESTINATION_RE.test(clean(dest, 80)));
+  const hasDestinationBreakdownCue = DESTINATION_BREAKDOWN_RE.test(latestUserText);
+  const hierarchicalRefinement =
+    previousIsBroadAnchor &&
+    !currentHasBroadAnchor &&
+    params.currentDestinations.length >= 2 &&
+    hasDestinationBreakdownCue;
+  if (EXPLICIT_RESTART_RE.test(latestUserText)) return false;
+  if (SOFT_FRESH_TRIP_CUE_RE.test(latestUserText) && !hierarchicalRefinement) return false;
   const hasContinuationCue =
-    CONTINUATION_REFINEMENT_RE.test(latestUserText) || (params.removedDestinations || []).length > 0;
+    CONTINUATION_REFINEMENT_RE.test(latestUserText) ||
+    hasDestinationBreakdownCue ||
+    (params.removedDestinations || []).length > 0;
   if (!hasContinuationCue) return false;
-  return hasLodgingFocus || hasCityAllocation;
+  return hasLodgingFocus || hasCityAllocation || hierarchicalRefinement;
 }
 
 function sourceTokens(raw: any): string[] {
@@ -504,8 +521,7 @@ export function buildTaskDetection(params: {
   const restartText = [latestUserText, clean(params.tripGoalSummary, 220).toLowerCase()]
     .filter(Boolean)
     .join(" ");
-  const explicitRestart =
-    /(重新规划|新任务|下一趟|再规划一趟|another trip|new task|start over|plan a new trip)/i.test(restartText);
+  const explicitRestart = EXPLICIT_RESTART_RE.test(restartText);
   const switched = previous.length > 0 && current.length > 0 && overlap.length === 0;
 
   if (params.taskLifecycle?.status === "closed") {

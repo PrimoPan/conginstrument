@@ -1,0 +1,482 @@
+import assert from "node:assert/strict";
+
+import { applyPatchWithGuards } from "../../core/graph/patchApply.js";
+import type { CDG, CDGEdge } from "../../core/graph.js";
+import type { AppLocale } from "../../i18n/locale.js";
+import { buildCognitiveModel, type CognitiveModel } from "../cognitiveModel.js";
+import { generateGraphPatch } from "../graphUpdater.js";
+import { buildPortfolioDocumentState, detectTaskSwitchFromLatestUserTurn } from "../planningState.js";
+import { buildTravelPlanState, type TravelPlanState } from "../travelPlan/state.js";
+import {
+  applyManualGraphOverrides,
+  rebuildManualGraphOverrides,
+  type ManualGraphOverrides,
+} from "../../routes/conversations.js";
+import type { MotifLink } from "../motif/motifLinks.js";
+
+type TaskScenario = {
+  name: string;
+  turns: string[];
+};
+
+type ScenarioDefinition = {
+  name: string;
+  locale: AppLocale;
+  firstTask: TaskScenario;
+  secondTask: TaskScenario;
+  secondTaskShouldSwitch: true;
+  afterSecondTaskTurn?: (ctx: TaskTurnHookContext) => TaskTurnHookResult | void;
+  validate?: (ctx: ScenarioRunResult) => void;
+};
+
+type TaskTurnHookContext = {
+  taskName: string;
+  turnIndex: number;
+  graph: CDG;
+  model: CognitiveModel;
+  manualGraphOverrides: ManualGraphOverrides;
+  motifLinks: MotifLink[];
+};
+
+type TaskTurnHookResult = {
+  graph?: CDG;
+  manualGraphOverrides?: ManualGraphOverrides;
+  motifLinks?: MotifLink[];
+};
+
+type TaskRunResult = {
+  graph: CDG;
+  model: CognitiveModel;
+  plan: TravelPlanState;
+  manualGraphOverrides: ManualGraphOverrides;
+  motifLinks: MotifLink[];
+};
+
+type ScenarioRunResult = {
+  firstTask: TaskRunResult;
+  secondTask: TaskRunResult;
+  portfolio: ReturnType<typeof buildPortfolioDocumentState>;
+};
+
+const ASSISTANT_ACK = "收到，我按这个方向继续。";
+
+function makeEmptyGraph(conversationId: string): CDG {
+  return {
+    id: conversationId,
+    version: 0,
+    nodes: [],
+    edges: [],
+  };
+}
+
+function run(name: string, fn: () => void | Promise<void>) {
+  Promise.resolve()
+    .then(fn)
+    .then(
+      () => console.log(`PASS ${name}`),
+      (err: any) => {
+        console.error(`FAIL ${name}:`, err?.message || err);
+        throw err;
+      }
+    );
+}
+
+function emptyOverrides(): ManualGraphOverrides {
+  return { edges: [] };
+}
+
+function findNodeIdByKeyPrefix(graph: CDG, keyPrefix: string | string[]): string {
+  const prefixes = Array.isArray(keyPrefix) ? keyPrefix : [keyPrefix];
+  const node = (graph.nodes || []).find((item) =>
+    prefixes.some((prefix) => String(item.key || "").startsWith(prefix))
+  );
+  assert.ok(node, `expected node with key prefix ${prefixes.join(" | ")}`);
+  return String(node!.id);
+}
+
+function hasDestination(graph: CDG, destination: string): boolean {
+  return (graph.nodes || []).some((item) => {
+    if (!String(item.key || "").startsWith("slot:destination:")) return false;
+    const statement = String(item.statement || "");
+    return statement.includes(destination) || String(item.key || "").endsWith(`:${destination}`);
+  });
+}
+
+function readEdge(graph: CDG, fromId: string, toId: string): CDGEdge | undefined {
+  return (graph.edges || []).find((edge) => edge.from === fromId && edge.to === toId);
+}
+
+function applyManualConceptEdge(params: {
+  graph: CDG;
+  manualGraphOverrides: ManualGraphOverrides;
+  fromKeyPrefix: string | string[];
+  toKeyPrefix: string | string[];
+  type: CDGEdge["type"];
+}) {
+  const fromId = findNodeIdByKeyPrefix(params.graph, params.fromKeyPrefix);
+  const toId = findNodeIdByKeyPrefix(params.graph, params.toKeyPrefix);
+  const nextGraph: CDG = {
+    ...params.graph,
+    edges: [
+      ...(params.graph.edges || []).filter((edge) => !(edge.from === fromId && edge.to === toId)),
+      {
+        id: "e_manual_override",
+        from: fromId,
+        to: toId,
+        type: params.type,
+        confidence: 0.93,
+      },
+    ],
+  };
+  const manualGraphOverrides = rebuildManualGraphOverrides({
+    prevGraph: params.graph,
+    nextGraph,
+    existing: params.manualGraphOverrides,
+    updatedAt: "2026-03-07T00:00:00.000Z",
+  });
+  const graph = applyManualGraphOverrides(params.graph, manualGraphOverrides);
+  const preserved = readEdge(graph, fromId, toId);
+  assert.ok(preserved, "manual concept edge should be present immediately after override");
+  assert.equal(preserved?.type, params.type);
+  return {
+    graph,
+    manualGraphOverrides,
+  };
+}
+
+function applyManualMotifLink(model: CognitiveModel): MotifLink[] {
+  assert.ok((model.motifs || []).length >= 2, "expected at least two motifs for manual motif-link edit");
+  const [fromMotif, toMotif] = model.motifs.slice(0, 2);
+  return [
+    ...(model.motifLinks || []).filter(
+      (link) => !(link.fromMotifId === fromMotif.id && link.toMotifId === toMotif.id)
+    ),
+    {
+      id: "ml_user_refines",
+      fromMotifId: fromMotif.id,
+      toMotifId: toMotif.id,
+      type: "refines",
+      confidence: 0.91,
+      source: "user",
+      updatedAt: "2026-03-07T00:00:00.000Z",
+    },
+  ];
+}
+
+async function runTask(params: {
+  conversationId: string;
+  locale: AppLocale;
+  task: TaskScenario;
+  previousPlan: TravelPlanState | null;
+  expectTaskSwitch: boolean;
+  afterTurn?: (ctx: TaskTurnHookContext) => TaskTurnHookResult | void;
+}): Promise<TaskRunResult> {
+  let graph: CDG = makeEmptyGraph(params.conversationId);
+  let model = buildCognitiveModel({
+    graph,
+    baseConcepts: [],
+    baseMotifs: [],
+    baseMotifLinks: [],
+    baseContexts: [],
+    locale: params.locale,
+  });
+  let plan = params.previousPlan;
+  let manualGraphOverrides = emptyOverrides();
+  let motifLinks: MotifLink[] = [];
+  const recentTurns: Array<{ role: "user" | "assistant"; content: string }> = [];
+  const taskTurns: Array<{ createdAt: string; userText: string; assistantText: string }> = [];
+  const taskUserTexts: string[] = [];
+
+  for (const [index, userText] of params.task.turns.entries()) {
+    const turnNumber = index + 1;
+    const detection = detectTaskSwitchFromLatestUserTurn({
+      conversationId: params.conversationId,
+      locale: params.locale,
+      previousTravelPlan: plan,
+      latestUserText: userText,
+    });
+    if (turnNumber === 1) {
+      assert.equal(
+        detection.is_task_switch,
+        params.expectTaskSwitch,
+        `${params.task.name} turn 1 task-switch expectation mismatch`
+      );
+    } else {
+      assert.equal(detection.is_task_switch, false, `${params.task.name} turn ${turnNumber} should stay in the same task`);
+    }
+
+    const patch = await generateGraphPatch({
+      graph,
+      userText,
+      recentTurns,
+      stateContextUserTurns: [...taskUserTexts, userText],
+      assistantText: ASSISTANT_ACK,
+      locale: params.locale,
+    });
+    const merged = applyPatchWithGuards(graph, patch);
+    graph = applyManualGraphOverrides(merged.newGraph, manualGraphOverrides);
+    model = buildCognitiveModel({
+      graph,
+      prevConcepts: model.concepts,
+      baseConcepts: model.concepts,
+      baseMotifs: model.motifs,
+      baseMotifLinks: motifLinks,
+      baseContexts: model.contexts,
+      locale: params.locale,
+    });
+    motifLinks = model.motifLinks;
+
+    if (params.afterTurn) {
+      const adjustment = params.afterTurn({
+        taskName: params.task.name,
+        turnIndex: turnNumber,
+        graph,
+        model,
+        manualGraphOverrides,
+        motifLinks,
+      });
+      if (adjustment?.graph || adjustment?.manualGraphOverrides || adjustment?.motifLinks) {
+        graph = adjustment.graph || graph;
+        manualGraphOverrides = adjustment.manualGraphOverrides || manualGraphOverrides;
+        motifLinks = adjustment.motifLinks || motifLinks;
+        model = buildCognitiveModel({
+          graph,
+          prevConcepts: model.concepts,
+          baseConcepts: model.concepts,
+          baseMotifs: model.motifs,
+          baseMotifLinks: motifLinks,
+          baseContexts: model.contexts,
+          locale: params.locale,
+        });
+        motifLinks = model.motifLinks;
+      }
+    }
+
+    taskTurns.push({
+      createdAt: new Date(Date.UTC(2026, 2, turnNumber, 10, 0, 0)).toISOString(),
+      userText,
+      assistantText: ASSISTANT_ACK,
+    });
+    const previousPlan = turnNumber === 1 ? params.previousPlan : plan;
+    plan = buildTravelPlanState({
+      locale: params.locale,
+      graph: model.graph,
+      turns: taskTurns,
+      concepts: model.concepts,
+      motifs: model.motifs,
+      taskId: params.conversationId,
+      previous: previousPlan,
+      forceTaskSwitch: params.expectTaskSwitch && turnNumber === 1,
+    });
+    recentTurns.push({ role: "user", content: userText }, { role: "assistant", content: ASSISTANT_ACK });
+    taskUserTexts.push(userText);
+    graph = model.graph;
+  }
+
+  assert.ok(plan, `${params.task.name} should produce a travel plan`);
+  return {
+    graph,
+    model,
+    plan: plan!,
+    manualGraphOverrides,
+    motifLinks,
+  };
+}
+
+const scenarios: ScenarioDefinition[] = [
+  {
+    name: "domestic -> domestic stays clean across 8+8 turns",
+    locale: "zh-CN",
+    firstTask: {
+      name: "hangzhou_family",
+      turns: [
+        "想带父母和孩子去杭州玩5天，节奏轻一点，不要太累。",
+        "总预算控制在2万元以内。",
+        "酒店最好地铁方便，而且有电梯。",
+        "西湖想去，但不想每天都在热门景点打卡。",
+        "最多换一次酒店。",
+        "想留一天给小朋友活动，室外室内都行。",
+        "晚上别安排太晚，爸妈休息要稳一点。",
+        "如果下雨，希望有明确的室内备选。",
+      ],
+    },
+    secondTask: {
+      name: "qingdao_couple",
+      turns: [
+        "重新规划一个新任务，想和伴侣去青岛4天，看海散步为主，不要太赶。",
+        "预算大概1万2。",
+        "酒店要靠地铁或者火车站，回程方便。",
+        "不追求景点密度，海边慢慢走和咖啡店都可以。",
+        "海鲜想吃，但不要特别贵。",
+        "尽量少打车，多靠步行和地铁。",
+        "最后一天留足返程缓冲。",
+        "如果天气不好，也给我一点室内替代。",
+      ],
+    },
+    secondTaskShouldSwitch: true,
+    validate: ({ firstTask, secondTask, portfolio }) => {
+      assert.ok(hasDestination(firstTask.graph, "杭州"));
+      assert.equal(hasDestination(firstTask.graph, "青岛"), false);
+      assert.ok(hasDestination(secondTask.graph, "青岛"));
+      assert.equal(hasDestination(secondTask.graph, "杭州"), false);
+      assert.equal(hasDestination(secondTask.graph, "一个新任务"), false);
+      assert.ok((secondTask.plan.destination_scope || []).includes("青岛"));
+      assert.equal((secondTask.plan.destination_scope || []).includes("杭州"), false);
+      assert.equal((secondTask.plan.destination_scope || []).includes("一个新任务"), false);
+      assert.ok((secondTask.plan.task_history || []).some((item) => item.task_id === firstTask.plan.task_id));
+      assert.equal(portfolio.trips.length >= 2, true);
+      assert.equal(portfolio.trips.some((trip) => trip.status === "archived"), true);
+      assert.equal(portfolio.trips.some((trip) => trip.destination_scope.includes("青岛")), true);
+    },
+  },
+  {
+    name: "domestic -> international keeps manual concept-edge overrides through later turns",
+    locale: "zh-CN",
+    firstTask: {
+      name: "chengdu_family",
+      turns: [
+        "想带爸妈去成都5天，第一次去，不想太折腾。",
+        "预算每人1万左右。",
+        "酒店离地铁近一点，最好周边吃饭方便。",
+        "宽窄巷子可以看看，但不想每天跑很多点。",
+        "希望至少有一天轻松散步和喝茶。",
+        "不要频繁换酒店。",
+        "晚上早点回，第二天别太累。",
+        "如果天气太热，安排一些室内备选。",
+      ],
+    },
+    secondTask: {
+      name: "osaka_family",
+      turns: [
+        "重新规划一个新任务，想带孩子去大阪和京都7天，整体轻松一点。",
+        "预算总共3万元左右。",
+        "酒店希望交通方便，有电梯，最好儿童友好。",
+        "大阪想住得更集中一点，减少搬运行李。",
+        "每天留出午休或者低强度时段。",
+        "热门景点可以去，但不想排太多队。",
+        "回程前一晚要特别稳，不折腾换酒店。",
+        "如果孩子状态不好，希望有能随时缩减的版本。",
+      ],
+    },
+    secondTaskShouldSwitch: true,
+    afterSecondTaskTurn: ({ turnIndex, graph, manualGraphOverrides }) => {
+      if (turnIndex !== 4) return;
+      return applyManualConceptEdge({
+        graph,
+        manualGraphOverrides,
+        fromKeyPrefix: ["slot:lodging_preference", "slot:lodging"],
+        toKeyPrefix: "slot:goal",
+        type: "constraint",
+      });
+	    },
+	    validate: ({ secondTask }) => {
+	      const fromId = findNodeIdByKeyPrefix(secondTask.graph, ["slot:lodging_preference", "slot:lodging"]);
+	      const toId = findNodeIdByKeyPrefix(secondTask.graph, "slot:goal");
+	      const edge = readEdge(secondTask.graph, fromId, toId);
+	      assert.ok(edge, "manual lodging -> goal edge should remain after later turns");
+      assert.equal(edge?.type, "constraint");
+      assert.equal(secondTask.manualGraphOverrides.edges.some((item) => item.state === "active"), true);
+      assert.ok((secondTask.plan.destination_scope || []).some((dest) => dest === "大阪" || dest === "京都"));
+    },
+  },
+  {
+    name: "international -> international keeps manual motif-link overrides through later turns",
+    locale: "zh-CN",
+    firstTask: {
+      name: "morocco_with_mother",
+      turns: [
+        "想带妈妈第一次去摩洛哥，8天，别太累。",
+        "总预算3万元，语言不太通。",
+        "想去马拉喀什和非斯，卡萨只想做中转。",
+        "酒店不要频繁换，最好靠交通方便一点。",
+        "希望安排里有一些在地体验，但不要太硬核。",
+        "妈妈膝盖一般，楼梯太多不行。",
+        "晚上早点回住处，安全感要强一点。",
+        "如果天气太热，希望能把户外压缩一点。",
+      ],
+    },
+    secondTask: {
+      name: "iberia_with_father",
+      turns: [
+        "重新规划一个新任务，想和父亲去西班牙加葡萄牙10天，慢一点。",
+        "总预算4万元左右。",
+        "里斯本和塞维利亚优先，马德里不是必须。",
+        "父亲膝盖不好，不想爬太多台阶。",
+        "最好不要频繁换酒店，交通接驳要清楚。",
+        "可以保留一点在地散步和看城市生活的时间。",
+        "如果某天太累，要能删掉一两个点而不影响主线。",
+        "回程前留一天轻量安排，别压满。",
+      ],
+    },
+    secondTaskShouldSwitch: true,
+    afterSecondTaskTurn: ({ turnIndex, model }) => {
+      if (turnIndex !== 5) return;
+      return {
+        motifLinks: applyManualMotifLink(model),
+      };
+    },
+    validate: ({ secondTask }) => {
+      assert.equal(
+        secondTask.model.motifLinks.some((link) => link.id === "ml_user_refines" && link.source === "user" && link.type === "refines"),
+        true
+      );
+      assert.equal(
+        secondTask.model.motifLinks.every(
+          (link) =>
+            (secondTask.model.motifs || []).some((motif) => motif.id === link.fromMotifId) &&
+            (secondTask.model.motifs || []).some((motif) => motif.id === link.toMotifId)
+        ),
+        true
+      );
+      assert.equal(hasDestination(secondTask.graph, "摩洛哥"), false);
+      assert.equal(hasDestination(secondTask.graph, "西班牙"), true);
+      assert.equal(hasDestination(secondTask.graph, "葡萄牙"), true);
+    },
+  },
+];
+
+async function runScenario(scenario: ScenarioDefinition): Promise<ScenarioRunResult> {
+  const conversationId = `conv_${scenario.name.replace(/[^a-z0-9]+/gi, "_").toLowerCase()}`;
+  const firstTask = await runTask({
+    conversationId,
+    locale: scenario.locale,
+    task: scenario.firstTask,
+    previousPlan: null,
+    expectTaskSwitch: false,
+  });
+  const secondTask = await runTask({
+    conversationId,
+    locale: scenario.locale,
+    task: scenario.secondTask,
+    previousPlan: firstTask.plan,
+    expectTaskSwitch: scenario.secondTaskShouldSwitch,
+    afterTurn: scenario.afterSecondTaskTurn,
+  });
+  const portfolio = buildPortfolioDocumentState({
+    userId: "user_multi_task_regression",
+    locale: scenario.locale,
+    conversations: [
+      {
+        conversationId,
+        title: scenario.name,
+        travelPlanState: secondTask.plan,
+        updatedAt: new Date("2026-03-07T12:00:00.000Z"),
+      },
+    ],
+  });
+  const out = { firstTask, secondTask, portfolio };
+  scenario.validate?.(out);
+  return out;
+}
+
+async function main() {
+  for (const scenario of scenarios) {
+    await runScenario(scenario);
+    console.log(`PASS ${scenario.name}`);
+  }
+}
+
+main().catch((err) => {
+  console.error(err);
+  process.exit(1);
+});

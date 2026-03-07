@@ -226,6 +226,51 @@ run("country refined into city allocation with transition stop should stay in th
   assert.equal(out.is_task_switch, false);
 });
 
+run("country refined into city priorities with a stopover should stay in the same task in English", () => {
+  const prev = makePlan("Morocco eight-day trip");
+  prev.destinations = ["Morocco"];
+  prev.destination_scope = ["Morocco"];
+  prev.travel_dates_or_duration = "8 days";
+  const out = detectTaskSwitchFromLatestUserTurn({
+    conversationId: "conv_6_en",
+    locale: "en-US",
+    previousTravelPlan: prev,
+    latestUserText: "I mainly want Marrakech and Fes, with Casablanca only as a stopover.",
+  });
+  assert.equal(out.switch_reason_code, "continuous");
+  assert.equal(out.is_task_switch, false);
+});
+
+run("paired broad destinations refined into city priorities should stay in the same task", () => {
+  const prev = makePlan("伊比利亚十天旅行");
+  prev.destinations = ["西班牙", "葡萄牙"];
+  prev.destination_scope = ["西班牙", "葡萄牙"];
+  prev.travel_dates_or_duration = "10天";
+  const out = detectTaskSwitchFromLatestUserTurn({
+    conversationId: "conv_6_pair",
+    locale,
+    previousTravelPlan: prev,
+    latestUserText: "里斯本和塞维利亚优先，马德里不是必须。",
+  });
+  assert.equal(out.switch_reason_code, "continuous");
+  assert.equal(out.is_task_switch, false);
+});
+
+run("paired broad destinations refined into city priorities should stay in the same task in English", () => {
+  const prev = makePlan("Iberia ten-day trip");
+  prev.destinations = ["Spain", "Portugal"];
+  prev.destination_scope = ["Spain", "Portugal"];
+  prev.travel_dates_or_duration = "10 days";
+  const out = detectTaskSwitchFromLatestUserTurn({
+    conversationId: "conv_6_pair_en",
+    locale: "en-US",
+    previousTravelPlan: prev,
+    latestUserText: "Lisbon and Seville first; Madrid is optional.",
+  });
+  assert.equal(out.switch_reason_code, "continuous");
+  assert.equal(out.is_task_switch, false);
+});
+
 run("fresh trip phrasing with city allocation should still switch tasks", () => {
   const prev = makePlan("关西七天旅行");
   prev.destinations = ["关西"];
