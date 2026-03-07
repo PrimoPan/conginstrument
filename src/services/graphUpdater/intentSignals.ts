@@ -27,6 +27,12 @@ import {
 } from "./constraintClassifier.js";
 import { cleanStatement, sentenceParts } from "./text.js";
 import { isEnglishLocale, type AppLocale } from "../../i18n/locale.js";
+import {
+  looksLikeAbstractPlaceText,
+  looksLikeAbstractTravelModeText,
+  looksLikeTaskRestart,
+  looksLikeTripPhaseCueText,
+} from "../../shared/travelSemantics.js";
 
 type BudgetMatch = { value: number; evidence: string; index: number };
 type BudgetDeltaMatch = { delta: number; evidence: string; index: number };
@@ -1683,34 +1689,18 @@ function looksLikeNonPlaceSituationPhrase(raw: string): boolean {
 function looksLikeAbstractTravelModePhrase(raw: string): boolean {
   const original = cleanStatement(raw, 72);
   const normalized = normalizeDestination(raw);
-  const combined = `${original} ${normalized}`.toLowerCase();
-  if (!combined.trim()) return false;
-  if (
-    /(在地体验|当地体验|当地生活|城市生活|生活感|体验感|不要太硬核|太硬核|硬核一点|local experience|local life|city life|street life|daily life|vibe|atmosphere|feel of the city|too hardcore|hardcore)/i.test(
-      combined
-    )
-  ) {
-    return true;
-  }
-  return /(体验|生活|氛围|步调|节奏|experience|life|vibe|atmosphere)$/i.test(normalized) || /(太硬核|hardcore)/i.test(original);
+  return looksLikeAbstractTravelModeText(original) || looksLikeAbstractTravelModeText(normalized);
 }
 
 function looksLikeTaskControlPhrase(raw: string): boolean {
   const original = cleanStatement(raw, 64);
   const normalized = normalizeDestination(raw);
-  const combined = `${original} ${normalized}`.toLowerCase();
-  if (!combined.trim()) return false;
-  return /(重新规划|新任务|下一趟|再规划一趟|重新开始|重开|新的行程|新的旅行|another trip|new task|start over|restart|fresh plan)/i.test(
-    combined
-  );
+  return looksLikeTaskRestart(`${original} ${normalized}`);
 }
 
 function looksLikeTripPhaseCue(raw: string): boolean {
   const text = cleanStatement(raw, 72);
-  if (!text) return false;
-  return /(回程前|返程前|离开前|出发前|临走前|返航前|回家前|departure day|before departure|before leaving|before flying home|last night before|night before departure|return leg|on the way back)/i.test(
-    text
-  );
+  return looksLikeTripPhaseCueText(text);
 }
 
 export function isLikelyDestinationCandidate(x: string): boolean {
@@ -1718,6 +1708,7 @@ export function isLikelyDestinationCandidate(x: string): boolean {
   if (!s) return false;
   if (looksLikeNonPlaceSituationPhrase(x) || looksLikeNonPlaceSituationPhrase(s)) return false;
   if (looksLikeAbstractTravelModePhrase(x) || looksLikeAbstractTravelModePhrase(s)) return false;
+  if (looksLikeAbstractPlaceText(x) || looksLikeAbstractPlaceText(s)) return false;
   if (looksLikeTaskControlPhrase(x) || looksLikeTaskControlPhrase(s)) return false;
   if (looksLikeTripPhaseCue(x) || looksLikeTripPhaseCue(s)) return false;
   if (/(?:^|[\s])(?:是因为|因为|because)(?:[\s]|$)/i.test(String(x || ""))) return false;
@@ -1854,6 +1845,7 @@ function extractDestinationList(text: string): Array<{ city: string; evidence: s
   const push = (raw: string, evidence: string, index: number) => {
     if (looksLikeNonPlaceSituationPhrase(raw)) return;
     if (looksLikeAbstractTravelModePhrase(raw) || looksLikeAbstractTravelModePhrase(evidence)) return;
+    if (looksLikeAbstractPlaceText(raw) || looksLikeAbstractPlaceText(evidence)) return;
     if (looksLikeTaskControlPhrase(raw) || looksLikeTaskControlPhrase(evidence)) return;
     if (looksLikeTripPhaseCue(raw) || looksLikeTripPhaseCue(evidence)) return;
     const expanded = expandCompoundDestinations(raw);
@@ -1861,6 +1853,7 @@ function extractDestinationList(text: string): Array<{ city: string; evidence: s
       for (const city of expanded) {
         if (looksLikeNonPlaceSituationPhrase(city)) continue;
         if (looksLikeAbstractTravelModePhrase(city)) continue;
+        if (looksLikeAbstractPlaceText(city)) continue;
         if (looksLikeTaskControlPhrase(city)) continue;
         if (looksLikeTripPhaseCue(city)) continue;
         out.push({

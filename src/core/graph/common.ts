@@ -12,6 +12,7 @@ import type {
   Strength,
 } from "./types.js";
 import { normalizeConceptType } from "./schemaAdapters.js";
+import { looksLikeBroadDestination } from "../../shared/travelSemantics.js";
 
 export const ALLOW_DELETE = process.env.CI_ALLOW_DELETE !== "0";
 
@@ -63,9 +64,7 @@ function canonicalizeStructuredPlace(raw: string): string {
     if (
       right &&
       (left === right ||
-        /(中国|美国|英国|法国|德国|意大利|西班牙|葡萄牙|荷兰|比利时|瑞士|奥地利|日本|韩国|新加坡|泰国|马来西亚|印度尼西亚|澳大利亚|加拿大|新西兰|阿联酋|欧洲|亚洲|非洲|北美|南美|中东)/i.test(
-          left
-        ))
+        looksLikeBroadDestination(left))
     ) {
       s = right;
     }
