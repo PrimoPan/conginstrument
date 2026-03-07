@@ -132,6 +132,89 @@ function isLodgingFocusRefinement(text: string): boolean {
   return /(多住一点|住久一点|多待一点|多留一点|重点住|优先住|主要住)/.test(String(text || ""));
 }
 
+function hasStructuredDestinationProgress(signals: IntentSignals): boolean {
+  const destinations = (signals.destinations || [])
+    .map((x) => normalizeDestination(x))
+    .filter((x) => x && isLikelyDestinationCandidate(x));
+  if (destinations.length) return true;
+  if (
+    (signals.cityDurations || []).some((seg) => {
+      const city = normalizeDestination(seg?.city || "");
+      return !!city && isLikelyDestinationCandidate(city);
+    })
+  ) {
+    return true;
+  }
+  if (
+    (signals.subLocations || []).some((seg) => {
+      const parentCity = normalizeDestination(seg?.parentCity || "");
+      return !!parentCity && isLikelyDestinationCandidate(parentCity);
+    })
+  ) {
+    return true;
+  }
+  const criticalCity = normalizeDestination(signals.criticalPresentation?.city || "");
+  return !!criticalCity && isLikelyDestinationCandidate(criticalCity);
+}
+
+function hasExplicitDestinationUpdateCue(userText: string, signals: IntentSignals): boolean {
+  const destinations = (signals.destinations || [])
+    .map((x) => normalizeDestination(x))
+    .filter((x) => x && isLikelyDestinationCandidate(x));
+  if (destinations.length) return true;
+  const primary = normalizeDestination(signals.destination || "");
+  if (primary && isLikelyDestinationCandidate(primary)) return true;
+
+  const text = cleanStatement(userText, 240);
+  if (!text) return false;
+  return (
+    /(?:目的地|改成|改为|改到|换成|换到|换去|换成去|先按|就按|那就按|先以|想去|想安排|安排|规划|计划|去|到|前往|飞到|抵达)[^\n，。,；;]{0,20}[A-Za-z\u4e00-\u9fff]{2,20}/i.test(
+      text
+    ) ||
+    /(?:这次|这趟|这轮)[^\n，。,；;]{0,8}[A-Za-z\u4e00-\u9fff]{2,20}/i.test(text)
+  );
+}
+
+function preserveGraphDestinationScope(params: {
+  graph: CDG;
+  userText: string;
+  signals: IntentSignals;
+  latestSignals: IntentSignals;
+}): IntentSignals {
+  const graphDestinations = readGraphDestinationSlots(params.graph);
+  if (!graphDestinations.length) return params.signals;
+  if (hasExplicitDestinationUpdateCue(params.userText, params.latestSignals)) return params.signals;
+  if (hasStructuredDestinationProgress(params.latestSignals)) return params.signals;
+
+  const currentDestinations = Array.from(
+    new Set(
+      (params.signals.destinations || [])
+        .map((x) => normalizeDestination(x))
+        .filter((x) => x && isLikelyDestinationCandidate(x))
+    )
+  ).slice(0, 8);
+  const polluted = currentDestinations.some((city) => !graphDestinations.includes(city));
+  if (currentDestinations.length && !polluted) return params.signals;
+
+  const evidenceByCity = new Map<string, string>();
+  (params.signals.destinations || []).forEach((city, index) => {
+    const normalized = normalizeDestination(city);
+    const evidence = cleanStatement(
+      params.signals.destinationEvidences?.[index] || params.signals.destinationEvidence || city || "",
+      60
+    );
+    if (normalized && evidence && !evidenceByCity.has(normalized)) evidenceByCity.set(normalized, evidence);
+  });
+
+  return {
+    ...params.signals,
+    destinations: graphDestinations.slice(0, 8),
+    destination: graphDestinations[0],
+    destinationEvidences: graphDestinations.slice(0, 8).map((city) => evidenceByCity.get(city) || city),
+    destinationEvidence: evidenceByCity.get(graphDestinations[0]) || graphDestinations[0],
+  };
+}
+
 function mergeRemovedDestinations(...lists: Array<string[] | undefined>): string[] | undefined {
   const seen = new Set<string>();
   const merged: string[] = [];
@@ -369,6 +452,13 @@ async function buildSignals(params: {
       }
     }
   }
+
+  signals = preserveGraphDestinationScope({
+    graph: params.graph,
+    userText: params.userText,
+    signals,
+    latestSignals,
+  });
 
   const budgetLedger = buildBudgetLedgerFromUserTurns(
     [...historyUserTexts, params.userText].map((text, i) => ({

@@ -1690,6 +1690,13 @@ export function isLikelyDestinationCandidate(x: string): boolean {
     return false;
   }
   if (
+    /(?:想住|希望住|住在|住的区域|住的地方|酒店|住宿|民宿).{0,14}(?:安全|安静|方便|便宜|舒适|舒服|治安|人少|市中心|中心区域)/i.test(
+      s
+    )
+  ) {
+    return false;
+  }
+  if (
     /(安全|安静|方便|便宜|舒适|舒服|热闹|清净|治安|人少|离.*近|靠近|附近).{0,10}(地方|位置|区域)/i.test(s)
   ) {
     return false;
@@ -1833,13 +1840,17 @@ function extractDestinationList(text: string): Array<{ city: string; evidence: s
     push(m[2], m[2], idx + String(m[1]).length + 1);
   }
 
-  const preferencePairRe =
-    /(?:想去|想安排|安排|规划|计划|优先|先以|以|先按|按)\s*([^\s，。,；;！!？?\d]{2,16})\s*(?:和|与|及|加|、|,|，)\s*([^\s，。,；;！!？?\d]{2,16})(?=[0-9一二三四五六七八九十两]{0,3}\s*(?:天|晚|夜)?|[，。,；;！!？?\s]|$)/gi;
-  for (const m of scanText.matchAll(preferencePairRe)) {
-    if (!m?.[1] || !m?.[2]) continue;
-    const idx = Number(m.index) || 0;
-    push(m[1], m[0] || m[1], idx);
-    push(m[2], m[0] || m[2], idx + String(m[1]).length + 1);
+  const preferencePairRes = [
+    /(?:想去|想安排|安排|规划|计划|优先|先以|先按)\s*([^\s，。,；;！!？?\d]{2,16})\s*(?:和|与|及|加|、|,|，)\s*([^\s，。,；;！!？?\d]{2,16})(?=[0-9一二三四五六七八九十两]{0,3}\s*(?:天|晚|夜)?|[，。,；;！!？?\s]|$)/gi,
+    /(?:^|[，。、；;！!？?\s])(?:以|按)\s*([^\s，。,；;！!？?\d]{2,16})\s*(?:和|与|及|加|、|,|，)\s*([^\s，。,；;！!？?\d]{2,16})(?=[0-9一二三四五六七八九十两]{0,3}\s*(?:天|晚|夜)?|[，。,；;！!？?\s]|$)/gi,
+  ];
+  for (const preferencePairRe of preferencePairRes) {
+    for (const m of scanText.matchAll(preferencePairRe)) {
+      if (!m?.[1] || !m?.[2]) continue;
+      const idx = Number(m.index) || 0;
+      push(m[1], m[0] || m[1], idx);
+      push(m[2], m[0] || m[2], idx + String(m[1]).length + 1);
+    }
   }
 
   const trailingPreferencePairRe =
@@ -2468,6 +2479,54 @@ function constraintClauses(userText: string): string[] {
   return out.length ? out : sentenceParts(userText);
 }
 
+function stripLeadingDestinationContext(raw: string, destinationHints?: string[]): string {
+  let text = cleanStatement(raw, 160);
+  if (!text) return text;
+  const hints = Array.from(
+    new Set(
+      (destinationHints || [])
+        .map((x) => normalizeDestination(x))
+        .filter((x) => x && isLikelyDestinationCandidate(x))
+    )
+  )
+    .slice(0, 8)
+    .sort((a, b) => b.length - a.length);
+
+  for (const city of hints) {
+    const cityEsc = escapeRegExp(city);
+    const next = text
+      .replace(
+        new RegExp(
+          `^(?:在|于|到|去|按|先按|先以|就按|那就按)?\\s*${cityEsc}\\s*(?:这次|那次|这趟|那趟|这里|那边|那边的话)?\\s*`,
+          "i"
+        ),
+        ""
+      )
+      .trim();
+    if (next && next !== text) {
+      text = next;
+      break;
+    }
+  }
+
+  text = text
+    .replace(/^(?:也还是|还是|依然|仍然|继续|这次|那次|这趟|那趟|不过|但)\s*/i, "")
+    .trim();
+  const heuristicLead = text.match(
+    /^([A-Za-z\u4e00-\u9fff]{2,8})(?=(?:这次|那次|这趟|那趟|也还是|还是|想|希望|最好|尽量|不想|不要|别|更偏))/i
+  );
+  if (heuristicLead?.[1]) {
+    const candidate = normalizeDestination(heuristicLead[1]);
+    const remainder = cleanStatement(text.slice(String(heuristicLead[1]).length), 140);
+    if (candidate && isLikelyDestinationCandidate(candidate) && remainder) {
+      text = remainder
+        .replace(/^(?:也还是|还是|依然|仍然|继续|这次|那次|这趟|那趟|不过|但)\s*/i, "")
+        .trim();
+    }
+  }
+  return text || cleanStatement(raw, 160);
+}
+
 export function pickHealthClause(userText: string): string | undefined {
   const parts = constraintClauses(userText);
   const hit = parts.find((x) => MEDICAL_HEALTH_RE.test(x));
@@ -3023,6 +3082,19 @@ export function extractIntentSignals(userText: string, opts?: { historyMode?: bo
       if (!out.destinationEvidence) out.destinationEvidence = out.destinationEvidences?.[0] || out.destinations[0];
     }
   }
+  const clauseDestinationHints = Array.from(
+    new Set(
+      [out.destination || "", ...(out.destinations || [])]
+        .map((x) => normalizeDestination(x))
+        .filter((x) => x && isLikelyDestinationCandidate(x))
+    )
+  ).slice(0, 8);
+  const normalizedConstraintClauses = constraintClauses(text)
+    .map((x) => stripLeadingDestinationContext(x, clauseDestinationHints))
+    .filter(Boolean);
+  const normalizedSentenceParts = sentenceParts(text)
+    .map((x) => stripLeadingDestinationContext(x, clauseDestinationHints))
+    .filter(Boolean);
 
   const duration = inferDurationFromText(text, { historyMode: !!opts?.historyMode, locale: opts?.locale });
   if (duration?.days) {
@@ -3240,7 +3312,7 @@ export function extractIntentSignals(userText: string, opts?: { historyMode?: bo
       importance: clampImportance(params.importance, params.hard ? 0.84 : 0.76),
     });
   };
-  for (const part of constraintClauses(text)) {
+  for (const part of normalizedConstraintClauses) {
     const s = cleanStatement(part, 120);
     if (!s) continue;
     if (/^(预算(?:上限)?|总行程时长|行程时长|城市时长|停留时长|同行人数|目的地)[:：]/.test(s)) continue;
@@ -3340,7 +3412,7 @@ export function extractIntentSignals(userText: string, opts?: { historyMode?: bo
   }
   out.genericConstraints = mergeGenericConstraints(undefined, genericConstraints);
 
-  const prefClause = sentenceParts(text).map((x) => normalizePreferenceStatement(x, opts?.locale)).find(Boolean);
+  const prefClause = normalizedSentenceParts.map((x) => normalizePreferenceStatement(x, opts?.locale)).find(Boolean);
   if (prefClause && !revokedPreferenceAxes.has("preference:scenic")) {
     out.scenicPreference = prefClause.statement;
     out.scenicPreferenceHard = prefClause.hard;
@@ -3348,7 +3420,7 @@ export function extractIntentSignals(userText: string, opts?: { historyMode?: bo
     out.scenicPreferenceImportance = prefClause.hard ? 0.8 : 0.68;
   }
 
-  const lodgingClause = constraintClauses(text)
+  const lodgingClause = normalizedConstraintClauses
     .map((x) => ({
       normalized: normalizeLodgingPreferenceStatement(x, opts?.locale),
       priority: lodgingPreferencePriority(x),
@@ -3357,14 +3429,46 @@ export function extractIntentSignals(userText: string, opts?: { historyMode?: bo
     .sort((a, b) => b.priority - a.priority)
     .map((x) => x.normalized)
     .find(Boolean);
-  if (lodgingClause && !revokedPreferenceAxes.has("preference:lodging")) {
-    out.lodgingPreference = lodgingClause.statement;
-    out.lodgingPreferenceHard = lodgingClause.hard;
-    out.lodgingPreferenceEvidence = lodgingClause.evidence;
-    out.lodgingPreferenceImportance = lodgingClause.hard ? 0.82 : 0.66;
+  const lodgingStrategyFromGeneric = genericConstraints
+    .map((x) => {
+      const text = String(x.text || "");
+      let priority = 0;
+      if (TRANSPORT_CONVENIENCE_RE.test(text)) priority = 5;
+      else if (SAFETY_STRATEGY_RE.test(text)) priority = 4;
+      else if (x.kind === "logistics") priority = 3;
+      else if (x.kind === "safety") priority = 2;
+      else if (x.kind === "mobility") priority = 1;
+      return { item: x, priority };
+    })
+    .filter((x) => x.priority > 0)
+    .sort(
+      (a, b) =>
+        b.priority - a.priority ||
+        clampImportance(b.item.importance, 0.66) - clampImportance(a.item.importance, 0.66)
+    )
+    .map((x) => x.item)
+    .find(Boolean);
+  if (!revokedPreferenceAxes.has("preference:lodging")) {
+    if (lodgingClause) {
+      out.lodgingPreference = lodgingClause.statement;
+      out.lodgingPreferenceHard = lodgingClause.hard;
+      out.lodgingPreferenceEvidence = lodgingClause.evidence;
+      out.lodgingPreferenceImportance = lodgingClause.hard ? 0.82 : 0.66;
+    } else if (lodgingStrategyFromGeneric) {
+      out.lodgingPreference = cleanStatement(lodgingStrategyFromGeneric.text, 72);
+      out.lodgingPreferenceHard = !!lodgingStrategyFromGeneric.hard;
+      out.lodgingPreferenceEvidence = cleanStatement(
+        lodgingStrategyFromGeneric.evidence || lodgingStrategyFromGeneric.text,
+        60
+      );
+      out.lodgingPreferenceImportance = clampImportance(
+        lodgingStrategyFromGeneric.importance,
+        lodgingStrategyFromGeneric.hard ? 0.8 : 0.66
+      );
+    }
   }
 
-  const activityClause = constraintClauses(text).map((x) => normalizeActivityPreferenceStatement(x, opts?.locale)).find(Boolean);
+  const activityClause = normalizedConstraintClauses.map((x) => normalizeActivityPreferenceStatement(x, opts?.locale)).find(Boolean);
   if (activityClause && !revokedPreferenceAxes.has("preference:activity")) {
     out.activityPreference = activityClause.statement;
     out.activityPreferenceEvidence = activityClause.evidence;

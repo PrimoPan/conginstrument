@@ -3284,6 +3284,7 @@ convRouter.post("/:id/motif-library/revise", asyncRoute(async (req: AuthedReques
   const conv = await collections.conversations.findOne({ _id: oid, userId });
   if (!conv) return res.status(404).json({ error: "conversation not found" });
   const locale = normalizeLocale((conv as any).locale);
+  const taskLifecycle = readTaskLifecycle((conv as any).taskLifecycle);
 
   const motifTypeId = cleanInput(req.body?.motif_type_id, 180);
   const choiceRaw = cleanInput(req.body?.choice, 24).toLowerCase();

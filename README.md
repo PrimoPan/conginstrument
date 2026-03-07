@@ -540,6 +540,8 @@ data: {"assistantText":"...","graphPatch":{"ops":[]},"graph":{"id":"65f1...","ve
   - `trip` 表示整趟任务都可沿用；
   - `local` 表示只在当前子问题里参考。
 - 用户手动停用 motif 时写入 `disabled`；`cancelled` 保留给被覆盖的历史 motif、系统剪枝、或不再成立的旧规则。
+- 多轮 refinement turn 会优先保留图中已确认的 destination scope；如果本轮只是补充节奏、住宿、交通等约束，而没有明确目的地更新 cue，就不会把这些补充句误提升成新的目的地。
+- lodging / safety / transit convenience 这类细化约束在 `intentSignals` 阶段会被剥离掉前置目的地脚手架（如“大阪这次也还是…”），避免把 refinement 句错误写成 destination 或粗糙 generic constraint。
 
 ---
 

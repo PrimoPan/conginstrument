@@ -506,12 +506,89 @@ const cases: Case[] = [
       );
       const generic = merged.genericConstraints || [];
       assert.equal(
-        generic.some((x) => x.kind === "mobility" && /不想太赶|低强度|少折腾/i.test(String(x.text || ""))),
+        /低强度|体力负担|不想太赶/i.test(String(merged.activityPreference || "")) ||
+          generic.some((x) => x.kind === "mobility" && /不想太赶|低强度|少折腾/i.test(String(x.text || ""))),
         true
       );
       assert.equal(
         generic.some((x) => x.kind === "logistics" && /少换酒店|换酒店|hotel changes/i.test(String(x.text || ""))),
         true
+      );
+    },
+  },
+  {
+    name: "leading destination scaffolding should be stripped from refinement preference clauses",
+    run: () => {
+      const signals = extractIntentSignals("大阪这次也还是想轻松一点，但希望比上次更偏城市散步。");
+      assert.match(String(signals.activityPreference || ""), /低强度|体力负担/i);
+      assert.equal(String(signals.activityPreferenceEvidence || "").includes("大阪"), false);
+      assert.equal(
+        (signals.genericConstraints || []).some((x) => /大阪这次|大阪/.test(String(x.text || ""))),
+        false
+      );
+    },
+  },
+  {
+    name: "graph destination should stay stable during refinement turns without explicit destination change",
+    run: async () => {
+      const baseGraph = {
+        id: "g_osaka_refinement",
+        version: 1,
+        nodes: [
+          {
+            id: "n_goal",
+            type: "belief",
+            layer: "intent",
+            statement: "意图：去大阪旅游",
+            status: "confirmed",
+            confidence: 0.9,
+            importance: 0.88,
+            key: "slot:goal",
+            locked: false,
+          },
+          {
+            id: "n_dest_osaka",
+            type: "factual_assertion",
+            layer: "requirement",
+            statement: "目的地: 大阪",
+            status: "confirmed",
+            confidence: 0.92,
+            importance: 0.9,
+            key: "slot:destination:大阪",
+            locked: false,
+          },
+        ],
+        edges: [
+          {
+            id: "e_dest_goal",
+            from: "n_dest_osaka",
+            to: "n_goal",
+            type: "enable",
+            confidence: 0.86,
+          },
+        ],
+      } as any;
+
+      const patch = await generateGraphPatch({
+        graph: baseGraph,
+        userText: "也还是想轻松一点，但希望比上次更偏城市散步。",
+        recentTurns: [
+          { role: "user", content: "这次先按大阪来。" },
+          { role: "assistant", content: "可以，我们先按大阪来聊。" },
+        ],
+        assistantText: "",
+        locale: "zh-CN",
+      });
+      const applied = applyPatchWithGuards(baseGraph, patch).newGraph;
+      const destinationKeys = (applied.nodes || [])
+        .map((node) => String((node as any)?.key || ""))
+        .filter((key) => key.startsWith("slot:destination:"));
+      assert.deepEqual(destinationKeys, ["slot:destination:大阪"]);
+      const goalNode = (applied.nodes || []).find((node) => String((node as any)?.key || "") === "slot:goal");
+      assert.match(String(goalNode?.statement || ""), /大阪/);
+      assert.equal(
+        /轻松一点旅游|城市散步旅游|大阪和也还是想轻松一点|大阪和但希望比上次更偏城市散步/.test(String(goalNode?.statement || "")),
+        false
       );
     },
   },

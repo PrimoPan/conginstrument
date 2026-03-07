@@ -502,7 +502,7 @@ function inferLimitingKind(rawKind: string | undefined, text: string): string {
   if (/宗教|礼拜|祷告|斋月|安息日|religion|prayer|ramadan|sabbath/i.test(s)) return "religion";
   if (/签证|护照|入境|海关|法律|visa|passport|immigration|permit|legal/i.test(s)) return "legal";
   if (
-    /轮椅|无障碍|体力|行动不便|不能久走|不想太累|不要太累|不太折腾|不要太折腾|少折腾|低强度|慢节奏|中老年|老人|老年|mobility|wheelchair|accessibility|low[-\s]?hassle|low[-\s]?intensity/i.test(
+    /轮椅|无障碍|体力|行动不便|不能久走|不想太累|不要太累|不想太折腾|不太折腾|不要太折腾|少折腾|低强度|慢节奏|中老年|老人|老年|mobility|wheelchair|accessibility|low[-\s]?hassle|low[-\s]?intensity/i.test(
       s
     )
   ) {
