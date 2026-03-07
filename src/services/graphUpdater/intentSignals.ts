@@ -12,6 +12,7 @@ import {
   LANGUAGE_CONSTRAINT_RE,
   LOW_HASSLE_TRAVEL_RE,
   MEDICAL_HEALTH_RE,
+  MINIMIZE_HOTEL_SWITCH_RE,
   NATURE_TOPIC_RE,
   NON_PLACE_TOKEN_RE,
   PLACE_STOPWORD_RE,
@@ -2270,6 +2271,8 @@ export function normalizeLodgingPreferenceStatement(raw: string, locale?: AppLoc
   const transportConvenience =
     TRANSPORT_CONVENIENCE_RE.test(s) ||
     /交通方便|交通便利|离地铁近|靠近地铁|地铁站附近|步行可达|少换乘|换乘少|出行方便/i.test(s);
+  const minimizeHotelSwitch = MINIMIZE_HOTEL_SWITCH_RE.test(s);
+  const accessibilitySupport = /电梯|无障碍|少爬楼|低楼层|靠电梯|elevator|lift|accessible/i.test(s);
   const quietBalance =
     /安静|清净|不吵|宁静/i.test(s) && /不要太封闭|别太封闭|不要封闭|不封闭|别太偏|不要太偏/i.test(s);
 
@@ -2314,6 +2317,20 @@ export function normalizeLodgingPreferenceStatement(raw: string, locale?: AppLoc
       evidence: s,
     };
   }
+  if (minimizeHotelSwitch) {
+    return {
+      statement: en ? "Lodging preference: minimize hotel changes" : "住宿偏好：尽量少换酒店",
+      hard,
+      evidence: s,
+    };
+  }
+  if (accessibilitySupport) {
+    return {
+      statement: en ? "Lodging preference: prioritize places with elevator or accessibility support" : "住宿偏好：优先有电梯或无障碍支持",
+      hard,
+      evidence: s,
+    };
+  }
   if (quietBalance) {
     return {
       statement: en
@@ -2330,7 +2347,20 @@ export function normalizeLodgingPreferenceStatement(raw: string, locale?: AppLoc
   };
 }
 
-function normalizeActivityPreferenceStatement(raw: string, locale?: AppLocale) {
+function lodgingPreferencePriority(raw: string): number {
+  const s = cleanStatement(raw, 160);
+  if (!s) return 0;
+  if (TRANSPORT_CONVENIENCE_RE.test(s) || /交通方便|交通便利|离地铁近|靠近地铁|地铁站附近|步行可达|少换乘|换乘少|出行方便/i.test(s)) {
+    return 5;
+  }
+  if (/电梯|无障碍|少爬楼|低楼层|靠电梯|elevator|lift|accessible/i.test(s)) return 4;
+  if (SAFETY_STRATEGY_RE.test(s) || /安全区域|治安更好|更安全|市中心|中心区域|核心区/i.test(s)) return 3;
+  if (MINIMIZE_HOTEL_SWITCH_RE.test(s)) return 2;
+  if (/安静|清净|不吵|宁静/i.test(s)) return 1;
+  return 0;
+}
+
+export function normalizeActivityPreferenceStatement(raw: string, locale?: AppLocale) {
   const s = cleanStatement(raw, 180);
   if (!s) return null;
   const hasSports = /球迷|看球|观赛|比赛|球赛|主场|客场|德比|门票|球票|足球|篮球|赛事/i.test(s);
@@ -2340,7 +2370,7 @@ function normalizeActivityPreferenceStatement(raw: string, locale?: AppLocale) {
   if (
     !HARD_REQUIRE_RE.test(s) &&
     !HARD_CONSTRAINT_RE.test(s) &&
-    !/喜欢|偏好|热爱|粉丝|球迷|想看|一定要|必须|务必|绝对|希望|尽量|减少|选择|采用|低强度|轻松|避免|不要|不能|不宜/i.test(
+    !/喜欢|偏好|热爱|粉丝|球迷|想看|一定要|必须|务必|绝对|希望|尽量|减少|选择|采用|低强度|轻松|避免|不要|不能|不宜|不想太赶|别太赶|不要太赶|节奏别太赶|行程别太赶/i.test(
       s
     )
   ) {
@@ -2409,7 +2439,7 @@ function constraintClauses(userText: string): string[] {
   const out: string[] = [];
   const seen = new Set<string>();
   for (const part of sentenceParts(userText)) {
-    for (const raw of String(part || "").split(/[，,、]/)) {
+    for (const raw of String(part || "").split(/[，,、；;]/)) {
       const clause = cleanStatement(raw, 120);
       if (!clause || seen.has(clause)) continue;
       seen.add(clause);
@@ -3202,6 +3232,7 @@ export function extractIntentSignals(userText: string, opts?: { historyMode?: bo
       hasConstraintDeclarationCue(s) ||
       hasExplicitConstraintNegationCue(s) ||
       LOW_HASSLE_TRAVEL_RE.test(s) ||
+      MINIMIZE_HOTEL_SWITCH_RE.test(s) ||
       SAFETY_STRATEGY_RE.test(s) ||
       TRANSPORT_CONVENIENCE_RE.test(s) ||
       HEALTH_STRATEGY_DIET_RE.test(s) ||
@@ -3298,7 +3329,15 @@ export function extractIntentSignals(userText: string, opts?: { historyMode?: bo
     out.scenicPreferenceImportance = prefClause.hard ? 0.8 : 0.68;
   }
 
-  const lodgingClause = sentenceParts(text).map((x) => normalizeLodgingPreferenceStatement(x, opts?.locale)).find(Boolean);
+  const lodgingClause = constraintClauses(text)
+    .map((x) => ({
+      normalized: normalizeLodgingPreferenceStatement(x, opts?.locale),
+      priority: lodgingPreferencePriority(x),
+    }))
+    .filter((x): x is { normalized: NonNullable<ReturnType<typeof normalizeLodgingPreferenceStatement>>; priority: number } => !!x.normalized)
+    .sort((a, b) => b.priority - a.priority)
+    .map((x) => x.normalized)
+    .find(Boolean);
   if (lodgingClause && !revokedPreferenceAxes.has("preference:lodging")) {
     out.lodgingPreference = lodgingClause.statement;
     out.lodgingPreferenceHard = lodgingClause.hard;
@@ -3306,7 +3345,7 @@ export function extractIntentSignals(userText: string, opts?: { historyMode?: bo
     out.lodgingPreferenceImportance = lodgingClause.hard ? 0.82 : 0.66;
   }
 
-  const activityClause = sentenceParts(text).map((x) => normalizeActivityPreferenceStatement(x, opts?.locale)).find(Boolean);
+  const activityClause = constraintClauses(text).map((x) => normalizeActivityPreferenceStatement(x, opts?.locale)).find(Boolean);
   if (activityClause && !revokedPreferenceAxes.has("preference:activity")) {
     out.activityPreference = activityClause.statement;
     out.activityPreferenceEvidence = activityClause.evidence;

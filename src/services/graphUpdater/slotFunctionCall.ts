@@ -3,10 +3,13 @@ import { cleanStatement } from "./text.js";
 import {
   type IntentSignals,
   isLikelyDestinationCandidate,
+  normalizeActivityPreferenceStatement,
   normalizeDestination,
+  normalizeLodgingPreferenceStatement,
 } from "./intentSignals.js";
 import {
   LOW_HASSLE_TRAVEL_RE,
+  MINIMIZE_HOTEL_SWITCH_RE,
   SAFETY_STRATEGY_RE,
   TRANSPORT_CONVENIENCE_RE,
   HEALTH_STRATEGY_ACTIVITY_RE,
@@ -170,6 +173,27 @@ function formatCriticalEvidence(locale: AppLocale | undefined, reason: string, d
   return isEnglishLocale(locale) ? `${reason} for ${days} days` : `${reason}${days}天`;
 }
 
+function splitPreferenceClauses(raw: string): string[] {
+  return cleanStatement(raw || "", 220)
+    .split(/[，,、；;]/)
+    .map((x) => cleanStatement(x, 80))
+    .filter(Boolean)
+    .slice(0, 8);
+}
+
+function lodgingPreferencePriority(raw: string): number {
+  const s = cleanStatement(raw || "", 160);
+  if (!s) return 0;
+  if (TRANSPORT_CONVENIENCE_RE.test(s) || /交通方便|交通便利|离地铁近|靠近地铁|地铁站附近|步行可达|少换乘|换乘少|出行方便/i.test(s)) {
+    return 5;
+  }
+  if (/电梯|无障碍|少爬楼|低楼层|靠电梯|elevator|lift|accessible/i.test(s)) return 4;
+  if (SAFETY_STRATEGY_RE.test(s) || /安全区域|治安更好|更安全|市中心|中心区域|核心区/i.test(s)) return 3;
+  if (MINIMIZE_HOTEL_SWITCH_RE.test(s)) return 2;
+  if (/安静|清净|不吵|宁静/i.test(s)) return 1;
+  return 0;
+}
+
 function pickTopCritical(
   list: NonNullable<SlotExtractionResult["critical_days"]>,
   locale?: AppLocale
@@ -206,7 +230,7 @@ function pickTopCritical(
   };
 }
 
-function slotsToSignals(slots: SlotExtractionResult, locale?: AppLocale): IntentSignals {
+export function slotsToSignals(slots: SlotExtractionResult, locale?: AppLocale): IntentSignals {
   const out: IntentSignals = {};
   const subLocationChildToParent = new Map<string, string>();
   const subLocationDedup = new Set<string>();
@@ -531,6 +555,30 @@ function slotsToSignals(slots: SlotExtractionResult, locale?: AppLocale): Intent
     out.genericConstraints = genericClassified.slice(0, 6);
   }
 
+  const pushDerivedConstraintFromPreference = (params: {
+    text: string;
+    evidence: string;
+    kind: GenericConstraintKind;
+    hard?: boolean;
+    importance?: number;
+  }) => {
+    const next = dedupeClassifiedConstraints([
+      ...(out.genericConstraints || []),
+      {
+        text: cleanStatement(params.text, 96),
+        evidence: cleanStatement(params.evidence || params.text, 60),
+        kind: params.kind,
+        hard: !!params.hard,
+        severity:
+          params.kind === "safety" || params.kind === "mobility" || params.kind === "diet" || params.kind === "religion" || params.kind === "legal"
+            ? "high"
+            : "medium",
+        importance: clampImportance(params.importance, params.hard ? 0.82 : 0.72),
+      },
+    ]);
+    if (next.length) out.genericConstraints = next.slice(0, 6);
+  };
+
   const hasHealthConstraint = !!cleanStatement(out.healthConstraint || "", 120);
   if (hasHealthConstraint) {
     const activityFromGeneric = genericClassified.find((x) =>
@@ -637,29 +685,94 @@ function slotsToSignals(slots: SlotExtractionResult, locale?: AppLocale): Intent
   }
 
   if (slots.activity_preference?.text) {
-    out.activityPreference = cleanStatement(slots.activity_preference.text, 64);
-    out.activityPreferenceEvidence = cleanStatement(
-      slots.activity_preference.evidence || slots.activity_preference.text,
-      60
-    );
-    out.activityPreferenceHard = !!slots.activity_preference.hard;
-    out.activityPreferenceImportance = clampImportance(
-      slots.activity_preference.importance,
-      slots.activity_preference.hard ? 0.84 : 0.7
-    );
+    const clauses = splitPreferenceClauses(slots.activity_preference.text);
+    const normalized = clauses.map((x) => normalizeActivityPreferenceStatement(x, locale)).find(Boolean);
+    if (normalized) {
+      out.activityPreference = cleanStatement(normalized.statement, 64);
+      out.activityPreferenceEvidence = cleanStatement(normalized.evidence || slots.activity_preference.text, 60);
+      out.activityPreferenceHard = !!slots.activity_preference.hard || !!normalized.hard;
+      out.activityPreferenceImportance = clampImportance(
+        slots.activity_preference.importance,
+        out.activityPreferenceHard ? 0.84 : 0.7
+      );
+    } else {
+      out.activityPreference = cleanStatement(slots.activity_preference.text, 64);
+      out.activityPreferenceEvidence = cleanStatement(
+        slots.activity_preference.evidence || slots.activity_preference.text,
+        60
+      );
+      out.activityPreferenceHard = !!slots.activity_preference.hard;
+      out.activityPreferenceImportance = clampImportance(
+        slots.activity_preference.importance,
+        slots.activity_preference.hard ? 0.84 : 0.7
+      );
+    }
+    const hotelSwitchClause = clauses.find((x) => MINIMIZE_HOTEL_SWITCH_RE.test(x));
+    if (hotelSwitchClause) {
+      pushDerivedConstraintFromPreference({
+        text: isEnglishLocale(locale) ? "Minimize hotel changes" : "尽量少换酒店",
+        evidence: hotelSwitchClause,
+        kind: "logistics",
+        hard: !!slots.activity_preference.hard,
+        importance: slots.activity_preference.importance,
+      });
+    }
   }
 
   if (slots.lodging_preference?.text) {
-    out.lodgingPreference = cleanStatement(slots.lodging_preference.text, 64);
-    out.lodgingPreferenceEvidence = cleanStatement(
-      slots.lodging_preference.evidence || slots.lodging_preference.text,
-      60
-    );
-    out.lodgingPreferenceHard = !!slots.lodging_preference.hard;
-    out.lodgingPreferenceImportance = clampImportance(
-      slots.lodging_preference.importance,
-      slots.lodging_preference.hard ? 0.82 : 0.66
-    );
+    const clauses = splitPreferenceClauses(slots.lodging_preference.text);
+    const normalized = clauses
+      .map((x) => ({
+        normalized: normalizeLodgingPreferenceStatement(x, locale),
+        priority: lodgingPreferencePriority(x),
+      }))
+      .filter((x): x is { normalized: NonNullable<ReturnType<typeof normalizeLodgingPreferenceStatement>>; priority: number } => !!x.normalized)
+      .sort((a, b) => b.priority - a.priority)
+      .map((x) => x.normalized)
+      .find(Boolean);
+    if (normalized) {
+      out.lodgingPreference = cleanStatement(normalized.statement, 64);
+      out.lodgingPreferenceEvidence = cleanStatement(normalized.evidence || slots.lodging_preference.text, 60);
+      out.lodgingPreferenceHard = !!slots.lodging_preference.hard || !!normalized.hard;
+      out.lodgingPreferenceImportance = clampImportance(
+        slots.lodging_preference.importance,
+        out.lodgingPreferenceHard ? 0.82 : 0.66
+      );
+    } else {
+      out.lodgingPreference = cleanStatement(slots.lodging_preference.text, 64);
+      out.lodgingPreferenceEvidence = cleanStatement(
+        slots.lodging_preference.evidence || slots.lodging_preference.text,
+        60
+      );
+      out.lodgingPreferenceHard = !!slots.lodging_preference.hard;
+      out.lodgingPreferenceImportance = clampImportance(
+        slots.lodging_preference.importance,
+        slots.lodging_preference.hard ? 0.82 : 0.66
+      );
+    }
+    const hotelSwitchClause = clauses.find((x) => MINIMIZE_HOTEL_SWITCH_RE.test(x));
+    if (hotelSwitchClause) {
+      pushDerivedConstraintFromPreference({
+        text: isEnglishLocale(locale) ? "Minimize hotel changes" : "尽量少换酒店",
+        evidence: hotelSwitchClause,
+        kind: "logistics",
+        hard: !!slots.lodging_preference.hard,
+        importance: slots.lodging_preference.importance,
+      });
+    }
+    const lowHassleClause = clauses.find((x) => LOW_HASSLE_TRAVEL_RE.test(x));
+    if (lowHassleClause && !out.activityPreference) {
+      const normalizedActivity = normalizeActivityPreferenceStatement(lowHassleClause, locale);
+      if (normalizedActivity) {
+        out.activityPreference = cleanStatement(normalizedActivity.statement, 64);
+        out.activityPreferenceEvidence = cleanStatement(normalizedActivity.evidence, 60);
+        out.activityPreferenceHard = !!normalizedActivity.hard || !!slots.lodging_preference.hard;
+        out.activityPreferenceImportance = clampImportance(
+          slots.lodging_preference.importance,
+          out.activityPreferenceHard ? 0.84 : 0.7
+        );
+      }
+    }
   }
 
   if (slots.intent_summary) {

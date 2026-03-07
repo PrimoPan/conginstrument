@@ -12,6 +12,7 @@ import { buildTravelPlanState } from "../../travelPlan/state.js";
 import { buildSlotStateMachine } from "../slotStateMachine.js";
 import { compileSlotStateToPatch } from "../slotGraphCompiler.js";
 import { sanitizeIntentSignals } from "../signalSanitizer.js";
+import { slotsToSignals } from "../slotFunctionCall.js";
 import { generateGraphPatch } from "../../graphUpdater.js";
 import { applyPatchWithGuards } from "../../../core/graph/patchApply.js";
 import { buildCognitiveModel } from "../../cognitiveModel.js";
@@ -480,6 +481,24 @@ const cases: Case[] = [
     },
   },
   {
+    name: "pace and hotel-switch constraints should stay separate during refinement turns",
+    run: () => {
+      const merged = extractIntentSignalsWithRecency(
+        "我们第一次去日本，准备7天，带爸妈一起，不想太赶，最好少换酒店，预算两个人加父母一共4万人民币左右，妈妈膝盖不太好，饮食想清淡一点。",
+        "第二轮先按京都6晚大阪1晚来想，还是不想太赶，最好少换酒店，酒店离地铁近一点，最好有电梯。"
+      );
+      const generic = merged.genericConstraints || [];
+      assert.equal(
+        generic.some((x) => x.kind === "mobility" && /不想太赶|低强度|少折腾/i.test(String(x.text || ""))),
+        true
+      );
+      assert.equal(
+        generic.some((x) => x.kind === "logistics" && /少换酒店|换酒店|hotel changes/i.test(String(x.text || ""))),
+        true
+      );
+    },
+  },
+  {
     name: "coherent city-night snapshot should override inflated slot duration",
     run: () => {
       const latest = extractIntentSignals("可以，就按京都6晚加大阪1晚来。");
@@ -792,6 +811,36 @@ const cases: Case[] = [
       assert.equal((s.destinations || []).includes("慢一点"), false);
       assert.equal((s.cityDurations || []).some((x) => x.city === "葡萄牙"), false);
       assert.equal(buildTravelIntentStatement(s, text, "zh-CN"), "意图：去西班牙和葡萄牙旅游10天");
+    },
+  },
+  {
+    name: "slot function preference cleanup should keep pace and hotel-switch as separate signals",
+    run: () => {
+      const signals = slotsToSignals(
+        {
+          activity_preference: {
+            text: "不想太赶，最好少换酒店",
+            evidence: "不想太赶，最好少换酒店",
+            hard: false,
+            importance: 0.82,
+          },
+          lodging_preference: {
+            text: "最好少换酒店，酒店离地铁近一点，最好有电梯",
+            evidence: "最好少换酒店，酒店离地铁近一点，最好有电梯",
+            hard: false,
+            importance: 0.8,
+          },
+        },
+        "zh-CN"
+      );
+      assert.equal(/低强度|不想太赶|减少体力负担/i.test(String(signals.activityPreference || "")), true);
+      assert.equal(
+        (signals.genericConstraints || []).some(
+          (x) => x.kind === "logistics" && /少换酒店|换酒店|hotel changes/i.test(String(x.text || ""))
+        ),
+        true
+      );
+      assert.equal(/地铁|交通便利|电梯|无障碍/i.test(String(signals.lodgingPreference || "")), true);
     },
   },
   {
