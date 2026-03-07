@@ -35,6 +35,13 @@ Language / 语言：
 - 若存在 `uncertain` motif，触发确认型问题；
 - 若均稳定，再回退到节点级不确定性提问。
 
+### 1.2 当前与 PRD / AGENTS 的关键对齐点
+
+- `travel_plan_state` 与 `portfolio_document_state` 已按“当前任务实时维护 + 多 trip 合并导出”实现，不再只在导出 PDF 时临时拼接。
+- IS4 transfer review 已是“两段式确认”：推荐只会在新任务首轮后静默出现，用户可先批量加入待确认，再最终确认是否沿用。
+- IS3 revision negotiation 已支持 `overwrite / new_version` 分叉、`affected_injections`、partial accept，并把当前任务里的 `motifs + motifLinks` 暴露给前端做局部 causal-structure diff。
+- 多任务稳定性回归当前覆盖 6 组中文长对话场景（均为 8+8 turns）和 1 组英文 4+4 场景，用于压 task boundary、destination leakage、refinement drift 与手动 concept/motif override 保留。
+
 ---
 
 ### 2. 技术栈

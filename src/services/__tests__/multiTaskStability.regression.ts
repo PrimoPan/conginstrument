@@ -95,11 +95,18 @@ function findNodeIdByKeyPrefix(graph: CDG, keyPrefix: string | string[]): string
 }
 
 function hasDestination(graph: CDG, destination: string): boolean {
+  const needle = String(destination || "").toLowerCase();
   return (graph.nodes || []).some((item) => {
     if (!String(item.key || "").startsWith("slot:destination:")) return false;
-    const statement = String(item.statement || "");
-    return statement.includes(destination) || String(item.key || "").endsWith(`:${destination}`);
+    const statement = String(item.statement || "").toLowerCase();
+    const key = String(item.key || "").toLowerCase();
+    return statement.includes(needle) || key.endsWith(`:${needle}`);
   });
+}
+
+function planHasDestination(plan: TravelPlanState, destination: string): boolean {
+  const needle = String(destination || "").toLowerCase();
+  return (plan.destination_scope || []).some((item) => String(item || "").toLowerCase().includes(needle));
 }
 
 function readEdge(graph: CDG, fromId: string, toId: string): CDGEdge | undefined {
@@ -431,6 +438,156 @@ const scenarios: ScenarioDefinition[] = [
       assert.equal(hasDestination(secondTask.graph, "摩洛哥"), false);
       assert.equal(hasDestination(secondTask.graph, "西班牙"), true);
       assert.equal(hasDestination(secondTask.graph, "葡萄牙"), true);
+    },
+  },
+  {
+    name: "domestic -> domestic keeps later-night and hill constraints from polluting destination slots across 8+8 turns",
+    locale: "zh-CN",
+    firstTask: {
+      name: "suzhou_elder_trip",
+      turns: [
+        "想带老人去苏州4天，园林可以看，但整体慢一点。",
+        "预算控制在1万5左右。",
+        "酒店最好靠地铁，有电梯。",
+        "想保留一天只散步喝茶，不排太满。",
+        "拙政园可以去，其他景点不必硬塞。",
+        "晚饭尽量就在住处附近解决，别折返太多。",
+        "最后一天给返程留足缓冲。",
+        "如果下雨，希望有清楚的室内替代。",
+      ],
+    },
+    secondTask: {
+      name: "chongqing_friend_trip",
+      turns: [
+        "重新规划一个新任务，和两个朋友去重庆4天，想吃和看夜景，但节奏别太满。",
+        "预算大概1万8。",
+        "酒店靠地铁，不要拖箱爬坡太多。",
+        "洪崖洞可以看一眼，但不想一路排队。",
+        "白天太热的话，多放室内备选和午休。",
+        "火锅和小面分开吃，不要一顿塞太多。",
+        "最后一晚住得稳一点，方便第二天回程。",
+        "如果体力不行，希望删掉一两个点也还成立。",
+      ],
+    },
+    secondTaskShouldSwitch: true,
+    validate: ({ firstTask, secondTask }) => {
+      assert.ok(hasDestination(firstTask.graph, "苏州"));
+      assert.ok(hasDestination(secondTask.graph, "重庆"));
+      assert.equal(hasDestination(secondTask.graph, "苏州"), false);
+      assert.equal(hasDestination(secondTask.graph, "爬坡"), false);
+      assert.ok(planHasDestination(secondTask.plan, "重庆"));
+      assert.equal(planHasDestination(secondTask.plan, "苏州"), false);
+    },
+  },
+  {
+    name: "domestic -> international keeps hot-weather and family-rest refinements from turning into false destinations across 8+8 turns",
+    locale: "zh-CN",
+    firstTask: {
+      name: "dali_lijiang_solo",
+      turns: [
+        "想自己去大理和丽江6天，慢一点，不要太赶。",
+        "预算控制在1万6左右。",
+        "酒店靠古城外一点也行，但要安静。",
+        "想多留一点在地吃喝和散步时间。",
+        "不需要天天换地方住，最好两段就够。",
+        "晚上不要安排太晚，第二天还能轻松出门。",
+        "如果下雨，希望有室内替代和茶馆时间。",
+        "最后一天留足回程缓冲。",
+      ],
+    },
+    secondTask: {
+      name: "singapore_family_trip",
+      turns: [
+        "重新规划一个新任务，想带家人去新加坡5天，天气热也想轻松一点。",
+        "预算总共2万5。",
+        "酒店靠地铁，最好亲子友好。",
+        "圣淘沙不是每天都要去，市区也要有轻松活动。",
+        "中午要能随时回酒店休息。",
+        "吃东西以方便和干净为主，不追网红。",
+        "回程前一晚不要换酒店。",
+        "如果下雨，给我一些室内替代。",
+      ],
+    },
+    secondTaskShouldSwitch: true,
+    validate: ({ firstTask, secondTask }) => {
+      assert.ok(hasDestination(firstTask.graph, "大理"));
+      assert.ok(hasDestination(firstTask.graph, "丽江"));
+      assert.ok(hasDestination(secondTask.graph, "新加坡"));
+      assert.equal(hasDestination(secondTask.graph, "大理"), false);
+      assert.equal(hasDestination(secondTask.graph, "丽江"), false);
+      assert.equal(hasDestination(secondTask.graph, "天气热"), false);
+      assert.ok(planHasDestination(secondTask.plan, "新加坡"));
+      assert.equal(planHasDestination(secondTask.plan, "大理"), false);
+    },
+  },
+  {
+    name: "international -> international keeps broad-country anchors stable while city priorities refine later turns across 8+8 turns",
+    locale: "zh-CN",
+    firstTask: {
+      name: "turkey_with_mother",
+      turns: [
+        "想和妈妈去土耳其8天，伊斯坦布尔和卡帕多奇亚为主，不要太累。",
+        "预算大概3万8。",
+        "酒店要交通方便，不想搬太多次。",
+        "如果可以，希望留一点看城市生活和慢慢走的时间。",
+        "热气球不是必须，别让早起把节奏压得太紧。",
+        "妈妈走楼梯不太舒服，台阶太多不行。",
+        "晚上早点回住处，安全感要强一点。",
+        "回程前一天轻一点，不要塞满。",
+      ],
+    },
+    secondTask: {
+      name: "norway_couple_trip",
+      turns: [
+        "重新规划一个新任务，想和伴侣去挪威7天，重点奥斯陆和卑尔根，峡湾可以留但不要硬塞。",
+        "预算4万元左右。",
+        "酒店最好靠火车站或码头，换乘别太折腾。",
+        "整体不要太赶，阴雨天也要有室内替代。",
+        "最多换一次酒店。",
+        "晚上不要太晚，第二天想保留轻松节奏。",
+        "如果某天风雨太大，可以删掉一段外景也不影响主线。",
+        "回程前一晚安排简单一点。",
+      ],
+    },
+    secondTaskShouldSwitch: true,
+    validate: ({ firstTask, secondTask }) => {
+      assert.ok(hasDestination(firstTask.graph, "土耳其"));
+      assert.ok(hasDestination(secondTask.graph, "挪威"));
+      assert.equal(hasDestination(secondTask.graph, "土耳其"), false);
+      assert.equal(hasDestination(secondTask.graph, "阴雨天"), false);
+      assert.ok(planHasDestination(secondTask.plan, "挪威"));
+      assert.equal(planHasDestination(secondTask.plan, "土耳其"), false);
+    },
+  },
+  {
+    name: "english 4+4 tasks keep destination boundaries stable with lightweight refinements",
+    locale: "en-US",
+    firstTask: {
+      name: "seoul_parents_trip",
+      turns: [
+        "Plan a 4-day Seoul trip for my parents. Keep it gentle and low-hassle.",
+        "Budget around 2500 dollars total.",
+        "Please keep the hotel near a subway station, with elevator access.",
+        "Keep the final evening light and add one rainy-day backup.",
+      ],
+    },
+    secondTask: {
+      name: "vienna_mother_trip",
+      turns: [
+        "Start a new task: plan a 4-day Vienna trip with my mother. Keep it calm and avoid too many stairs.",
+        "Budget around 3000 euros total.",
+        "Hotel near the airport rail or main train station, and do not switch hotels.",
+        "Leave the last day light and give me one indoor fallback if it rains.",
+      ],
+    },
+    secondTaskShouldSwitch: true,
+    validate: ({ firstTask, secondTask }) => {
+      assert.ok(hasDestination(firstTask.graph, "Seoul") || hasDestination(firstTask.graph, "首尔"));
+      assert.ok(hasDestination(secondTask.graph, "Vienna") || hasDestination(secondTask.graph, "维也纳"));
+      assert.equal(hasDestination(secondTask.graph, "Seoul"), false);
+      assert.equal(hasDestination(secondTask.graph, "new task"), false);
+      assert.ok(planHasDestination(secondTask.plan, "Vienna") || planHasDestination(secondTask.plan, "维也纳"));
+      assert.equal(planHasDestination(secondTask.plan, "Seoul"), false);
     },
   },
 ];
