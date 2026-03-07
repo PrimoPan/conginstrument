@@ -222,6 +222,27 @@ function uniqStrings(arr: string[], max = 48): string[] {
   return out;
 }
 
+function motifLibraryEntryMatchesTask(
+  item: MotifLibraryEntryPayload,
+  taskId: string,
+  conversationId: string
+): boolean {
+  const safeTaskId = clean(taskId, 80);
+  const safeConversationId = clean(conversationId, 80);
+  const currentVersion =
+    Array.isArray(item.versions) && item.versions.length
+      ? item.versions.find((v) => clean(v.version_id, 120) === clean(item.current_version_id, 120)) ||
+        item.versions[item.versions.length - 1]
+      : null;
+  if (safeTaskId) {
+    const sourceTaskIds = Array.isArray(item.source_task_ids) ? item.source_task_ids : [];
+    if (sourceTaskIds.some((x) => clean(x, 80) === safeTaskId)) return true;
+    if (clean(currentVersion?.source_task_id, 80) === safeTaskId) return true;
+  }
+  if (safeConversationId && clean(currentVersion?.source_conversation_id, 80) === safeConversationId) return true;
+  return false;
+}
+
 const LODGING_FOCUS_RE = /(多住一点|住久一点|多待一点|多留一点|重点住|优先住|主要住)/i;
 const CONTINUATION_REFINEMENT_RE =
   /(整体还是|总时长还是|总时长还是按|还是按|不是必须|先不|先完全去掉|完全去掉|去掉|删掉|移除|保留|都保留|继续|也可以|也行|最后\s*[0-9一二三四五六七八九十两]{0,2}\s*晚|按.+(?:住|晚)|以.+为主住|就按|那就按|先按|先以|来想|不用单独算|最多半天|中转|过渡|先别塞满)/i;
@@ -621,8 +642,14 @@ export function buildCognitiveState(params: {
   conversations?: ConversationTravelRecord[];
   persistentMotifLibrary?: MotifLibraryEntryPayload[];
   motifTransferState?: MotifTransferState | null;
+  motifLibraryScope?: {
+    sourceTaskId?: string;
+    sourceConversationId?: string;
+  } | null;
 }): CognitiveState {
   const currentTaskId = clean(params.travelPlanState.task_id, 80) || clean(params.conversationId, 80);
+  const scopedSourceTaskId = clean(params.motifLibraryScope?.sourceTaskId, 80);
+  const scopedSourceConversationId = clean(params.motifLibraryScope?.sourceConversationId, 80);
 
   const conceptsFromUser: CognitiveStateConcept[] = (params.model.concepts || [])
     .filter((c: any) => conceptLooksUserGroundedStrict(c))
@@ -649,17 +676,6 @@ export function buildCognitiveState(params: {
     rationale: clean(m.rationale, 220) || undefined,
   }));
 
-  const motifPatternGroups = new Map<string, { motif: any; count: number; sourceTaskIds: Set<string> }>();
-  for (const m of params.model.motifs || []) {
-    const patternId = motifPatternId(m);
-    if (!motifPatternGroups.has(patternId)) {
-      motifPatternGroups.set(patternId, { motif: m, count: 0, sourceTaskIds: new Set<string>() });
-    }
-    const bucket = motifPatternGroups.get(patternId)!;
-    bucket.count += 1;
-    bucket.sourceTaskIds.add(currentTaskId);
-  }
-
   const fragments = collectTaskFragments({
     locale: params.locale,
     conversations:
@@ -675,70 +691,12 @@ export function buildCognitiveState(params: {
           ],
   });
 
-  for (const fragment of fragments) {
-    for (const ref of fragment.rationaleRefs || []) {
-      const match = clean(ref, 160).match(/^motif_type:(.+)$/i);
-      if (!match?.[1]) continue;
-      const pid = clean(match[1], 140);
-      if (!pid || !motifPatternGroups.has(pid)) continue;
-      motifPatternGroups.get(pid)!.sourceTaskIds.add(fragment.taskId);
-    }
-  }
-
-  const motifLibraryDerived: MotifLibraryPattern[] = Array.from(motifPatternGroups.entries()).map(([patternId, g], idx) => {
-    const now = new Date().toISOString();
-    const versionId = `mv_${clean(patternId, 64).replace(/[^a-z0-9_:\-]/gi, "_")}_${idx + 1}`;
-    const title = motifTypeTitle(g.motif, params.locale);
-    const dependency = clean(g.motif?.dependencyClass || g.motif?.relation, 32) || "enable";
-    const reusableDescription = motifReusableDescription(g.motif, params.locale);
-    return {
-      motif_type_id: patternId,
-      motif_type_title: title,
-      dependency,
-      abstraction_levels: ["L1", "L2"],
-      status: "active",
-      current_version_id: versionId,
-      versions: [
-        {
-          version_id: versionId,
-          version: 1,
-          title,
-          dependency,
-          reusable_description: reusableDescription,
-          abstraction_levels: {
-            L1: clean(g.motif?.title, 180) || title,
-            L2: title,
-            L3: clean(g.motif?.motif_type_reusable_description, 220) || reusableDescription,
-          },
-          status: "active",
-          source_task_id: currentTaskId,
-          source_conversation_id: clean(params.conversationId, 80),
-          created_at: now,
-          updated_at: now,
-        },
-      ],
-      role_schema:
-        g.motif?.motif_type_role_schema && typeof g.motif.motif_type_role_schema === "object"
-          ? {
-              drivers: uniqStrings((g.motif.motif_type_role_schema.drivers || []).map((x: any) => clean(x, 80)), 8),
-              target: uniqStrings((g.motif.motif_type_role_schema.target || []).map((x: any) => clean(x, 80)), 8),
-            }
-          : undefined,
-      reusable_description: reusableDescription,
-      usage_count: g.count,
-      source_task_ids: Array.from(g.sourceTaskIds).slice(0, 20),
-      usage_stats: {
-        adopted_count: 0,
-        ignored_count: 0,
-        feedback_negative_count: 0,
-        transfer_confidence: 0.7,
-      },
-    };
-  });
-
   const motifLibraryMap = new Map<string, MotifLibraryPattern>();
-  for (const item of motifLibraryDerived) motifLibraryMap.set(item.motif_type_id, item);
   for (const item of params.persistentMotifLibrary || []) {
+    if (motifLibraryEntryMatchesTask(item, currentTaskId, params.conversationId)) continue;
+    if (scopedSourceTaskId || scopedSourceConversationId) {
+      if (!motifLibraryEntryMatchesTask(item, scopedSourceTaskId, scopedSourceConversationId)) continue;
+    }
     motifLibraryMap.set(clean(item.motif_type_id, 180), {
       motif_type_id: clean(item.motif_type_id, 180),
       motif_type_title: clean(item.motif_type_title, 180),

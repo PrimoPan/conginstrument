@@ -241,13 +241,19 @@ run("fresh trip phrasing with city allocation should still switch tasks", () => 
 });
 
 run("retrieval hints should down-rank stable profile motifs when carry is disabled", () => {
-  const plan = makePlan("巴黎七天旅行，偏好在地体验和慢节奏。");
+  const plan = makePlan("巴黎七天旅行，妈妈膝盖不好，涉及健康与行动限制，还是想慢节奏。");
+  plan.trip_goal_summary = "巴黎七天旅行，健康限制优先，少楼梯，慢节奏。";
+  plan.constraints = ["健康限制优先", "减少楼梯", "不要太赶"];
   const motifLibrary = makeLibrary();
   const unrestricted = buildTransferRecommendations({
     locale,
     conversationId: "conv_new",
     currentTaskId: "task_new",
     travelPlanState: plan,
+    retrievalHints: {
+      sourceTaskId: "task_prev_1",
+      sourceConversationId: "conv_prev_1",
+    },
     motifLibrary,
     maxCount: 2,
   });
@@ -257,6 +263,8 @@ run("retrieval hints should down-rank stable profile motifs when carry is disabl
     currentTaskId: "task_new",
     travelPlanState: plan,
     retrievalHints: {
+      sourceTaskId: "task_prev_1",
+      sourceConversationId: "conv_prev_1",
       keepConsistentText: "继续保持在地体验",
       carryStableProfile: false,
       carryHealthReligion: false,
@@ -266,10 +274,10 @@ run("retrieval hints should down-rank stable profile motifs when carry is disabl
   });
   const unrestrictedHealth = unrestricted.find((x) => x.motif_type_id === "motif_health");
   const restrictedHealth = restricted.find((x) => x.motif_type_id === "motif_health");
-  assert.ok(unrestrictedHealth && restrictedHealth, "health motif should be present in both rankings");
+  assert.ok(unrestrictedHealth, "health motif should remain eligible for the direct previous task");
   assert.ok(
-    Number(restrictedHealth.match_score) < Number(unrestrictedHealth.match_score),
-    "health motif should be penalized when stable carry is disabled"
+    !restrictedHealth || Number(restrictedHealth.match_score) < Number(unrestrictedHealth.match_score),
+    "health motif should be penalized or filtered when stable carry is disabled"
   );
 });
 

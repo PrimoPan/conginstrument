@@ -165,6 +165,72 @@ function makeMotifLibrary(): MotifLibraryEntryPayload[] {
       },
     },
     {
+      motif_type_id: "mt_local_transit_balance",
+      motif_type_title: "在地体验与交通便利平衡",
+      dependency: "determine",
+      abstraction_levels: ["L1", "L2"],
+      status: "active",
+      current_version_id: "mv_balance_1",
+      versions: [
+        {
+          version_id: "mv_balance_1",
+          version: 1,
+          title: "在地体验与交通便利平衡",
+          dependency: "determine",
+          reusable_description: "优先本地体验，同时保持公共交通便利和慢节奏。",
+          abstraction_levels: {
+            L1: "本地体验 + 交通便利",
+            L2: "在地体验与交通便利平衡",
+          },
+          status: "active",
+          source_task_id: "task_sz_1",
+          source_conversation_id: "conv_sz",
+          created_at: now,
+          updated_at: now,
+        },
+      ],
+      source_task_ids: ["task_sz_1"],
+      usage_stats: {
+        adopted_count: 5,
+        ignored_count: 1,
+        feedback_negative_count: 0,
+        transfer_confidence: 0.83,
+      },
+    },
+    {
+      motif_type_id: "mt_current_task_shadow",
+      motif_type_title: "当前任务影子规则",
+      dependency: "constraint",
+      abstraction_levels: ["L1", "L2"],
+      status: "active",
+      current_version_id: "mv_current_1",
+      versions: [
+        {
+          version_id: "mv_current_1",
+          version: 1,
+          title: "当前任务影子规则",
+          dependency: "constraint",
+          reusable_description: "巴黎七天旅行优先本地体验和低强度节奏",
+          abstraction_levels: {
+            L1: "巴黎当前任务规则",
+            L2: "巴黎七天低强度",
+          },
+          status: "active",
+          source_task_id: "task_paris_2",
+          source_conversation_id: "conv_paris",
+          created_at: now,
+          updated_at: now,
+        },
+      ],
+      source_task_ids: ["task_paris_2"],
+      usage_stats: {
+        adopted_count: 9,
+        ignored_count: 0,
+        feedback_negative_count: 0,
+        transfer_confidence: 0.95,
+      },
+    },
+    {
       motif_type_id: "mt_destination_specific_hk",
       motif_type_title: "仅香港地铁晚归线路",
       dependency: "determine",
@@ -199,6 +265,27 @@ function makeMotifLibrary(): MotifLibraryEntryPayload[] {
   ];
 }
 
+function recommendationFromEntry(entry: MotifLibraryEntryPayload, matchScore: number) {
+  const version =
+    entry.versions.find((v) => v.version_id === entry.current_version_id) ||
+    entry.versions[entry.versions.length - 1];
+  return {
+    candidate_id: `${entry.motif_type_id}::${entry.current_version_id}`,
+    motif_type_id: entry.motif_type_id,
+    motif_type_title: entry.motif_type_title,
+    dependency: entry.dependency,
+    reusable_description: version?.reusable_description || entry.reusable_description || entry.motif_type_title,
+    status: entry.status,
+    reason: "manual_test_seed",
+    match_score: matchScore,
+    recommended_mode: "A" as const,
+    decision_status: "pending" as const,
+    source_task_id: version?.source_task_id,
+    source_conversation_id: version?.source_conversation_id,
+    created_at: new Date().toISOString(),
+  };
+}
+
 async function main() {
   const locale = "zh-CN" as const;
   const travelPlanState = makeTravelPlanState();
@@ -211,25 +298,64 @@ async function main() {
     revisionRequests: [],
   };
 
-  await run("Task1 存储后 Task2 首轮召回 2-4 条并按匹配度排序", () => {
+  await run("Task1 存储后 Task2 首轮召回 1-4 条高相关建议并按匹配度排序", () => {
     const recs = buildTransferRecommendations({
       locale,
       conversationId: "conv_paris",
       currentTaskId: "task_paris_2",
       travelPlanState,
+      retrievalHints: {
+        sourceTaskId: "task_sz_1",
+        sourceConversationId: "conv_sz",
+      },
       motifLibrary,
       existingState: transferState,
       maxCount: 4,
     });
     transferState = { ...transferState, recommendations: recs, lastEvaluatedAt: new Date().toISOString() };
 
-    assert.ok(recs.length >= 2 && recs.length <= 4, `unexpected recommendation count: ${recs.length}`);
+    assert.ok(recs.length >= 1 && recs.length <= 4, `unexpected recommendation count: ${recs.length}`);
     for (let i = 1; i < recs.length; i += 1) {
       assert.ok(recs[i - 1].match_score >= recs[i].match_score, "recommendations not sorted by match_score desc");
     }
   });
 
+  await run("仅允许从上一 task 召回，并跳过当前 task 影子规则", () => {
+    const recs = buildTransferRecommendations({
+      locale,
+      conversationId: "conv_paris",
+      currentTaskId: "task_paris_2",
+      travelPlanState,
+      retrievalHints: {
+        sourceTaskId: "task_sz_1",
+        sourceConversationId: "conv_sz",
+      },
+      motifLibrary,
+      existingState: transferState,
+      maxCount: 4,
+    });
+
+    assert.ok(recs.length >= 1, "expected scoped recommendations from the previous task");
+    assert.equal(recs.some((x) => x.motif_type_id === "mt_current_task_shadow"), false);
+    assert.equal(recs.every((x) => x.source_task_id === "task_sz_1"), true);
+  });
+
   await run("adopt / modify / ignore 三选一决策可持久化到 transfer state", () => {
+    if (transferState.recommendations.length < 3) {
+      transferState = {
+        ...transferState,
+        recommendations: [
+          ...transferState.recommendations,
+          ...motifLibrary
+            .filter((entry) => entry.source_task_ids?.includes("task_sz_1"))
+            .slice(0, 3)
+            .map((entry, index) => recommendationFromEntry(entry, 0.72 - index * 0.08)),
+        ]
+          .filter((entry, index, arr) => arr.findIndex((x) => x.candidate_id === entry.candidate_id) === index)
+          .slice(0, 3),
+      };
+    }
+
     assert.ok(transferState.recommendations.length >= 3, "need at least 3 recommendations");
     const adoptRec = transferState.recommendations[0];
     const modifyRec = transferState.recommendations[1];

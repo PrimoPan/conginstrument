@@ -136,6 +136,7 @@ type TaskLifecycleState = {
 };
 
 type PlanningBootstrapHints = {
+  sourceTaskId?: string;
   sourceConversationId?: string;
   destination?: string;
   keepConsistentText?: string;
@@ -191,6 +192,7 @@ function reopenTaskLifecycle(previous: TaskLifecycleState): TaskLifecycleState {
 
 function readPlanningBootstrapHints(raw: any): PlanningBootstrapHints | null {
   if (!raw || typeof raw !== "object") return null;
+  const sourceTaskId = cleanInput(raw?.sourceTaskId, 80);
   const sourceConversationId = cleanInput(raw?.sourceConversationId, 80);
   const destination = cleanInput(raw?.destination, 80);
   const keepConsistentText = cleanInput(raw?.keepConsistentText, 400);
@@ -198,10 +200,11 @@ function readPlanningBootstrapHints(raw: any): PlanningBootstrapHints | null {
     raw?.carryHealthReligion == null ? true : parseBoolFlag(raw?.carryHealthReligion);
   const hasStableProfile =
     raw?.carryStableProfile == null ? hasHealthReligion : parseBoolFlag(raw?.carryStableProfile);
-  if (!sourceConversationId && !destination && !keepConsistentText && hasHealthReligion && hasStableProfile) {
+  if (!sourceTaskId && !sourceConversationId && !destination && !keepConsistentText && hasHealthReligion && hasStableProfile) {
     return null;
   }
   return {
+    sourceTaskId: sourceTaskId || undefined,
     sourceConversationId: sourceConversationId || undefined,
     destination: destination || undefined,
     keepConsistentText: keepConsistentText || undefined,
@@ -305,6 +308,7 @@ function isNegativeForTransfer(userText: string): boolean {
 }
 
 type ConversationPlanningBootstrap = {
+  sourceTaskId?: string;
   sourceConversationId?: string;
   destination?: string;
   keepConsistentText?: string;
@@ -413,6 +417,7 @@ function defaultTravelPlanState(params: {
 
 function parsePlanningBootstrap(raw: any): ConversationPlanningBootstrap | null {
   if (!raw || typeof raw !== "object") return null;
+  const sourceTaskId = cleanInput((raw as any).sourceTaskId, 80);
   const sourceConversationId = cleanInput((raw as any).sourceConversationId, 80);
   const destination = cleanInput((raw as any).destination, 80);
   const keepConsistentText = cleanInput((raw as any).keepConsistentText, 400);
@@ -423,8 +428,9 @@ function parsePlanningBootstrap(raw: any): ConversationPlanningBootstrap | null 
   const carryStableProfile =
     carryStableProfileRaw == null ? carryHealthReligion : parseBoolFlag(carryStableProfileRaw);
 
-  if (!sourceConversationId && !destination && !keepConsistentText) return null;
+  if (!sourceTaskId && !sourceConversationId && !destination && !keepConsistentText) return null;
   return {
+    sourceTaskId: sourceTaskId || undefined,
     sourceConversationId: sourceConversationId || undefined,
     destination: destination || undefined,
     keepConsistentText: keepConsistentText || undefined,
@@ -894,6 +900,7 @@ type PlanningStateBundleParams = {
   previousTravelPlan?: TravelPlanState | null;
   motifTransferState?: MotifTransferState | null;
   persistentMotifLibrary?: Awaited<ReturnType<typeof listUserMotifLibrary>>;
+  planningBootstrapHints?: PlanningBootstrapHints | null;
   taskLifecycle?: TaskLifecycleState | null;
   latestUserText?: string;
   isNewConversation?: boolean;
@@ -990,6 +997,12 @@ async function buildPlanningStateBundle(params: PlanningStateBundleParams): Prom
     conversations: conversationRecords,
     motifTransferState: params.motifTransferState || null,
     persistentMotifLibrary: params.persistentMotifLibrary || [],
+    motifLibraryScope: params.planningBootstrapHints
+      ? {
+          sourceTaskId: params.planningBootstrapHints.sourceTaskId,
+          sourceConversationId: params.planningBootstrapHints.sourceConversationId,
+        }
+      : null,
   });
 
   const portfolioDocumentState = buildPortfolioDocumentState({
@@ -1025,6 +1038,12 @@ function buildPlanningStateBundleFallback(params: PlanningStateBundleParams): Pl
       conversations: conversationRecords,
       motifTransferState: params.motifTransferState || null,
       persistentMotifLibrary: params.persistentMotifLibrary || [],
+      motifLibraryScope: params.planningBootstrapHints
+        ? {
+            sourceTaskId: params.planningBootstrapHints.sourceTaskId,
+            sourceConversationId: params.planningBootstrapHints.sourceConversationId,
+          }
+        : null,
     }),
     portfolioDocumentState: buildPortfolioDocumentState({
       userId: String(params.userId),
@@ -1060,6 +1079,7 @@ async function persistConversationModel(params: {
   previousMotifs?: any[];
   turnNumber?: number;
   latestUserText?: string;
+  planningBootstrapHints?: PlanningBootstrapHints | null;
 }): Promise<PersistedConversationSnapshot> {
   const motifsWithTransfer = applyTransferStateToMotifs({
     motifs: annotateMotifExtractionMeta({
@@ -1097,6 +1117,7 @@ async function persistConversationModel(params: {
     previousTravelPlan: params.previousTravelPlan || null,
     motifTransferState: params.motifTransferState || null,
     persistentMotifLibrary,
+    planningBootstrapHints: params.planningBootstrapHints || null,
     taskLifecycle: params.taskLifecycle || null,
     latestUserText: params.latestUserText,
   });
@@ -1220,6 +1241,7 @@ async function refreshConversationTransferProjection(params: {
       previous: null,
       locale: params.locale,
     }));
+  const planningBootstrapHints = readPlanningBootstrapHints((params.conv as any).planningBootstrapHints);
   const planning = await safeBuildPlanningStateBundle({
     conversationId: params.oid,
     userId: params.userId,
@@ -1229,6 +1251,7 @@ async function refreshConversationTransferProjection(params: {
     previousTravelPlan: (params.conv as any).travelPlanState || null,
     motifTransferState: params.motifTransferState,
     persistentMotifLibrary: await listUserMotifLibrary(params.userId, params.locale),
+    planningBootstrapHints,
     taskLifecycle: params.taskLifecycle || null,
     latestUserText: params.latestUserText,
   });
@@ -1393,6 +1416,7 @@ convRouter.post("/", asyncRoute(async (req: AuthedRequest, res) => {
     previousTravelPlan: null,
     motifTransferState,
     persistentMotifLibrary,
+    planningBootstrapHints,
     taskLifecycle,
     isNewConversation: true,
   });
@@ -1446,9 +1470,8 @@ convRouter.get("/:id", asyncRoute(async (req: AuthedRequest, res) => {
   if (!conv) return res.status(404).json({ error: "conversation not found" });
   const locale = normalizeLocale((conv as any).locale);
   const taskLifecycle = readTaskLifecycle((conv as any).taskLifecycle);
-  const nextTransferRecommendationsEnabled = transferRecommendationsEnabled(
-    readPlanningBootstrapHints((conv as any).planningBootstrapHints)
-  );
+  const planningBootstrapHints = readPlanningBootstrapHints((conv as any).planningBootstrapHints);
+  const nextTransferRecommendationsEnabled = transferRecommendationsEnabled(planningBootstrapHints);
 
   const model = buildCognitiveModel({
     graph: conv.graph,
@@ -1476,6 +1499,7 @@ convRouter.get("/:id", asyncRoute(async (req: AuthedRequest, res) => {
     previousTravelPlan: (conv as any).travelPlanState || null,
     motifTransferState,
     persistentMotifLibrary,
+    planningBootstrapHints,
     taskLifecycle,
   });
 
@@ -1545,6 +1569,7 @@ convRouter.post("/:id/task/resume", asyncRoute(async (req: AuthedRequest, res) =
     previousTravelPlan: (refreshedConv as any).travelPlanState || null,
     motifTransferState,
     persistentMotifLibrary: await listUserMotifLibrary(userId, locale),
+    planningBootstrapHints: readPlanningBootstrapHints((refreshedConv as any).planningBootstrapHints),
     taskLifecycle: nextLifecycle,
   });
 
@@ -1625,6 +1650,7 @@ convRouter.put("/:id/graph", asyncRoute(async (req: AuthedRequest, res) => {
   });
   const motifTransferState = readMotifTransferState((conv as any).motifTransferState);
   const taskLifecycle = readTaskLifecycle((conv as any).taskLifecycle);
+  const planningBootstrapHints = readPlanningBootstrapHints((conv as any).planningBootstrapHints);
   model.motifs = applyTransferStateToMotifs({
     motifs: model.motifs || [],
     state: motifTransferState,
@@ -1653,6 +1679,7 @@ convRouter.put("/:id/graph", asyncRoute(async (req: AuthedRequest, res) => {
     previousTravelPlan: (conv as any).travelPlanState || null,
     motifTransferState,
     persistentMotifLibrary: await listUserMotifLibrary(userId, locale),
+    planningBootstrapHints,
     taskLifecycle,
   });
 
@@ -1768,6 +1795,7 @@ convRouter.put("/:id/concepts", asyncRoute(async (req: AuthedRequest, res) => {
   });
   const motifTransferState = readMotifTransferState((conv as any).motifTransferState);
   const taskLifecycle = readTaskLifecycle((conv as any).taskLifecycle);
+  const planningBootstrapHints = readPlanningBootstrapHints((conv as any).planningBootstrapHints);
   model.motifs = applyTransferStateToMotifs({
     motifs: model.motifs || [],
     state: motifTransferState,
@@ -1792,6 +1820,7 @@ convRouter.put("/:id/concepts", asyncRoute(async (req: AuthedRequest, res) => {
     previousTravelPlan: (conv as any).travelPlanState || null,
     motifTransferState,
     persistentMotifLibrary: await listUserMotifLibrary(userId, locale),
+    planningBootstrapHints,
     taskLifecycle,
   });
 
@@ -1890,6 +1919,7 @@ async function handleTravelPlanPdfExport(req: AuthedRequest, res: any) {
     });
     const motifTransferState = readMotifTransferState((conv as any).motifTransferState);
     const taskLifecycle = readTaskLifecycle((conv as any).taskLifecycle);
+    const planningBootstrapHints = readPlanningBootstrapHints((conv as any).planningBootstrapHints);
     model.motifs = applyTransferStateToMotifs({
       motifs: model.motifs || [],
       state: motifTransferState,
@@ -1923,6 +1953,7 @@ async function handleTravelPlanPdfExport(req: AuthedRequest, res: any) {
       previousTravelPlan: (conv as any).travelPlanState || null,
       motifTransferState,
       persistentMotifLibrary: await listUserMotifLibrary(userId, locale),
+      planningBootstrapHints,
       taskLifecycle,
     });
 
@@ -2090,6 +2121,7 @@ convRouter.post("/:id/turn", asyncRoute(async (req: AuthedRequest, res) => {
       previousMotifs: baseMotifs,
       turnNumber,
       latestUserText: userText,
+      planningBootstrapHints: retrievalHints,
     });
 
     return res.json({
@@ -2214,6 +2246,7 @@ convRouter.post("/:id/turn", asyncRoute(async (req: AuthedRequest, res) => {
     previousMotifs: baseMotifs,
     turnNumber,
     latestUserText: userText,
+    planningBootstrapHints: retrievalHints,
   });
 
   res.json({
@@ -2341,6 +2374,7 @@ convRouter.post("/:id/turn/stream", asyncRoute(async (req: AuthedRequest, res) =
       previousMotifs: baseMotifs,
       turnNumber,
       latestUserText: userText,
+      planningBootstrapHints: retrievalHints,
     });
 
     res.status(200);
@@ -2520,6 +2554,7 @@ convRouter.post("/:id/turn/stream", asyncRoute(async (req: AuthedRequest, res) =
       previousMotifs: baseMotifs,
       turnNumber,
       latestUserText: userText,
+      planningBootstrapHints: retrievalHints,
     });
 
     sseSend(res, "done", {
@@ -2647,6 +2682,7 @@ convRouter.post("/:id/turn/stream", asyncRoute(async (req: AuthedRequest, res) =
           previousMotifs: baseMotifs,
           turnNumber,
           latestUserText: userText,
+          planningBootstrapHints: retrievalHints,
         });
 
         sseSend(res, "done", {

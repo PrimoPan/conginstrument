@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 
 import { buildCognitiveState, buildPortfolioDocumentState } from "../planningState.js";
+import type { MotifLibraryEntryPayload } from "../motifTransfer/types.js";
 import { renderPortfolioTravelPlanPdf } from "../travelPlan/pdf.js";
 import { buildTravelPlanSourceMapKey, buildTravelPlanState } from "../travelPlan/state.js";
 
@@ -91,6 +92,52 @@ function englishTurnsFixture() {
         "Day 1: Arrive and settle in.\n- Hotel check-in near the center\nDay 2: Central Milan highlights.\n- Duomo and nearby walk\nDay 3: Departure day.\n- Airport transfer buffer",
     },
   ];
+}
+
+function motifLibraryEntryFixture(params: {
+  motifTypeId: string;
+  title: string;
+  reusableDescription: string;
+  dependency?: string;
+  sourceTaskId: string;
+  sourceConversationId: string;
+}): MotifLibraryEntryPayload {
+  const now = new Date().toISOString();
+  return {
+    motif_type_id: params.motifTypeId,
+    motif_type_title: params.title,
+    dependency: params.dependency || "constraint",
+    abstraction_levels: ["L1", "L2"],
+    status: "active",
+    current_version_id: `${params.motifTypeId}_v1`,
+    versions: [
+      {
+        version_id: `${params.motifTypeId}_v1`,
+        version: 1,
+        title: params.title,
+        dependency: params.dependency || "constraint",
+        reusable_description: params.reusableDescription,
+        abstraction_levels: {
+          L1: params.title,
+          L2: params.reusableDescription,
+        },
+        status: "active",
+        source_task_id: params.sourceTaskId,
+        source_conversation_id: params.sourceConversationId,
+        created_at: now,
+        updated_at: now,
+      },
+    ],
+    reusable_description: params.reusableDescription,
+    usage_count: 1,
+    source_task_ids: [params.sourceTaskId],
+    usage_stats: {
+      adopted_count: 1,
+      ignored_count: 0,
+      feedback_negative_count: 0,
+      transfer_confidence: 0.8,
+    },
+  };
 }
 
 async function main() {
@@ -188,6 +235,97 @@ async function main() {
     assert.deepEqual(
       (currentTask?.concepts_from_user || []).map((c) => c.concept_id),
       ["c_user_only"]
+    );
+  });
+
+  await run("motif_library no longer derives current-task motifs into historical suggestions", () => {
+    const travelPlan = buildTravelPlanState({
+      locale: "zh-CN",
+      graph: graphWithDestination("首尔", "conv_scope"),
+      turns: turnsFixture(),
+      concepts: [],
+      motifs: [],
+      taskId: "task_scope_current",
+      previous: null,
+    });
+
+    const cognitive = buildCognitiveState({
+      conversationId: "conv_scope",
+      locale: "zh-CN",
+      model: {
+        concepts: [],
+        motifs: [
+          {
+            id: "m_current",
+            motif_id: "m_current",
+            title: "慢节奏 + 少换酒店",
+            relation: "constraint",
+            dependencyClass: "constraint",
+            status: "active",
+            confidence: 0.9,
+            conceptIds: ["c1", "c2"],
+            anchorConceptId: "c2",
+          },
+        ],
+      } as any,
+      travelPlanState: travelPlan,
+      persistentMotifLibrary: [],
+    });
+
+    assert.deepEqual(cognitive.motif_library, []);
+  });
+
+  await run("motif_library scope only keeps the direct previous task and excludes current-task entries", () => {
+    const travelPlan = buildTravelPlanState({
+      locale: "zh-CN",
+      graph: graphWithDestination("首尔", "conv_scope_prev"),
+      turns: turnsFixture(),
+      concepts: [],
+      motifs: [],
+      taskId: "task_scope_current",
+      previous: null,
+    });
+
+    const cognitive = buildCognitiveState({
+      conversationId: "conv_scope_prev",
+      locale: "zh-CN",
+      model: {
+        concepts: [],
+        motifs: [],
+      } as any,
+      travelPlanState: travelPlan,
+      persistentMotifLibrary: [
+        motifLibraryEntryFixture({
+          motifTypeId: "motif_current_shadow",
+          title: "当前任务影子规则",
+          reusableDescription: "不应该出现在历史思路库里",
+          sourceTaskId: "task_scope_current",
+          sourceConversationId: "conv_scope_prev",
+        }),
+        motifLibraryEntryFixture({
+          motifTypeId: "motif_prev_only",
+          title: "上一任务的慢节奏规则",
+          reusableDescription: "上一任务确认过，适合继续沿用",
+          sourceTaskId: "task_scope_prev_1",
+          sourceConversationId: "conv_prev_1",
+        }),
+        motifLibraryEntryFixture({
+          motifTypeId: "motif_older_other",
+          title: "更早任务的跨城规则",
+          reusableDescription: "这条不是直接上一任务，不应出现在 task2 默认继承里",
+          sourceTaskId: "task_older_1",
+          sourceConversationId: "conv_older_1",
+        }),
+      ],
+      motifLibraryScope: {
+        sourceTaskId: "task_scope_prev_1",
+        sourceConversationId: "conv_prev_1",
+      },
+    });
+
+    assert.deepEqual(
+      (cognitive.motif_library || []).map((item) => item.motif_type_id),
+      ["motif_prev_only"]
     );
   });
 

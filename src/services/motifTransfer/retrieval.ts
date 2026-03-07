@@ -23,8 +23,24 @@ function isAlgoV3Enabled(): boolean {
 
 function toTokens(input: string): Set<string> {
   const text = clean(input, 1200).toLowerCase();
-  const parts = text.match(/[\u4e00-\u9fff]{1,4}|[a-z0-9]{2,24}/g) || [];
-  return new Set(parts);
+  const parts = text.match(/[\u4e00-\u9fff]{1,16}|[a-z0-9]{2,24}/g) || [];
+  const out = new Set<string>();
+  for (const part of parts) {
+    if (/^[a-z0-9]{2,24}$/i.test(part)) {
+      out.add(part);
+      continue;
+    }
+    const chunk = clean(part, 16);
+    if (!chunk) continue;
+    if (chunk.length <= 4) out.add(chunk);
+    const maxGram = Math.min(4, chunk.length);
+    for (let size = 2; size <= maxGram; size += 1) {
+      for (let i = 0; i + size <= chunk.length; i += 1) {
+        out.add(chunk.slice(i, i + size));
+      }
+    }
+  }
+  return out;
 }
 
 function overlapScore(a: Set<string>, b: Set<string>): number {
@@ -115,6 +131,28 @@ function daysSince(iso?: string): number {
   return delta / (1000 * 60 * 60 * 24);
 }
 
+function entryBelongsToTask(params: {
+  entry: MotifLibraryEntryPayload;
+  taskId?: string;
+  conversationId?: string;
+}): boolean {
+  const taskId = clean(params.taskId, 80);
+  const conversationId = clean(params.conversationId, 80);
+  if (!taskId && !conversationId) return false;
+  const currentVersion =
+    params.entry.versions.find((v) => clean(v.version_id, 120) === clean(params.entry.current_version_id, 120)) ||
+    params.entry.versions[params.entry.versions.length - 1];
+  if (taskId) {
+    const sourceTaskIds = Array.isArray(params.entry.source_task_ids) ? params.entry.source_task_ids : [];
+    if (sourceTaskIds.some((x) => clean(x, 80) === taskId)) return true;
+    if (clean(currentVersion?.source_task_id, 80) === taskId) return true;
+  }
+  if (conversationId && clean(currentVersion?.source_conversation_id, 80) === conversationId) return true;
+  return false;
+}
+
+const MIN_TRANSFER_RECOMMENDATION_SCORE = 0.35;
+
 function mmrSelect<T>(items: T[], limit: number, lambda: number, score: (x: T) => number, sim: (a: T, b: T) => number): T[] {
   const selected: T[] = [];
   const pool = items.slice();
@@ -160,6 +198,8 @@ export function buildTransferRecommendations(params: {
   currentTaskId: string;
   travelPlanState?: TravelPlanState | null;
   retrievalHints?: {
+    sourceTaskId?: string;
+    sourceConversationId?: string;
     keepConsistentText?: string;
     carryHealthReligion?: boolean;
     carryStableProfile?: boolean;
@@ -177,10 +217,22 @@ export function buildTransferRecommendations(params: {
   const taskSignals = taskStructureSignals(params.travelPlanState || null);
   const carryStableProfile = params.retrievalHints?.carryStableProfile !== false;
   const carryHealthReligion = params.retrievalHints?.carryHealthReligion !== false;
+  const sourceTaskId = clean(params.retrievalHints?.sourceTaskId, 80);
+  const sourceConversationId = clean(params.retrievalHints?.sourceConversationId, 80);
   const maxCount = Math.max(1, Math.min(Number(params.maxCount || 4), 6));
   const scoredCandidates = (params.motifLibrary || [])
+    .filter((entry) => {
+      if (entryBelongsToTask({ entry, taskId: params.currentTaskId, conversationId: params.conversationId })) return false;
+      if (sourceTaskId || sourceConversationId) {
+        return entryBelongsToTask({ entry, taskId: sourceTaskId, conversationId: sourceConversationId });
+      }
+      return true;
+    })
     .map((entry) => {
       const version = entry.versions.find((v) => v.version_id === entry.current_version_id) || entry.versions[entry.versions.length - 1];
+      const scopedMatch =
+        (sourceTaskId || sourceConversationId) &&
+        entryBelongsToTask({ entry, taskId: sourceTaskId, conversationId: sourceConversationId });
       const entryText = [
         clean(entry.motif_type_title, 160),
         clean(version?.title, 160),
@@ -220,6 +272,7 @@ export function buildTransferRecommendations(params: {
       );
       const stalenessPenalty = Math.max(0, Math.min(0.45, daysSince(version?.updated_at || version?.created_at) / 900));
       const statusPenalty = entry.status === "deprecated" || entry.status === "cancelled" ? 0.22 : 0;
+      const scopeBoost = scopedMatch ? 0.18 : 0;
       const score = algoV3
         ? Math.max(
             0,
@@ -228,7 +281,8 @@ export function buildTransferRecommendations(params: {
               semanticMatch * 0.52 +
                 structuralMatch * 0.2 +
                 usagePrior * 0.18 -
-                stalenessPenalty * 0.1 -
+                stalenessPenalty * 0.1 +
+                scopeBoost -
                 stableProfilePenalty -
                 healthReligionPenalty -
                 statusPenalty
@@ -240,7 +294,8 @@ export function buildTransferRecommendations(params: {
               1,
                 semanticMatch * 0.62 +
                 Number(entry?.usage_stats?.transfer_confidence || 0.7) * 0.32 +
-                (entry.usage_stats?.adopted_count || 0) * 0.01 -
+                (entry.usage_stats?.adopted_count || 0) * 0.01 +
+                scopeBoost -
                 stableProfilePenalty -
                 healthReligionPenalty -
                 statusPenalty
@@ -291,18 +346,19 @@ export function buildTransferRecommendations(params: {
     })
     .sort((a, b) => b.match_score - a.match_score || a.motif_type_id.localeCompare(b.motif_type_id));
 
-  if (!scoredCandidates.length) return [];
-  const desiredCount = Math.min(maxCount, scoredCandidates.length);
-  const minCount = scoredCandidates.length >= 2 ? Math.min(2, desiredCount) : 1;
+  const eligibleCandidates = scoredCandidates.filter((x: any) => Number(x.match_score || 0) >= MIN_TRANSFER_RECOMMENDATION_SCORE);
+  if (!eligibleCandidates.length) return [];
+  const desiredCount = Math.min(maxCount, eligibleCandidates.length);
+  const minCount = eligibleCandidates.length >= 2 ? Math.min(2, desiredCount) : 1;
   const selected = (algoV3
     ? mmrSelect(
-        scoredCandidates,
+        eligibleCandidates,
         Math.max(minCount, desiredCount),
         0.72,
         (x: any) => Number(x.match_score || 0),
         (a: any, b: any) => overlapScoreArray(a?._tokens || [], b?._tokens || [])
       )
-    : scoredCandidates.slice(0, Math.max(minCount, desiredCount))
+    : eligibleCandidates.slice(0, Math.max(minCount, desiredCount))
   ).sort((a, b) => b.match_score - a.match_score || a.motif_type_id.localeCompare(b.motif_type_id));
 
   return selected.map((x: any) => {
