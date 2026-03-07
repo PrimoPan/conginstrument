@@ -1,5 +1,6 @@
 import type {
   MotifTransferActiveInjection,
+  TransferApplicationScope,
   MotifTransferDecisionAction,
   MotifTransferDecisionRecord,
   MotifTransferRecommendation,
@@ -21,9 +22,13 @@ function decisionId() {
 }
 
 function nextDecisionStatus(action: MotifTransferDecisionAction): TransferDecisionStatus {
-  if (action === "adopt") return "adopted";
-  if (action === "modify") return "modified_pending_confirmation";
+  if (action === "adopt" || action === "modify") return "pending_confirmation";
+  if (action === "confirm") return "adopted";
   return "ignored";
+}
+
+function normalizeApplicationScope(raw: any): TransferApplicationScope {
+  return clean(raw, 24) === "local" ? "local" : "trip";
 }
 
 function nextMode(
@@ -31,6 +36,7 @@ function nextMode(
   recMode: TransferRecommendedMode,
   modeOverride?: TransferRecommendedMode
 ): TransferRecommendedMode {
+  if (action === "confirm") return modeOverride || recMode || "A";
   if (modeOverride === "A" || modeOverride === "B" || modeOverride === "C") return modeOverride;
   if (action === "adopt") return "A";
   if (action === "modify") return "B";
@@ -44,12 +50,12 @@ function upsertInjection(params: {
   modeOverride?: TransferRecommendedMode;
   revisedText?: string;
   at: string;
+  applicationScope?: TransferApplicationScope;
 }): MotifTransferActiveInjection[] {
   const kept = (params.current || []).filter((x) => x.candidate_id !== params.recommendation.candidate_id);
-  if (params.action === "ignore") return kept;
+  if (params.action === "ignore" || params.action === "confirm") return kept;
 
   const mode = nextMode(params.action, params.recommendation.recommended_mode, params.modeOverride);
-  const injectionState = params.action === "modify" ? "pending_confirmation" : "injected";
   const baseConfidence = Math.max(0.45, Math.min(0.98, Number(params.recommendation.match_score || 0.72)));
   const constraintText =
     clean(params.revisedText, 320) ||
@@ -63,12 +69,13 @@ function upsertInjection(params: {
       motif_type_id: params.recommendation.motif_type_id,
       motif_type_title: params.recommendation.motif_type_title,
       mode,
-      injection_state: injectionState,
+      injection_state: "pending_confirmation",
       transfer_confidence: baseConfidence,
       constraint_text: constraintText,
       source_task_id: params.recommendation.source_task_id,
       source_conversation_id: params.recommendation.source_conversation_id,
       adopted_at: params.at,
+      application_scope: normalizeApplicationScope(params.applicationScope),
     },
   ];
 }
@@ -81,6 +88,7 @@ export function applyTransferDecision(params: {
   modeOverride?: TransferRecommendedMode;
   revisedText?: string;
   note?: string;
+  applicationScope?: TransferApplicationScope;
 }): { state: MotifTransferState; decision: MotifTransferDecisionRecord; followupQuestion?: string } {
   const now = new Date().toISOString();
   const state: MotifTransferState = params.currentState
@@ -103,6 +111,7 @@ export function applyTransferDecision(params: {
     decided_at: now,
     revised_text: clean(params.revisedText, 320) || undefined,
     note: clean(params.note, 220) || undefined,
+    application_scope: normalizeApplicationScope(params.applicationScope),
   };
   state.decisions = [...state.decisions, decision].slice(-120);
   state.activeInjections = upsertInjection({
@@ -112,6 +121,7 @@ export function applyTransferDecision(params: {
     modeOverride: params.modeOverride,
     revisedText: params.revisedText,
     at: now,
+    applicationScope: params.applicationScope,
   });
   state.recommendations = (state.recommendations || []).map((x) =>
     x.candidate_id === params.recommendation.candidate_id
@@ -124,28 +134,31 @@ export function applyTransferDecision(params: {
   );
   state.lastDecisionAt = now;
 
+  const confirmText = clean(
+    params.revisedText || params.recommendation.reusable_description || params.recommendation.motif_type_title,
+    120
+  );
+  const scopeTextZh = normalizeApplicationScope(params.applicationScope) === "local" ? "只在当前问题里参考" : "整趟都沿用";
+  const scopeTextEn =
+    normalizeApplicationScope(params.applicationScope) === "local"
+      ? "use it only for the current sub-problem"
+      : "carry it through the trip";
   const followupQuestion =
-    params.action === "modify"
+    params.action === "adopt" || params.action === "modify"
       ? t(
           params.locale,
-          `我先记下你修改后的版本了。确认一下：这次要按「${clean(
-            params.revisedText || params.recommendation.motif_type_title,
-            120
-          )}」这条思路继续规划吗？`,
-          `I saved your revised version. Confirm: should this trip continue with "${clean(
-            params.revisedText || params.recommendation.motif_type_title,
-            120
-          )}"`
+          `我先把这条历史思路放进待确认区了。确认一下：这次要${scopeTextZh}「${confirmText}」吗？`,
+          `I put this past motif into pending confirmation. Confirm: should this trip ${scopeTextEn}: "${confirmText}"?`
         )
       : undefined;
 
   return { state, decision, followupQuestion };
 }
 
-export function confirmModifiedInjection(params: {
+export function confirmTransferInjection(params: {
   currentState?: MotifTransferState | null;
   candidateId: string;
-}): MotifTransferState {
+}): { state: MotifTransferState; decision?: MotifTransferDecisionRecord } {
   const state: MotifTransferState = params.currentState
     ? {
         ...params.currentState,
@@ -158,21 +171,45 @@ export function confirmModifiedInjection(params: {
     : emptyMotifTransferState();
 
   const now = new Date().toISOString();
+  const candidateId = clean(params.candidateId, 220);
+  const pendingInjection = state.activeInjections.find(
+    (x) => x.candidate_id === candidateId && x.injection_state === "pending_confirmation"
+  );
+  if (!pendingInjection) return { state };
+
   state.activeInjections = state.activeInjections.map((x) =>
-    x.candidate_id === clean(params.candidateId, 220) && x.injection_state === "pending_confirmation"
-      ? { ...x, injection_state: "injected", adopted_at: now, mode: "B" }
+    x.candidate_id === candidateId && x.injection_state === "pending_confirmation"
+      ? { ...x, injection_state: "injected", adopted_at: now }
       : x
   );
   state.decisions = state.decisions.map((x) =>
-    x.candidate_id === clean(params.candidateId, 220) && x.decision_status === "modified_pending_confirmation"
+    x.candidate_id === candidateId && x.decision_status === "pending_confirmation"
       ? { ...x, decision_status: "adopted", decided_at: now }
       : x
   );
   state.recommendations = state.recommendations.map((x) =>
-    x.candidate_id === clean(params.candidateId, 220)
-      ? { ...x, decision_status: "adopted", decision_at: now, recommended_mode: "B" }
+    x.candidate_id === candidateId
+      ? { ...x, decision_status: "adopted", decision_at: now, recommended_mode: pendingInjection.mode || "A" }
       : x
   );
+  const decision: MotifTransferDecisionRecord = {
+    id: decisionId(),
+    candidate_id: candidateId,
+    action: "confirm",
+    decision_status: "adopted",
+    decided_at: now,
+    application_scope: pendingInjection.application_scope,
+  };
+  state.decisions = [...state.decisions, decision].slice(-120);
   state.lastDecisionAt = now;
-  return state;
+  return { state, decision };
+}
+
+// Backward-compatible alias for older call sites and tests that still expect the
+// pre-confirmation helper to return only the updated state.
+export function confirmModifiedInjection(params: {
+  currentState?: MotifTransferState | null;
+  candidateId: string;
+}): MotifTransferState {
+  return confirmTransferInjection(params).state;
 }

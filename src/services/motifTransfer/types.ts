@@ -1,11 +1,12 @@
 import type { AppLocale } from "../../i18n/locale.js";
 
 export type TransferRecommendedMode = "A" | "B" | "C";
-export type TransferDecisionAction = "adopt" | "modify" | "ignore";
+export type TransferApplicationScope = "trip" | "local";
+export type TransferDecisionAction = "adopt" | "modify" | "ignore" | "confirm";
 export type TransferDecisionStatus =
   | "pending"
+  | "pending_confirmation"
   | "adopted"
-  | "modified_pending_confirmation"
   | "ignored"
   | "revised";
 export type TransferInjectionState = "injected" | "pending_confirmation" | "disabled";
@@ -40,6 +41,7 @@ export type MotifTransferDecisionRecord = {
   decided_at: string;
   revised_text?: string;
   note?: string;
+  application_scope?: TransferApplicationScope;
 };
 
 export type MotifTransferActiveInjection = {
@@ -54,6 +56,7 @@ export type MotifTransferActiveInjection = {
   source_conversation_id?: string;
   adopted_at: string;
   disabled_reason?: string;
+  application_scope?: TransferApplicationScope;
 };
 
 export type MotifTransferFeedbackEvent = {

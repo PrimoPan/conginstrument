@@ -26,9 +26,10 @@ export function buildTransferredConstraintPrompt(params: {
   );
   const lines = injected.slice(0, 6).map((x, idx) => {
     const mode = x.mode === "A" ? "implicit" : x.mode === "B" ? "guided" : "reference";
+    const scope = x.application_scope === "local" ? "local" : "trip";
     return `${idx + 1}. [${mode}] ${clean(x.constraint_text, 220)} (confidence=${Number(
       x.transfer_confidence || 0.7
-    ).toFixed(2)})`;
+    ).toFixed(2)}, scope=${scope})`;
   });
   return [heading, ...lines].join("\n");
 }

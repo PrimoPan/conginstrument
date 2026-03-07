@@ -60,7 +60,7 @@ export type MotifTransferCandidate = {
   status: "active" | "uncertain" | "deprecated" | "cancelled";
   match_score: number;
   recommended_mode: "A" | "B" | "C";
-  decision_status: "pending" | "adopted" | "modified_pending_confirmation" | "ignored" | "revised";
+  decision_status: "pending" | "pending_confirmation" | "adopted" | "ignored" | "revised";
   decision_at?: string;
   reason: string;
 };
@@ -778,7 +778,7 @@ export function buildCognitiveState(params: {
             : "B",
         decision_status:
           clean(r.decision_status, 40) === "adopted" ||
-          clean(r.decision_status, 40) === "modified_pending_confirmation" ||
+          clean(r.decision_status, 40) === "pending_confirmation" ||
           clean(r.decision_status, 40) === "ignored" ||
           clean(r.decision_status, 40) === "revised"
             ? (clean(r.decision_status, 40) as any)

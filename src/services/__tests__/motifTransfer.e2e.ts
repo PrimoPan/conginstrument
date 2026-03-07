@@ -4,7 +4,7 @@ import type { TravelPlanState } from "../travelPlan/state.js";
 import { buildTransferRecommendations } from "../motifTransfer/retrieval.js";
 import {
   applyTransferDecision,
-  confirmModifiedInjection,
+  confirmTransferInjection,
 } from "../motifTransfer/decision.js";
 import { applyTransferFeedback } from "../motifTransfer/feedback.js";
 import {
@@ -341,7 +341,7 @@ async function main() {
     assert.equal(recs.every((x) => x.source_task_id === "task_sz_1"), true);
   });
 
-  await run("adopt / modify / ignore 三选一决策可持久化到 transfer state", () => {
+  await run("adopt / modify / ignore 三选一决策会先进入待确认，再由用户最终确认", () => {
     if (transferState.recommendations.length < 3) {
       transferState = {
         ...transferState,
@@ -390,7 +390,9 @@ async function main() {
 
     assert.equal(transferState.decisions.length, 3);
     assert.ok(
-      transferState.activeInjections.some((x) => x.candidate_id === adoptRec.candidate_id && x.injection_state === "injected")
+      transferState.activeInjections.some(
+        (x) => x.candidate_id === adoptRec.candidate_id && x.injection_state === "pending_confirmation"
+      )
     );
     assert.ok(
       transferState.activeInjections.some(
@@ -403,13 +405,15 @@ async function main() {
     );
   });
 
-  await run("modify 后用户确认可进入 Mode B 注入", () => {
-    const pending = transferState.activeInjections.find((x) => x.injection_state === "pending_confirmation");
+  await run("pending confirmation 经用户确认后可正式注入", () => {
+    const pending = transferState.activeInjections.find(
+      (x) => x.injection_state === "pending_confirmation" && x.mode === "B"
+    );
     assert.ok(pending, "missing pending confirmation injection");
-    transferState = confirmModifiedInjection({
+    transferState = confirmTransferInjection({
       currentState: transferState,
       candidateId: pending!.candidate_id,
-    });
+    }).state;
     const updated = transferState.activeInjections.find((x) => x.candidate_id === pending!.candidate_id);
     assert.ok(updated && updated.injection_state === "injected");
     assert.equal(updated?.mode, "B");
@@ -473,6 +477,13 @@ async function main() {
   });
 
   await run("注入约束提示仅包含 injected 规则，并可映射到 motif 字段", () => {
+    const remainingPending = transferState.activeInjections.find((x) => x.injection_state === "pending_confirmation");
+    if (remainingPending) {
+      transferState = confirmTransferInjection({
+        currentState: transferState,
+        candidateId: remainingPending.candidate_id,
+      }).state;
+    }
     const prompt = buildTransferredConstraintPrompt({
       locale,
       state: transferState,
