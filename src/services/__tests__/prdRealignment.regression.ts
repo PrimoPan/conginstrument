@@ -282,6 +282,51 @@ run("reasoning-step safe schema fields present", () => {
   assert.ok(Array.isArray(first.depends_on));
 });
 
+run("motif reconciliation should expose prd structural fields", () => {
+  const graph = {
+    id: "g_prd_motif_fields",
+    version: 1,
+    nodes: [
+      {
+        id: "n_goal",
+        type: "belief",
+        layer: "intent",
+        statement: "意图：完成旅行计划",
+        status: "confirmed",
+        confidence: 0.9,
+        importance: 0.88,
+        key: "slot:goal",
+      },
+      {
+        id: "n_budget",
+        type: "constraint",
+        layer: "requirement",
+        statement: "预算上限：10000元",
+        status: "confirmed",
+        confidence: 0.88,
+        importance: 0.8,
+        key: "slot:budget",
+      },
+    ],
+    edges: [{ id: "e1", from: "n_budget", to: "n_goal", type: "constraint", confidence: 0.86 }],
+  } as any;
+
+  const concepts = deriveConceptsFromGraph(graph);
+  const motifs = reconcileMotifsWithGraph({ graph, concepts, baseMotifs: [] });
+  assert.ok(motifs.length >= 1);
+  const motif = motifs[0] as any;
+  assert.ok(Array.isArray(motif.source_concept_ids));
+  assert.equal(typeof motif.source_concept_id, "string");
+  assert.equal(typeof motif.target_concept_id, "string");
+  assert.equal(motif.causal_link_type, "constraint");
+  assert.equal(typeof motif.pattern_type, "string");
+  assert.ok(motif.concept_instances);
+  assert.ok(Array.isArray(motif.concept_instances.sources));
+  assert.ok(motif.concept_instances.sources.length >= 1);
+  assert.equal(motif.concept_instances.sources[0]?.concept_id, motif.source_concept_id);
+  assert.equal(motif.concept_instances.target?.concept_id, motif.target_concept_id);
+});
+
 run("long motif identifiers should not drop reasoning edges", () => {
   const longA = `m_${"a".repeat(180)}`;
   const longB = `m_${"b".repeat(180)}`;
@@ -447,6 +492,10 @@ run("user-resolved motif edits should persist relation/structure/status", () => 
       sources: baseline.conceptIds.filter((x) => x !== baseline.anchorConceptId).slice(0, 1),
       target: baseline.anchorConceptId,
     },
+    concept_instances: {
+      sources: (baseline as any).concept_instances?.sources?.map((item: any) => JSON.stringify(item)) || [],
+      target: JSON.stringify((baseline as any).concept_instances?.target),
+    },
   };
 
   const next = reconcileMotifsWithGraph({
@@ -460,6 +509,8 @@ run("user-resolved motif edits should persist relation/structure/status", () => 
   assert.equal(persisted?.relation, "determine");
   assert.equal(persisted?.status, "cancelled");
   assert.equal(persisted?.resolvedBy, "user");
+  assert.ok((persisted as any)?.concept_instances);
+  assert.ok(Array.isArray((persisted as any)?.concept_instances?.sources));
 });
 
 run("manual user motif should not be cancelled when still supported by concepts", () => {

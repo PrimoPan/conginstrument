@@ -33,6 +33,13 @@ export type MotifConceptBinding = {
   target: string[];
 };
 
+export type MotifConceptInstance = {
+  concept_id: string;
+  title: string;
+  semantic_key?: string;
+  family?: string;
+};
+
 export type MotifEvidenceItem = {
   quote: string;
   source?: string;
@@ -65,6 +72,10 @@ export type ConceptMotif = {
   motifType: ConceptMotifType;
   relation: EdgeType;
   roles: MotifRoles;
+  source_concept_ids?: string[];
+  source_concept_id?: string;
+  target_concept_id?: string;
+  causal_link_type?: SemanticMotifType;
   scope: string;
   aliases: string[];
   concept_bindings: string[];
@@ -101,6 +112,11 @@ export type ConceptMotif = {
   motif_type_dependency?: MotifDependencyType[];
   motif_type_role_schema?: MotifTypeRoleSchema;
   motif_type_reusable_description?: string;
+  pattern_type?: string;
+  concept_instances?: {
+    sources: MotifConceptInstance[];
+    target: MotifConceptInstance | null;
+  };
   motif_instance_id?: string;
   motif_instance_status?: MotifInstanceStatus;
   context?: string;
@@ -724,6 +740,65 @@ function motifEvidenceFromConcepts(conceptIds: string[], conceptById: Map<string
   return out;
 }
 
+function motifConceptInstanceFromId(
+  conceptId: string,
+  conceptById: Map<string, ConceptItem>
+): MotifConceptInstance | null {
+  const cleanId = cleanText(conceptId, 100);
+  if (!cleanId) return null;
+  const concept = conceptById.get(cleanId);
+  return {
+    concept_id: cleanId,
+    title: cleanText(concept?.title, 120) || cleanId,
+    semantic_key: cleanText((concept as any)?.semanticKey, 160) || undefined,
+    family: cleanText((concept as any)?.family, 60) || undefined,
+  };
+}
+
+function normalizeMotifConceptInstance(raw: any): MotifConceptInstance | null {
+  let normalizedRaw = raw;
+  if (typeof normalizedRaw === "string") {
+    const text = normalizedRaw.trim();
+    if (!text) return null;
+    if (text.startsWith("{")) {
+      try {
+        normalizedRaw = JSON.parse(text);
+      } catch {
+        return null;
+      }
+    } else {
+      const conceptId = cleanText(text, 100);
+      if (!conceptId) return null;
+      return {
+        concept_id: conceptId,
+        title: conceptId,
+      };
+    }
+  }
+  const concept_id = cleanText(normalizedRaw?.concept_id || normalizedRaw?.conceptId, 100);
+  if (!concept_id) return null;
+  return {
+    concept_id,
+    title: cleanText(normalizedRaw?.title, 120) || concept_id,
+    semantic_key: cleanText(normalizedRaw?.semantic_key || normalizedRaw?.semanticKey, 160) || undefined,
+    family: cleanText(normalizedRaw?.family, 60) || undefined,
+  };
+}
+
+function dedupeMotifConceptInstances(rawItems: any[], max = 12): MotifConceptInstance[] {
+  const out: MotifConceptInstance[] = [];
+  const seen = new Set<string>();
+  for (const raw of rawItems) {
+    const item = normalizeMotifConceptInstance(raw);
+    if (!item) continue;
+    if (seen.has(item.concept_id)) continue;
+    seen.add(item.concept_id);
+    out.push(item);
+    if (out.length >= max) break;
+  }
+  return out;
+}
+
 function motifContext(
   m: ConceptMotif,
   conceptById: Map<string, ConceptItem>,
@@ -835,6 +910,16 @@ function withCausalSemantics(
   const motifInstanceStatus = normalizeMotifInstanceStatus((m as any)?.motif_instance_status || guardedStatus);
   const motifEvidence = motifEvidenceFromConcepts(conceptIds, conceptById);
   const context = cleanText((m as any)?.context, 120) || motifContext(m, conceptById, scope, locale);
+  const conceptInstances = {
+    sources: sourceIds
+      .map((id) => motifConceptInstanceFromId(id, conceptById))
+      .filter((item): item is MotifConceptInstance => !!item),
+    target: motifConceptInstanceFromId(anchorConceptId, conceptById),
+  };
+  const patternType =
+    cleanText((m as any)?.pattern_type, 160) ||
+    cleanText((m as any)?.motif_type_title, 160) ||
+    motifTypeTitle(m, conceptById, locale);
 
   return {
     ...m,
@@ -844,6 +929,10 @@ function withCausalSemantics(
       sources: sourceIds,
       target: anchorConceptId,
     },
+    source_concept_ids: sourceIds,
+    source_concept_id: sourceIds[0] || undefined,
+    target_concept_id: anchorConceptId || undefined,
+    causal_link_type: semanticMotifType(dep),
     scope,
     aliases,
     concept_bindings: conceptIds,
@@ -866,6 +955,8 @@ function withCausalSemantics(
     motif_type_reusable_description:
       cleanText((m as any)?.motif_type_reusable_description, 220) ||
       motifTypeReusableDescription(m, conceptById, locale),
+    pattern_type: patternType,
+    concept_instances: conceptInstances,
     motif_instance_id: cleanText((m as any)?.motif_instance_id, 140) || cleanText((m as any)?.motif_id, 140) || m.id,
     motif_instance_status: motifInstanceStatus,
     context,
@@ -1342,6 +1433,30 @@ function normalizeMotifs(input: any): ConceptMotif[] {
         sources: conceptIds.filter((cid) => cid !== anchorConceptId),
         target: anchorConceptId,
       },
+      source_concept_ids: uniq(
+        (
+          Array.isArray((raw as any)?.source_concept_ids)
+            ? (raw as any).source_concept_ids
+            : conceptIds.filter((cid) => cid !== anchorConceptId)
+        ).map((x: any) => cleanText(x, 100)),
+        12
+      ),
+      source_concept_id:
+        cleanText((raw as any)?.source_concept_id, 100) ||
+        cleanText(
+          Array.isArray((raw as any)?.source_concept_ids)
+            ? (raw as any).source_concept_ids[0]
+            : conceptIds.find((cid) => cid !== anchorConceptId),
+          100
+        ) ||
+        undefined,
+      target_concept_id: cleanText((raw as any)?.target_concept_id, 100) || anchorConceptId || undefined,
+      causal_link_type:
+        cleanText((raw as any)?.causal_link_type, 24) === "enable" ||
+        cleanText((raw as any)?.causal_link_type, 24) === "constraint" ||
+        cleanText((raw as any)?.causal_link_type, 24) === "determine"
+          ? (cleanText((raw as any)?.causal_link_type, 24) as SemanticMotifType)
+          : semanticMotifType(dependencyClass),
       scope: cleanText((raw as any)?.scope, 64) || "global",
       aliases: uniq(
         [
@@ -1440,6 +1555,17 @@ function normalizeMotifs(input: any): ConceptMotif[] {
             }
           : undefined,
       motif_type_reusable_description: cleanText((raw as any)?.motif_type_reusable_description, 220) || undefined,
+      pattern_type: cleanText((raw as any)?.pattern_type, 160) || cleanText((raw as any)?.motif_type_title, 160) || undefined,
+      concept_instances:
+        (raw as any)?.concept_instances && typeof (raw as any)?.concept_instances === "object"
+          ? {
+              sources: dedupeMotifConceptInstances(
+                Array.isArray((raw as any).concept_instances?.sources) ? (raw as any).concept_instances.sources : [],
+                12
+              ),
+              target: normalizeMotifConceptInstance((raw as any).concept_instances?.target),
+            }
+          : undefined,
       motif_instance_id: cleanText((raw as any)?.motif_instance_id, 140) || id,
       motif_instance_status: motifInstanceStatus,
       context: cleanText((raw as any)?.context, 120) || undefined,
