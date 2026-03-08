@@ -205,9 +205,10 @@ function sameAnchorDisplayBucket(m: ConceptMotif): number {
     [m.motif_type_id, m.templateKey, m.motif_type_title, m.title, m.description].filter(Boolean).join(" "),
     320
   ).toLowerCase();
-  if (/budget|预算|花费|经费|余额|remaining/.test(text)) return 0;
+  if (/budget_remaining|剩余预算|余额|remaining/.test(text)) return 2;
+  if (/budget|预算|花费|经费/.test(text)) return 0;
   if (motifParallelRiskClass(m)) return 1;
-  return 2;
+  return 3;
 }
 
 function buildSyntheticParallelBranchEdges(params: {
