@@ -787,6 +787,7 @@ const cases: Case[] = [
       });
       assert.ok((en.destinations || []).includes("Kyoto"));
       assert.equal((en.destinations || []).some((item) => /new task|start over/i.test(String(item))), false);
+      assert.equal((en.destinations || []).includes("New"), false);
     },
   },
   {
@@ -805,6 +806,7 @@ const cases: Case[] = [
       );
       assert.equal(inDestination.durationDays, 8);
       assert.ok((inDestination.destinations || []).includes("Portugal"));
+      assert.equal((inDestination.destinations || []).includes("New"), false);
       assert.equal(
         (inDestination.destinations || []).some((item) => /new task|start/i.test(String(item))),
         false

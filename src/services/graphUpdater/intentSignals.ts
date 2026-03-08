@@ -1881,6 +1881,7 @@ export function isLikelyDestinationCandidate(x: string): boolean {
   if (looksLikeTripPhaseCue(x) || looksLikeTripPhaseCue(s)) return false;
   if (/(?:^|[\s])(?:是因为|因为|because)(?:[\s]|$)/i.test(String(x || ""))) return false;
   if (/^(?:剩下|其余|余下|机动|过渡|中转)$/.test(s)) return false;
+  if (/^(?:new|fresh|another|next|current)$/i.test(s)) return false;
   if (/去/.test(s)) return false;
   if (/^(?:整体|整体还是|总时长|总时长还是|总时长还是按|总行程|总行程还是|全程|整个行程|一共|总共|总计|但总时长还是)/.test(s)) {
     return false;
