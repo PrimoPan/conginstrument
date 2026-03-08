@@ -131,12 +131,19 @@ export type ManualGraphOverrideEdge = {
   updatedAt: string;
 };
 
+export type ManualGraphOverrideNode = {
+  nodeRef: string;
+  state: "active" | "removed";
+  updatedAt: string;
+};
+
 export type ManualGraphOverrides = {
   edges: ManualGraphOverrideEdge[];
+  nodes: ManualGraphOverrideNode[];
 };
 
 export function emptyManualGraphOverrides(): ManualGraphOverrides {
-  return { edges: [] };
+  return { edges: [], nodes: [] };
 }
 
 function cleanOverrideRef(input: unknown, max = 180): string {
@@ -145,6 +152,7 @@ function cleanOverrideRef(input: unknown, max = 180): string {
 
 export function normalizeManualGraphOverrides(raw: any): ManualGraphOverrides {
   const edges = Array.isArray(raw?.edges) ? raw.edges : [];
+  const nodes = Array.isArray(raw?.nodes) ? raw.nodes : [];
   const seen = new Set<string>();
   const out: ManualGraphOverrideEdge[] = [];
   for (const edge of edges) {
@@ -167,7 +175,23 @@ export function normalizeManualGraphOverrides(raw: any): ManualGraphOverrides {
       updatedAt: cleanOverrideRef(edge?.updatedAt, 48) || new Date().toISOString(),
     });
   }
-  return { edges: out };
+
+  const seenNodes = new Set<string>();
+  const outNodes: ManualGraphOverrideNode[] = [];
+  for (const node of nodes) {
+    const nodeRef = cleanOverrideRef(node?.nodeRef);
+    const state = cleanOverrideRef(node?.state) as ManualGraphOverrideNode["state"];
+    if (!nodeRef) continue;
+    if (state !== "active" && state !== "removed") continue;
+    if (seenNodes.has(nodeRef)) continue;
+    seenNodes.add(nodeRef);
+    outNodes.push({
+      nodeRef,
+      state,
+      updatedAt: cleanOverrideRef(node?.updatedAt, 48) || new Date().toISOString(),
+    });
+  }
+  return { edges: out, nodes: outNodes };
 }
 
 function nodeRefForOverride(node: ConceptNode | null | undefined): string {
@@ -216,6 +240,20 @@ function edgeOverridesFromGraph(graph: CDG): Map<string, ManualGraphOverrideEdge
   return map;
 }
 
+function nodeOverridesFromGraph(graph: CDG): Map<string, ManualGraphOverrideNode> {
+  const map = new Map<string, ManualGraphOverrideNode>();
+  for (const node of graph.nodes || []) {
+    const nodeRef = nodeRefForOverride(node);
+    if (!nodeRef) continue;
+    map.set(nodeRef, {
+      nodeRef,
+      state: "active",
+      updatedAt: new Date().toISOString(),
+    });
+  }
+  return map;
+}
+
 export function rebuildManualGraphOverrides(params: {
   prevGraph: CDG;
   nextGraph: CDG;
@@ -225,9 +263,16 @@ export function rebuildManualGraphOverrides(params: {
   const prevPairs = edgeOverridesFromGraph(params.prevGraph);
   const nextPairs = edgeOverridesFromGraph(params.nextGraph);
   const merged = new Map<string, ManualGraphOverrideEdge>();
+  const prevNodes = nodeOverridesFromGraph(params.prevGraph);
+  const nextNodes = nodeOverridesFromGraph(params.nextGraph);
+  const mergedNodes = new Map<string, ManualGraphOverrideNode>();
 
-  for (const edge of normalizeManualGraphOverrides(params.existing).edges) {
+  const normalizedExisting = normalizeManualGraphOverrides(params.existing);
+  for (const edge of normalizedExisting.edges) {
     merged.set(edgePairRefKey(edge.fromRef, edge.toRef), edge);
+  }
+  for (const node of normalizedExisting.nodes) {
+    mergedNodes.set(node.nodeRef, node);
   }
 
   for (const [pairKey, nextEdge] of nextPairs.entries()) {
@@ -259,19 +304,62 @@ export function rebuildManualGraphOverrides(params: {
     });
   }
 
+  for (const [nodeRef, nextNode] of nextNodes.entries()) {
+    const prevNode = prevNodes.get(nodeRef);
+    if (!prevNode) {
+      mergedNodes.set(nodeRef, { ...nextNode, state: "active", updatedAt: params.updatedAt });
+      continue;
+    }
+    const existingOverride = mergedNodes.get(nodeRef);
+    if (!existingOverride || existingOverride.state === "removed") {
+      mergedNodes.set(nodeRef, {
+        nodeRef,
+        state: "active",
+        updatedAt: params.updatedAt,
+      });
+      continue;
+    }
+    mergedNodes.set(nodeRef, {
+      ...existingOverride,
+      state: "active",
+    });
+  }
+
+  for (const [nodeRef, prevNode] of prevNodes.entries()) {
+    if (nextNodes.has(nodeRef)) continue;
+    mergedNodes.set(nodeRef, {
+      ...prevNode,
+      state: "removed",
+      updatedAt: params.updatedAt,
+    });
+  }
+
   const edges = Array.from(merged.values()).filter((edge) => !!edge.fromRef && !!edge.toRef && edge.fromRef !== edge.toRef);
-  return normalizeManualGraphOverrides({ edges });
+  const nodes = Array.from(mergedNodes.values()).filter((node) => !!node.nodeRef);
+  return normalizeManualGraphOverrides({ edges, nodes });
 }
 
 export function applyManualGraphOverrides(graph: CDG, rawOverrides: ManualGraphOverrides | null | undefined): CDG {
   const overrides = normalizeManualGraphOverrides(rawOverrides);
-  if (!overrides.edges.length) return graph;
-  const nodeById = new Map((graph.nodes || []).map((node) => [node.id, node]));
+  if (!overrides.edges.length && !overrides.nodes.length) return graph;
+  const removedNodeRefs = new Set(
+    overrides.nodes
+      .filter((node) => node.state === "removed")
+      .map((node) => node.nodeRef)
+  );
+  const shouldKeepNode = (node: ConceptNode) => {
+    const nodeRef = nodeRefForOverride(node);
+    return !nodeRef || !removedNodeRefs.has(nodeRef);
+  };
+
+  const nextNodes = (graph.nodes || []).filter((node) => shouldKeepNode(node));
+  const nodeById = new Map(nextNodes.map((node) => [node.id, node]));
   const overridesByPair = new Map(overrides.edges.map((edge) => [edgePairRefKey(edge.fromRef, edge.toRef), edge]));
   const nextEdges = [];
   const presentPairs = new Set<string>();
 
   for (const edge of graph.edges || []) {
+    if (!nodeById.has(edge.from) || !nodeById.has(edge.to)) continue;
     const fromRef = nodeRefForOverride(nodeById.get(edge.from));
     const toRef = nodeRefForOverride(nodeById.get(edge.to));
     if (!fromRef || !toRef) {
@@ -313,6 +401,7 @@ export function applyManualGraphOverrides(graph: CDG, rawOverrides: ManualGraphO
 
   return {
     ...graph,
+    nodes: nextNodes,
     edges: nextEdges,
   };
 }

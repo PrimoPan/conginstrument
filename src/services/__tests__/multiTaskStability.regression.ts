@@ -82,7 +82,7 @@ function run(name: string, fn: () => void | Promise<void>) {
 }
 
 function emptyOverrides(): ManualGraphOverrides {
-  return { edges: [] };
+  return { edges: [], nodes: [] };
 }
 
 function findNodeIdByKeyPrefix(graph: CDG, keyPrefix: string | string[]): string {

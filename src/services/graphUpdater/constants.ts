@@ -5,13 +5,13 @@ export const MEDICAL_HEALTH_RE =
   /心脏|心肺|冠心|冠脉|冠状动脉|心血管|支架|心梗|高血压|糖尿病|哮喘|慢性病|手术|过敏|孕|行动不便|不能爬山|不能久走|焦虑|惊恐|抑郁|health|medical|heart|cardiac|anxiety|panic|depression|stent/i;
 
 export const HEALTH_STRATEGY_ACTIVITY_RE =
-  /低强度|慢节奏|轻松|少走路|少步行|减少体力|不要太累|不想太累|不太折腾|不要太折腾|少折腾|不想太赶|不要太赶|别太赶|节奏别太赶|行程别太赶|不宜剧烈|避免剧烈|low[-\s]?intensity|light[-\s]?activity|low[-\s]?exertion|avoid overexertion|low[-\s]?hassle/i;
+  /低强度|慢节奏|轻松|少走路|少步行|减少体力|不要太累|不想太累|不太折腾|不要太折腾|少折腾|不想太赶|不要太赶|别太赶|节奏别太赶|行程别太赶|行程不能安排太满|不要安排太满|别安排太满|安排不要太满|不要爬坡|别爬坡|不能爬坡|不宜剧烈|避免剧烈|low[-\s]?intensity|light[-\s]?activity|low[-\s]?exertion|avoid overexertion|low[-\s]?hassle|not too packed|don'?t pack (?:the )?(?:trip|itinerary) too tightly|avoid slopes?|avoid uphill/i;
 
 export const HEALTH_STRATEGY_DIET_RE =
   /低盐|低脂|高纤维|清淡|少油|少糖|地中海饮食|low[-\s]?salt|low[-\s]?fat|high[-\s]?fiber|diet/i;
 
 export const LOW_HASSLE_TRAVEL_RE =
-  /不想太累|不要太累|不太折腾|不要太折腾|少折腾|轻松一点|慢节奏|低强度|减少体力|少走路|少步行|不想太赶|不要太赶|别太赶|节奏别太赶|行程别太赶|中老年|老人|老年|带爸妈|父母同行|family[-\s]?friendly|senior[-\s]?friendly|low[-\s]?hassle|easy[-\s]?pace/i;
+  /不想太累|不要太累|不太折腾|不要太折腾|少折腾|轻松一点|慢节奏|低强度|减少体力|少走路|少步行|不想太赶|不要太赶|别太赶|节奏别太赶|行程别太赶|行程不能安排太满|不要安排太满|别安排太满|安排不要太满|不要爬坡|别爬坡|不能爬坡|中老年|老人|老年|带爸妈|父母同行|family[-\s]?friendly|senior[-\s]?friendly|low[-\s]?hassle|easy[-\s]?pace|not too packed|don'?t pack (?:the )?(?:trip|itinerary) too tightly|avoid slopes?|avoid uphill/i;
 
 export const MINIMIZE_HOTEL_SWITCH_RE =
   /少换酒店|别换太频繁|不要每天换酒店|不想每天换酒店|不想频繁换酒店|不想老换酒店|少搬酒店|减少换酒店|住同一家酒店|同一家酒店连住|minimi[sz]e hotel changes|avoid changing hotels frequently/i;

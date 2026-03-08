@@ -2699,12 +2699,11 @@ export function normalizeActivityPreferenceStatement(raw: string, locale?: AppLo
   const hasWildlife = /看(?:袋鼠|考拉|企鹅|鲸|海豚|动物)|野生动物|wildlife|kangaroo|koala|penguin|whale|dolphin/i.test(s);
   const hasBoating =
     /划船|坐船|乘船|游船|皮划艇|漂流|boat(?:ing| ride)?|ferry|cruise|kayak|rowing|paddl(?:e|ing)/i.test(s);
-  const hasLowIntensity = HEALTH_STRATEGY_ACTIVITY_RE.test(s);
-  if (!hasSports && !hasEvent && !hasWildlife && !hasBoating && !hasLowIntensity) return null;
+  if (!hasSports && !hasEvent && !hasWildlife && !hasBoating) return null;
   if (
     !HARD_REQUIRE_RE.test(s) &&
     !HARD_CONSTRAINT_RE.test(s) &&
-    !/喜欢|偏好|热爱|粉丝|球迷|想看|想去|想划|想坐|想乘|一定要|必须|务必|绝对|希望|尽量|减少|选择|采用|低强度|轻松|避免|不要|不能|不宜|不想太赶|别太赶|不要太赶|节奏别太赶|行程别太赶|因为|是因为|because|boat|boating|cruise|kayak|rowing/i.test(
+    !/喜欢|偏好|热爱|粉丝|球迷|想看|想去|想划|想坐|想乘|一定要|必须|务必|绝对|希望|尽量|减少|选择|采用|避免|不要|不能|不宜|因为|是因为|because|boat|boating|cruise|kayak|rowing/i.test(
       s
     )
   ) {
@@ -2712,8 +2711,7 @@ export function normalizeActivityPreferenceStatement(raw: string, locale?: AppLo
   }
   const hard =
     HARD_REQUIRE_RE.test(s) ||
-    HARD_CONSTRAINT_RE.test(s) ||
-    (hasLowIntensity && /必须|务必|避免|不要|不能|不宜|只/i.test(s));
+    HARD_CONSTRAINT_RE.test(s);
   const normalizeTeamName = (x: string) =>
     cleanStatement(x || "", 24)
       .replace(/^(?:我是|我|一个|一名|个|位)+\s*/i, "")
@@ -2726,11 +2724,7 @@ export function normalizeActivityPreferenceStatement(raw: string, locale?: AppLo
     "";
   const team = normalizeTeamName(teamRaw);
   const en = isEnglishLocale(locale);
-  const statement = hasLowIntensity
-    ? en
-      ? "Activity preference: low-intensity itinerary with reduced exertion"
-      : "活动偏好：低强度行程，减少体力负担"
-    : hasWildlife
+  const statement = hasWildlife
     ? en
       ? "Activity preference: prioritize wildlife experiences"
       : "活动偏好：野生动物体验优先"
@@ -2841,8 +2835,19 @@ function stripLeadingDestinationContext(raw: string, destinationHints?: string[]
     const candidateHasRevisionCue = /(?:一开始|起初|最初|原本|本来|原先|先前|之前|最开始|刚开始|后来|后面|现在|这次|如今|也还是|还是|依然|仍然|继续|不过|但|不|想|要|希望|最好|尽量|觉得|以为|认为)/.test(
       candidateRaw
     );
+    const nonDestinationLead =
+      /酒店|住宿|民宿|房型|地铁|夜市|老街|步道|纪念堂|博物馆|美术馆|公园|商圈|景区|景点|场馆|hotel|lodging|accommodation|metro|museum|park|market|venue|poi/i.test(
+        candidateRaw
+      );
     const allowCandidateStrip = !candidateHasRevisionCue || candidateBase !== candidateRaw;
-    if (allowCandidateStrip && !discourseOnlyLead && candidate && isLikelyDestinationCandidate(candidate) && remainder) {
+    if (
+      allowCandidateStrip &&
+      !discourseOnlyLead &&
+      !nonDestinationLead &&
+      candidate &&
+      isLikelyDestinationCandidate(candidate) &&
+      remainder
+    ) {
       text = remainder
         .replace(/^(?:也还是|还是|依然|仍然|继续|这次|那次|这趟|那趟|不过|但)\s*/i, "")
         .trim();
@@ -2912,6 +2917,12 @@ function hasExplicitConstraintNegationCue(text: string): boolean {
   const s = cleanStatement(text || "", 160);
   if (!s) return false;
   if (/请确认|是否|是不是|不确定|不知道|吗[？?]?$/i.test(s)) return false;
+  const stableNegativeConstraint =
+    (LOW_HASSLE_TRAVEL_RE.test(s) || /不要爬坡|别爬坡|不能爬坡|avoid slopes?|avoid uphill/i.test(s)) &&
+    !/(?:一开始|起初|最初|原本|本来|先前|后来|后面|现在|这次|如今|改主意|改了|改成|改为|不再|取消|去掉|no longer|changed my mind|anymore)/i.test(
+      s
+    );
+  if (stableNegativeConstraint) return false;
   if (/(?:不要|不能|不可|不得|别再?|勿|避免|禁止|取消|去掉|不用|无需|不再|不必|不想)\s*[^\s，。,；;！!？?]{1,20}/i.test(s)) {
     return true;
   }
@@ -3858,40 +3869,12 @@ export function extractIntentSignals(userText: string, opts?: { historyMode?: bo
     .sort((a, b) => b.priority - a.priority)
     .map((x) => x.normalized)
     .find(Boolean);
-  const lodgingStrategyFromGeneric = genericConstraints
-    .map((x) => {
-      const text = String(x.text || "");
-      let priority = 0;
-      if (TRANSPORT_CONVENIENCE_RE.test(text)) priority = 5;
-      else if (SAFETY_STRATEGY_RE.test(text)) priority = 4;
-      else if (x.kind === "safety") priority = 2;
-      return { item: x, priority };
-    })
-    .filter((x) => x.priority > 0)
-    .sort(
-      (a, b) =>
-        b.priority - a.priority ||
-        clampImportance(b.item.importance, 0.66) - clampImportance(a.item.importance, 0.66)
-    )
-    .map((x) => x.item)
-    .find(Boolean);
   if (!revokedPreferenceAxes.has("preference:lodging")) {
     if (lodgingClause) {
       out.lodgingPreference = lodgingClause.statement;
       out.lodgingPreferenceHard = lodgingClause.hard;
       out.lodgingPreferenceEvidence = lodgingClause.evidence;
       out.lodgingPreferenceImportance = lodgingClause.hard ? 0.82 : 0.66;
-    } else if (lodgingStrategyFromGeneric) {
-      out.lodgingPreference = cleanStatement(lodgingStrategyFromGeneric.text, 72);
-      out.lodgingPreferenceHard = !!lodgingStrategyFromGeneric.hard;
-      out.lodgingPreferenceEvidence = cleanStatement(
-        lodgingStrategyFromGeneric.evidence || lodgingStrategyFromGeneric.text,
-        60
-      );
-      out.lodgingPreferenceImportance = clampImportance(
-        lodgingStrategyFromGeneric.importance,
-        lodgingStrategyFromGeneric.hard ? 0.8 : 0.66
-      );
     }
   }
 

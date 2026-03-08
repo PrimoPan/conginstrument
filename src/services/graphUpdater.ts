@@ -14,6 +14,7 @@ import { extractIntentSignalsByFunctionCall } from "./graphUpdater/slotFunctionC
 import { buildSlotStateMachine } from "./graphUpdater/slotStateMachine.js";
 import { compileSlotStateToPatch } from "./graphUpdater/slotGraphCompiler.js";
 import { sanitizeIntentSignals } from "./graphUpdater/signalSanitizer.js";
+import { validateTravelCoreSlots } from "./graphUpdater/slotValidator.js";
 import { cleanStatement, mergeTextSegments } from "./graphUpdater/text.js";
 import { makeTempId } from "./graphUpdater/common.js";
 import { enrichPatchWithMotifFoundation } from "./motif/motifGrounding.js";
@@ -371,6 +372,7 @@ async function buildSignals(params: {
     latestSignals.removedDestinations,
     textSignals.removedDestinations
   );
+  let functionSignals: IntentSignals | undefined;
   let signals = textSignals;
 
   if (USE_FUNCTION_SLOT_EXTRACTION) {
@@ -384,6 +386,7 @@ async function buildSignals(params: {
         debug: DEBUG,
       });
       if (slotResult?.signals) {
+        functionSignals = slotResult.signals;
         // deterministic parser优先处理冲突标量（例如总时长），function slots用于补齐缺失语义
         signals = mergeIntentSignals(slotResult.signals, textSignals, params.locale);
         const textDays = Number(textSignals.durationDays) || 0;
@@ -418,6 +421,21 @@ async function buildSignals(params: {
     });
   } catch (e: any) {
     dlog("geo resolver failed:", e?.message || e);
+  }
+
+  const validated = validateTravelCoreSlots({
+    signals,
+    latestSignals,
+    functionSignals,
+    historySignals: accumulatedHistorySignals,
+    locale: params.locale,
+  });
+  signals = validated.signals;
+  if (validated.issues.length) {
+    dlog(
+      "slot validation adjustments:",
+      validated.issues.map((item) => `${item.field}:${item.code}:${item.value || ""}`).join(" | ")
+    );
   }
 
   if (explicitRemovedDestinations?.length) {

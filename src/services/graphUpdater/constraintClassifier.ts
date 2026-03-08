@@ -31,7 +31,7 @@ const LEGAL_RE =
 const SAFETY_RE =
   /危险|高风险|不安全|治安|诈骗|抢劫|急救|夜间不宜|安全一点|更安全|治安好|不想被坑|不被坑|防坑|防骗|宰客|骗局|security|safety|danger|emergency|risk|scam|fraud/i;
 const MOBILITY_RE =
-  /行动不便|轮椅|无障碍|不能久走|不能爬|台阶|体力|走不动|搬运行李|不想太累|不要太累|不太折腾|不要太折腾|少折腾|低强度|慢节奏|减少体力|少走路|不想太赶|不要太赶|别太赶|节奏别太赶|行程别太赶|中老年|老人|老年|mobility|wheelchair|accessibility|low[-\s]?intensity|low[-\s]?hassle/i;
+  /行动不便|轮椅|无障碍|不能久走|不能爬|台阶|体力|走不动|搬运行李|不想太累|不要太累|不太折腾|不要太折腾|少折腾|低强度|慢节奏|减少体力|少走路|不想太赶|不要太赶|别太赶|节奏别太赶|行程别太赶|行程不能安排太满|不要安排太满|别安排太满|安排不要太满|不要爬坡|别爬坡|不能爬坡|中老年|老人|老年|mobility|wheelchair|accessibility|low[-\s]?intensity|low[-\s]?hassle|not too packed|don'?t pack (?:the )?(?:trip|itinerary) too tightly|avoid slopes?|avoid uphill/i;
 const LOGISTICS_RE =
   /转机|换乘|赶路|托运|交通衔接|时差|航班|火车|机场接送|中转|交通方便|交通便利|离地铁近|靠近地铁|地铁站附近|步行可达|connection|layover|flight|train|logistics|near metro|easy transit|well[-\s]?connected/i;
 const DIET_RE =

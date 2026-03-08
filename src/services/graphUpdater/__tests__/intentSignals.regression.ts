@@ -15,6 +15,7 @@ import { compileSlotStateToPatch } from "../slotGraphCompiler.js";
 import { sanitizeIntentSignals } from "../signalSanitizer.js";
 import { resolveIntentSignalsGeo } from "../geoResolver.js";
 import { slotsToSignals } from "../slotFunctionCall.js";
+import { validateTravelCoreSlots } from "../slotValidator.js";
 import { generateGraphPatch } from "../../graphUpdater.js";
 import { applyPatchWithGuards } from "../../../core/graph/patchApply.js";
 import { buildCognitiveModel } from "../../cognitiveModel.js";
@@ -33,6 +34,7 @@ import { buildMotifReasoningView } from "../../motif/reasoningView.js";
 import { planMotifQuestion } from "../../motif/questionPlanner.js";
 import {
   applyManualGraphOverrides,
+  emptyManualGraphOverrides,
   rebuildManualGraphOverrides,
 } from "../../../routes/conversations.js";
 
@@ -512,8 +514,7 @@ const cases: Case[] = [
       );
       const generic = merged.genericConstraints || [];
       assert.equal(
-        /低强度|体力负担|不想太赶/i.test(String(merged.activityPreference || "")) ||
-          generic.some((x) => x.kind === "mobility" && /不想太赶|低强度|少折腾/i.test(String(x.text || ""))),
+        generic.some((x) => x.kind === "mobility" && /不想太赶|别太赶|太赶路|低强度|少折腾/i.test(String(x.text || ""))),
         true
       );
       assert.equal(
@@ -525,9 +526,18 @@ const cases: Case[] = [
   {
     name: "leading destination scaffolding should be stripped from refinement preference clauses",
     run: () => {
-      const signals = extractIntentSignals("大阪这次也还是想轻松一点，但希望比上次更偏城市散步。");
-      assert.match(String(signals.activityPreference || ""), /低强度|体力负担/i);
-      assert.equal(String(signals.activityPreferenceEvidence || "").includes("大阪"), false);
+      const raw = extractIntentSignals("大阪这次也还是想轻松一点，但希望比上次更偏城市散步。");
+      const signals = validateTravelCoreSlots({
+        signals: raw,
+        latestSignals: raw,
+        locale: "zh-CN",
+      }).signals;
+      assert.equal(Boolean(signals.destination), false);
+      assert.equal((signals.destinations || []).length, 0);
+      assert.equal(
+        (signals.genericConstraints || []).some((x) => x.kind === "mobility" && /轻松一点|低强度|少折腾/i.test(String(x.text || ""))),
+        true
+      );
       assert.equal(
         (signals.genericConstraints || []).some((x) => /大阪这次|大阪/.test(String(x.text || ""))),
         false
@@ -3186,11 +3196,17 @@ const cases: Case[] = [
         latestText
       );
       assert.equal(/冠心病|心脏|cardiac/i.test(String(signals.healthConstraint || "")), true);
-      assert.equal(/低强度|low[-\\s]?intensity/i.test(String(signals.activityPreference || "")), true);
       assert.equal(
         (signals.genericConstraints || []).some((x) => {
           const text = String(x?.text || "");
           return x?.kind === "diet" || /低盐|低脂|高纤维|low[-\\s]?salt|low[-\\s]?fat|high[-\\s]?fiber/i.test(text);
+        }),
+        true
+      );
+      assert.equal(
+        (signals.genericConstraints || []).some((x) => {
+          const text = String(x?.text || "");
+          return x?.kind === "mobility" || /低强度|体力负担|low[-\\s]?intensity/i.test(text);
         }),
         true
       );
@@ -3208,20 +3224,20 @@ const cases: Case[] = [
       const healthNode = state.nodes.find((n: any) =>
         String(n?.slotKey || "").startsWith("slot:constraint:limiting:health")
       );
-      const activityNode = state.nodes.find(
-        (n: any) => String(n?.slotKey || "") === "slot:activity_preference"
+      const mobilityNode = state.nodes.find(
+        (n: any) => String(n?.slotKey || "").startsWith("slot:constraint:limiting:mobility")
       );
       const dietNode = state.nodes.find((n: any) =>
         String(n?.slotKey || "").startsWith("slot:constraint:limiting:diet")
       );
       assert.ok(healthNode, "missing health limiting factor node");
-      assert.ok(activityNode, "missing low-intensity activity preference node");
+      assert.ok(mobilityNode, "missing low-intensity mobility limiting factor node");
       assert.ok(dietNode, "missing diet limiting factor node");
       assert.equal(
         state.edges.some(
           (e: any) =>
             e.fromSlot === String(healthNode?.slotKey || "") &&
-            e.toSlot === "slot:activity_preference" &&
+            e.toSlot === String(mobilityNode?.slotKey || "") &&
             e.type === "determine"
         ),
         true
@@ -4338,7 +4354,7 @@ const cases: Case[] = [
       const overrides = rebuildManualGraphOverrides({
         prevGraph,
         nextGraph,
-        existing: { edges: [] },
+        existing: { edges: [], nodes: [] },
         updatedAt: "2026-03-07T00:00:00.000Z",
       });
 
@@ -4405,6 +4421,159 @@ const cases: Case[] = [
       assert.equal(signals.destination, "苏州");
       assert.equal((signals.destinations || []).includes("苏州"), true);
       assert.equal((signals.destinations || []).some((item) => /热门点之间来回穿梭/.test(String(item))), false);
+    },
+  },
+  {
+    name: "packed itinerary cue should stay as one mobility constraint in heuristic extraction",
+    run: () => {
+      const signals = extractIntentSignals("我有冠心病，行程不能安排太满了");
+      assert.equal(signals.healthConstraint, "我有冠心病");
+      assert.deepEqual(cleanedGenericTexts(signals), ["行程不能安排太满了"]);
+      assert.equal(signals.genericConstraints?.[0]?.kind, "mobility");
+      assert.equal(signals.activityPreference, undefined);
+      assert.equal(signals.lodgingPreference, undefined);
+    },
+  },
+  {
+    name: "validator should collapse duplicated pace-density slots into one generic constraint",
+    run: () => {
+      const raw = slotsToSignals(
+        {
+          constraints: [{ text: "行程不能安排太满了", kind: "mobility", hard: true, importance: 0.9 }],
+          activity_preference: { text: "行程不能安排太满了", hard: true, importance: 0.9 },
+          lodging_preference: { text: "行程不能安排太满了", hard: true, importance: 0.9 },
+        } as any,
+        "zh-CN"
+      );
+      const validated = validateTravelCoreSlots({
+        signals: raw,
+        functionSignals: raw,
+        locale: "zh-CN",
+      }).signals;
+      assert.deepEqual(cleanedGenericTexts(validated), ["行程不能安排太满了"]);
+      assert.equal(validated.genericConstraints?.[0]?.kind, "mobility");
+      assert.equal(validated.activityPreference, undefined);
+      assert.equal(validated.lodgingPreference, undefined);
+    },
+  },
+  {
+    name: "follow-up mobility answer plus sub-location should preserve trip envelope",
+    run: async () => {
+      let graph = { id: "conv_trip_followup", version: 0, nodes: [], edges: [] } as any;
+      const recentTurns: Array<{ role: "user" | "assistant"; content: string }> = [];
+      const taskTurns: string[] = [];
+      const assistantAck = "收到，我按这个方向继续。";
+      const step = async (userText: string) => {
+        const patch = await generateGraphPatch({
+          graph,
+          userText,
+          recentTurns,
+          stateContextUserTurns: [...taskTurns, userText],
+          assistantText: assistantAck,
+          locale: "zh-CN",
+        });
+        const next = applyPatchWithGuards(graph, patch);
+        graph = next.newGraph;
+        taskTurns.push(userText);
+        recentTurns.push({ role: "user", content: userText }, { role: "assistant", content: assistantAck });
+      };
+
+      await step("我想去台北旅游，为期三天");
+      await step("我有冠心病，行程不能安排太满了");
+      await step("30分钟没问题但不要爬坡");
+      await step("我想去中正纪念堂");
+
+      const nodeStatements = (graph.nodes || []).map((item: any) => String(item.statement || ""));
+      assert.equal(nodeStatements.some((text: string) => /台北/.test(text)), true);
+      assert.equal(nodeStatements.some((text: string) => /3天/.test(text)), true);
+      assert.equal(nodeStatements.some((text: string) => /冠心病/.test(text)), true);
+      assert.equal(nodeStatements.some((text: string) => /中正纪念堂/.test(text)), true);
+    },
+  },
+  {
+    name: "manual node deletion should keep remaining trip envelope and suppress deleted node on unrelated follow-up",
+    run: async () => {
+      let graph = { id: "conv_trip_manual_delete", version: 0, nodes: [], edges: [] } as any;
+      let model = buildCognitiveModel({
+        graph,
+        baseConcepts: [],
+        baseMotifs: [],
+        baseMotifLinks: [],
+        baseContexts: [],
+        locale: "zh-CN",
+      });
+      let manualGraphOverrides = emptyManualGraphOverrides();
+      const recentTurns: Array<{ role: "user" | "assistant"; content: string }> = [];
+      const taskTurns: string[] = [];
+      const assistantAck = "收到，我按这个方向继续。";
+      const step = async (userText: string) => {
+        const patch = await generateGraphPatch({
+          graph,
+          userText,
+          recentTurns,
+          stateContextUserTurns: [...taskTurns, userText],
+          assistantText: assistantAck,
+          locale: "zh-CN",
+        });
+        const next = applyPatchWithGuards(graph, patch);
+        graph = applyManualGraphOverrides(next.newGraph, manualGraphOverrides);
+        model = buildCognitiveModel({
+          graph,
+          prevConcepts: model.concepts,
+          baseConcepts: model.concepts,
+          baseMotifs: model.motifs,
+          baseMotifLinks: model.motifLinks,
+          baseContexts: model.contexts,
+          locale: "zh-CN",
+        });
+        graph = model.graph;
+        taskTurns.push(userText);
+        recentTurns.push({ role: "user", content: userText }, { role: "assistant", content: assistantAck });
+      };
+
+      await step("我想去台北旅游，为期三天");
+      await step("我有冠心病，行程不能安排太满了");
+      await step("30分钟没问题但不要爬坡");
+
+      const mobilityNode = (graph.nodes || []).find((node: any) =>
+        String(node?.key || "").startsWith("slot:constraint:limiting:mobility")
+      );
+      assert.ok(mobilityNode, "expected mobility limiting factor before manual delete");
+
+      const editedGraph = {
+        ...graph,
+        nodes: (graph.nodes || []).filter((node: any) => node.id !== mobilityNode.id),
+        edges: (graph.edges || []).filter((edge: any) => edge.from !== mobilityNode.id && edge.to !== mobilityNode.id),
+      };
+      manualGraphOverrides = rebuildManualGraphOverrides({
+        prevGraph: graph,
+        nextGraph: editedGraph,
+        existing: manualGraphOverrides,
+        updatedAt: "2026-03-08T12:00:00.000Z",
+      });
+      graph = applyManualGraphOverrides(editedGraph, manualGraphOverrides);
+      model = buildCognitiveModel({
+        graph,
+        prevConcepts: model.concepts,
+        baseConcepts: model.concepts,
+        baseMotifs: model.motifs,
+        baseMotifLinks: model.motifLinks,
+        baseContexts: model.contexts,
+        locale: "zh-CN",
+      });
+      graph = model.graph;
+
+      await step("我想去中正纪念堂");
+
+      const nodeStatements = (graph.nodes || []).map((item: any) => String(item.statement || ""));
+      assert.equal(nodeStatements.some((text: string) => /台北/.test(text)), true);
+      assert.equal(nodeStatements.some((text: string) => /3天/.test(text)), true);
+      assert.equal(nodeStatements.some((text: string) => /冠心病/.test(text)), true);
+      assert.equal(nodeStatements.some((text: string) => /中正纪念堂/.test(text)), true);
+      assert.equal(
+        nodeStatements.some((text: string) => /行程不能安排太满|不要爬坡|太满/.test(text)),
+        false
+      );
     },
   },
   {

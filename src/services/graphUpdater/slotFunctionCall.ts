@@ -8,7 +8,6 @@ import {
   normalizeLodgingPreferenceStatement,
 } from "./intentSignals.js";
 import {
-  LOW_HASSLE_TRAVEL_RE,
   MINIMIZE_HOTEL_SWITCH_RE,
   SAFETY_STRATEGY_RE,
   TRANSPORT_CONVENIENCE_RE,
@@ -581,22 +580,6 @@ export function slotsToSignals(slots: SlotExtractionResult, locale?: AppLocale):
 
   const hasHealthConstraint = !!cleanStatement(out.healthConstraint || "", 120);
   if (hasHealthConstraint) {
-    const activityFromGeneric = genericClassified.find((x) =>
-      HEALTH_STRATEGY_ACTIVITY_RE.test(String(x.text || ""))
-    );
-    if (!out.activityPreference && activityFromGeneric) {
-      out.activityPreference = cleanStatement(activityFromGeneric.text, 64);
-      out.activityPreferenceEvidence = cleanStatement(
-        activityFromGeneric.evidence || activityFromGeneric.text,
-        60
-      );
-      out.activityPreferenceHard = !!activityFromGeneric.hard;
-      out.activityPreferenceImportance = clampImportance(
-        activityFromGeneric.importance,
-        activityFromGeneric.hard ? 0.84 : 0.72
-      );
-    }
-
     const hasDietConstraint = genericClassified.some(
       (x) => x.kind === "diet" || HEALTH_STRATEGY_DIET_RE.test(String(x.text || ""))
     );
@@ -614,43 +597,6 @@ export function slotsToSignals(slots: SlotExtractionResult, locale?: AppLocale):
       ]);
       if (next.length) out.genericConstraints = next.slice(0, 6);
     }
-  }
-
-  const mobilityBest = genericClassified.find(
-    (x) => x.kind === "mobility" || LOW_HASSLE_TRAVEL_RE.test(String(x.text || ""))
-  );
-  if (!out.activityPreference && mobilityBest) {
-    out.activityPreference = cleanStatement(mobilityBest.text, 64);
-    out.activityPreferenceEvidence = cleanStatement(
-      mobilityBest.evidence || mobilityBest.text,
-      60
-    );
-    out.activityPreferenceHard = !!mobilityBest.hard;
-    out.activityPreferenceImportance = clampImportance(
-      mobilityBest.importance,
-      mobilityBest.hard ? 0.82 : 0.7
-    );
-  }
-
-  const lodgingStrategyFromGeneric = genericClassified.find(
-    (x) =>
-      x.kind === "safety" ||
-      x.kind === "logistics" ||
-      x.kind === "mobility" ||
-      SAFETY_STRATEGY_RE.test(String(x.text || "")) ||
-      TRANSPORT_CONVENIENCE_RE.test(String(x.text || ""))
-  );
-  if (!out.lodgingPreference && lodgingStrategyFromGeneric) {
-    out.lodgingPreference = cleanStatement(lodgingStrategyFromGeneric.text, 72);
-    out.lodgingPreferenceEvidence = cleanStatement(
-      lodgingStrategyFromGeneric.evidence || lodgingStrategyFromGeneric.text,
-      60
-    );
-    out.lodgingPreferenceHard = !!lodgingStrategyFromGeneric.hard;
-    out.lodgingPreferenceImportance = clampImportance(
-      lodgingStrategyFromGeneric.importance,
-      lodgingStrategyFromGeneric.hard ? 0.8 : 0.66
-    );
   }
 
   // Backward-compatible safety net for older model outputs.
@@ -760,19 +706,6 @@ export function slotsToSignals(slots: SlotExtractionResult, locale?: AppLocale):
         importance: slots.lodging_preference.importance,
       });
     }
-    const lowHassleClause = clauses.find((x) => LOW_HASSLE_TRAVEL_RE.test(x));
-    if (lowHassleClause && !out.activityPreference) {
-      const normalizedActivity = normalizeActivityPreferenceStatement(lowHassleClause, locale);
-      if (normalizedActivity) {
-        out.activityPreference = cleanStatement(normalizedActivity.statement, 64);
-        out.activityPreferenceEvidence = cleanStatement(normalizedActivity.evidence, 60);
-        out.activityPreferenceHard = !!normalizedActivity.hard || !!slots.lodging_preference.hard;
-        out.activityPreferenceImportance = clampImportance(
-          slots.lodging_preference.importance,
-          out.activityPreferenceHard ? 0.84 : 0.7
-        );
-      }
-    }
   }
 
   if (slots.intent_summary) {
@@ -793,10 +726,10 @@ const SLOT_SYSTEM_PROMPT_ZH = `你是结构化槽位抽取器。只调用给定�
 4) destinations 仅放地名；场馆/景点/街区尽量放入 sub_locations，并附 parent_city。
 5) 约束可放 health_constraints / language_constraints / constraints（通用约束）。
 6) “球迷/看球/演唱会/看展”等兴趣诉求优先放 activity_preference（以及必要的 sub_locations），不要误放到 constraints。
-7) 与健康相关的执行策略（例如“低强度、减少体力负担”）优先放 activity_preference；饮食策略（如“低盐低脂高纤维”）放 constraints(kind=diet)。
+7) 与健康相关的执行策略（例如“低强度、减少体力负担、不想太赶、行程不要排太满”）默认放 constraints(kind=mobility)；只有用户明确点名活动取向时才放 activity_preference。饮食策略（如“低盐低脂高纤维”）放 constraints(kind=diet)。
 8) 对 constraints 尽量补 kind（legal/safety/mobility/logistics/diet/religion/other）。
-9) “不想太累/不太折腾/中老年友好”优先抽为 constraints(kind=mobility)，必要时同时给 activity_preference。
-10) “酒店离地铁近/交通方便/步行可达”优先抽为 lodging_preference，且可补 constraints(kind=logistics)。
+9) “不想太累/不太折腾/中老年友好/行程不能安排太满”优先抽为 constraints(kind=mobility)，不要同时重复写进 activity_preference 或 lodging_preference，除非原句同时含有明确活动或住宿证据。
+10) “酒店离地铁近/交通方便/步行可达”优先抽为 lodging_preference，且可补 constraints(kind=logistics)；但不要把纯粹的慢节奏/少折腾语义误写成 lodging_preference。
 11) “不想被坑/治安更好/夜间安全”优先抽为 constraints(kind=safety)。
 12) 不确定就留空，不要编造。`;
 
@@ -809,10 +742,10 @@ Rules:
 4) destinations must contain only places (city/region/country). Venues/POIs should go to sub_locations with parent_city when possible.
 5) Put constraints into health_constraints / language_constraints / constraints.
 6) Preference signals like football/game/concert/exhibition should go to activity_preference (+ sub_locations if needed), not generic constraints.
-7) Health-derived execution strategy (e.g., low-intensity / reduced exertion) should go to activity_preference; diet strategy (low-salt/low-fat/high-fiber) should go to constraints(kind=diet).
+7) Health-derived execution strategy (e.g., low-intensity / reduced exertion / not too packed) should default to constraints(kind=mobility); only use activity_preference when the user explicitly names an activity choice. Diet strategy (low-salt/low-fat/high-fiber) should go to constraints(kind=diet).
 8) Fill constraints.kind whenever possible using: legal/safety/mobility/logistics/diet/religion/other.
-9) "not too tiring / low hassle / senior-friendly" should be extracted as constraints(kind=mobility), and may also populate activity_preference.
-10) "near metro / convenient transport / walkable" should populate lodging_preference and may also add constraints(kind=logistics).
+9) "not too tiring / low hassle / senior-friendly / do not pack the itinerary too tightly" should be extracted as constraints(kind=mobility). Do not also duplicate it into activity_preference or lodging_preference unless the same clause contains explicit activity or lodging evidence.
+10) "near metro / convenient transport / walkable" should populate lodging_preference and may also add constraints(kind=logistics), but pure low-hassle pacing language must not be rewritten as lodging_preference.
 11) "avoid scam / safer area / safer at night" should be extracted as constraints(kind=safety).
 12) If uncertain, leave fields empty. Do not hallucinate values.`;
 
