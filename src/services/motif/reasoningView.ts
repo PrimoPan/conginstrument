@@ -27,6 +27,7 @@ export type MotifReasoningEdge = {
   to: string;
   type: MotifLinkType;
   confidence: number;
+  synthetic?: "parallel_branch";
 };
 
 export type MotifReasoningStepRole = "premise" | "bridge" | "decision" | "isolated";
@@ -146,6 +147,164 @@ function stepRole(indeg: number, outdeg: number): MotifReasoningStepRole {
   if (indeg <= 0 && outdeg > 0) return "premise";
   if (indeg > 0 && outdeg > 0) return "bridge";
   return "decision";
+}
+
+function dependencyRank(dep: ConceptMotif["dependencyClass"] | ConceptMotif["relation"]): number {
+  const raw = cleanText(dep, 40);
+  if (raw === "constraint") return 0;
+  if (raw === "determine") return 1;
+  return 2;
+}
+
+function motifSpecificity(m: ConceptMotif): number {
+  return Math.max(0, Array.isArray(m.conceptIds) ? m.conceptIds.length : 0);
+}
+
+function sameAnchorSort(a: ConceptMotif, b: ConceptMotif): number {
+  const depDiff = dependencyRank(a.dependencyClass || a.relation) - dependencyRank(b.dependencyClass || b.relation);
+  if (depDiff) return depDiff;
+  const activeDiff = (a.status === "active" ? 0 : 1) - (b.status === "active" ? 0 : 1);
+  if (activeDiff) return activeDiff;
+  const specificityDiff = motifSpecificity(a) - motifSpecificity(b);
+  if (specificityDiff) return specificityDiff;
+  const motifTypeDiff = (a.motifType === "pair" ? 0 : 1) - (b.motifType === "pair" ? 0 : 1);
+  if (motifTypeDiff) return motifTypeDiff;
+  return clamp01(b.confidence, 0.7) - clamp01(a.confidence, 0.7) || a.id.localeCompare(b.id);
+}
+
+function motifParallelRiskClass(m: ConceptMotif): string | null {
+  const text = cleanText(
+    [m.motif_type_id, m.templateKey, m.motif_type_title, m.title, m.description].filter(Boolean).join(" "),
+    320
+  ).toLowerCase();
+  if (!text) return null;
+  if (
+    /slot:constraint:limiting:health|冠心|冠脉|心脏|心血管|支架|慢性病|糖尿病|哮喘|medical|cardiac|heart|health/.test(
+      text
+    )
+  ) {
+    return "health";
+  }
+  if (/睡眠|失眠|安眠药|起不来|太晚|太早|sleep|insomnia|rest|nap|late night|too late|too early/.test(text)) {
+    return "sleep";
+  }
+  if (/行动不便|不能久走|不能爬|轮椅|mobility|walking|stairs|fatigue|体力/.test(text)) {
+    return "mobility";
+  }
+  if (/低盐|低脂|高纤维|饮食|忌口|过敏|diet|allergy/.test(text)) {
+    return "diet";
+  }
+  return null;
+}
+
+function buildSyntheticParallelBranchEdges(params: {
+  motifs: ConceptMotif[];
+  motifIdToNodeId: Map<string, string>;
+  edgeByKey: Map<string, MotifReasoningEdge>;
+}): MotifReasoningEdge[] {
+  const motifs = (params.motifs || []).filter((m) => !!cleanText(m.anchorConceptId, 120));
+  if (!motifs.length) return [];
+
+  const anchorGroups = new Map<string, ConceptMotif[]>();
+  for (const motif of motifs) {
+    const anchor = cleanText(motif.anchorConceptId, 120);
+    if (!anchor) continue;
+    if (!anchorGroups.has(anchor)) anchorGroups.set(anchor, []);
+    anchorGroups.get(anchor)!.push(motif);
+  }
+
+  const realEdges = Array.from(params.edgeByKey.values()).filter((edge) => !edge.synthetic);
+  const incomingByNode = new Map<string, Set<string>>();
+  const outgoingByNode = new Map<string, Set<string>>();
+  for (const edge of realEdges) {
+    if (!incomingByNode.has(edge.to)) incomingByNode.set(edge.to, new Set<string>());
+    if (!outgoingByNode.has(edge.from)) outgoingByNode.set(edge.from, new Set<string>());
+    incomingByNode.get(edge.to)!.add(edge.from);
+    outgoingByNode.get(edge.from)!.add(edge.to);
+  }
+
+  const additions: MotifReasoningEdge[] = [];
+  for (const group of anchorGroups.values()) {
+    const ordered = group.slice().sort(sameAnchorSort);
+    let start = -1;
+    const flushBlock = (endExclusive: number) => {
+      if (start < 0) return;
+      const blockStart = start;
+      const block = ordered.slice(blockStart, endExclusive);
+      start = -1;
+      if (block.length < 2) return;
+      const predecessor = ordered[blockStart - 1];
+      const successor = ordered[endExclusive];
+      const blockNodeIds = new Set(
+        block.map((motif) => cleanText(params.motifIdToNodeId.get(motif.id), 120)).filter(Boolean)
+      );
+      const incomingSources = new Set<string>();
+      const outgoingTargets = new Set<string>();
+      if (predecessor) {
+        const predecessorNodeId = cleanText(params.motifIdToNodeId.get(predecessor.id), 120);
+        if (predecessorNodeId && !blockNodeIds.has(predecessorNodeId)) incomingSources.add(predecessorNodeId);
+      }
+      if (successor) {
+        const successorNodeId = cleanText(params.motifIdToNodeId.get(successor.id), 120);
+        if (successorNodeId && !blockNodeIds.has(successorNodeId)) outgoingTargets.add(successorNodeId);
+      }
+      for (const motif of block) {
+        const nodeId = cleanText(params.motifIdToNodeId.get(motif.id), 120);
+        if (!nodeId) continue;
+        for (const source of incomingByNode.get(nodeId) || []) {
+          if (!blockNodeIds.has(source)) incomingSources.add(source);
+        }
+        for (const target of outgoingByNode.get(nodeId) || []) {
+          if (!blockNodeIds.has(target)) outgoingTargets.add(target);
+        }
+      }
+      for (const motif of block) {
+        const nodeId = cleanText(params.motifIdToNodeId.get(motif.id), 120);
+        if (!nodeId) continue;
+        for (const source of incomingSources) {
+          const key = `${source}=>${nodeId}::supports`;
+          if (params.edgeByKey.has(key)) continue;
+          additions.push({
+            id: `me_branch_${cleanText(source, 32)}_${cleanText(nodeId, 32)}_supports`,
+            from: source,
+            to: nodeId,
+            type: "supports",
+            confidence: clamp01(motif.confidence, 0.68) * 0.82,
+            synthetic: "parallel_branch",
+          });
+        }
+        for (const target of outgoingTargets) {
+          const key = `${nodeId}=>${target}::supports`;
+          if (params.edgeByKey.has(key)) continue;
+          additions.push({
+            id: `me_branch_${cleanText(nodeId, 32)}_${cleanText(target, 32)}_supports`,
+            from: nodeId,
+            to: target,
+            type: "supports",
+            confidence: clamp01(motif.confidence, 0.68) * 0.82,
+            synthetic: "parallel_branch",
+          });
+        }
+      }
+    };
+
+    for (let i = 0; i < ordered.length; i += 1) {
+      const motif = ordered[i];
+      if (motif.motifType === "pair" && dependencyRank(motif.dependencyClass || motif.relation) === 0 && motifParallelRiskClass(motif)) {
+        if (start < 0) start = i;
+        continue;
+      }
+      flushBlock(i);
+    }
+    flushBlock(ordered.length);
+  }
+
+  const dedup = new Map<string, MotifReasoningEdge>();
+  for (const edge of additions) {
+    const key = `${edge.from}=>${edge.to}::${edge.type}`;
+    if (!dedup.has(key)) dedup.set(key, edge);
+  }
+  return Array.from(dedup.values());
 }
 
 function roleLabel(role: MotifReasoningStepRole, locale?: AppLocale): string {
@@ -310,6 +469,7 @@ function buildReasoningSteps(params: {
   edges: MotifReasoningEdge[];
   locale?: AppLocale;
 }): MotifReasoningStep[] {
+  const structuralEdges = (params.edges || []).filter((edge) => edge.synthetic !== "parallel_branch");
   const nodeById = new Map((params.nodes || []).map((n) => [n.id, n]));
   const indeg = new Map<string, number>();
   const outdeg = new Map<string, number>();
@@ -321,7 +481,7 @@ function buildReasoningSteps(params: {
     incoming.set(n.id, []);
     outgoing.set(n.id, []);
   }
-  for (const e of params.edges || []) {
+  for (const e of structuralEdges) {
     if (!nodeById.has(e.from) || !nodeById.has(e.to) || e.from === e.to) continue;
     indeg.set(e.to, (indeg.get(e.to) || 0) + 1);
     outdeg.set(e.from, (outdeg.get(e.from) || 0) + 1);
@@ -454,6 +614,10 @@ export function buildMotifReasoningView(params: {
         confidence,
       });
     }
+  }
+  for (const edge of buildSyntheticParallelBranchEdges({ motifs, motifIdToNodeId, edgeByKey })) {
+    const key = `${edge.from}=>${edge.to}::${edge.type}`;
+    if (!edgeByKey.has(key)) edgeByKey.set(key, edge);
   }
   const edges: MotifReasoningEdge[] = Array.from(edgeByKey.values()).sort(
     (a, b) => b.confidence - a.confidence || a.id.localeCompare(b.id)

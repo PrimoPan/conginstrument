@@ -241,6 +241,51 @@ run("country refined into city allocation with transition stop should stay in th
   assert.equal(out.is_task_switch, false);
 });
 
+run("hotel plus diet refinement should not trigger a fake destination switch", () => {
+  const prev = makePlan("成都五天旅行");
+  prev.destinations = ["成都"];
+  prev.destination_scope = ["成都"];
+  prev.travel_dates_or_duration = "5天";
+  const out = detectTaskSwitchFromLatestUserTurn({
+    conversationId: "conv_hotel_diet_zh",
+    locale,
+    previousTravelPlan: prev,
+    latestUserText: "酒店最好靠地铁、有电梯，附近还能吃到清淡一点的饭。",
+  });
+  assert.equal(out.switch_reason_code, "continuous");
+  assert.equal(out.is_task_switch, false);
+});
+
+run("lodging transit and elevator refinement should not trigger a fake destination switch", () => {
+  const prev = makePlan("厦门五天旅行");
+  prev.destinations = ["厦门"];
+  prev.destination_scope = ["厦门"];
+  prev.travel_dates_or_duration = "5天";
+  const out = detectTaskSwitchFromLatestUserTurn({
+    conversationId: "conv_lodging_transit_zh",
+    locale,
+    previousTravelPlan: prev,
+    latestUserText: "酒店请优先靠地铁或机场线，有电梯，附近最好能吃到清淡一点的饭。",
+  });
+  assert.equal(out.switch_reason_code, "continuous");
+  assert.equal(out.is_task_switch, false);
+});
+
+run("health mobility refinement should not trigger a fake destination switch", () => {
+  const prev = makePlan("新加坡五天旅行");
+  prev.destinations = ["新加坡"];
+  prev.destination_scope = ["新加坡"];
+  prev.travel_dates_or_duration = "5天";
+  const out = detectTaskSwitchFromLatestUserTurn({
+    conversationId: "conv_health_mobility_zh",
+    locale,
+    previousTravelPlan: prev,
+    latestUserText: "心血管这条约束继续成立，所以不要连续暴走，也别安排太多坡和长距离转乘。",
+  });
+  assert.equal(out.switch_reason_code, "continuous");
+  assert.equal(out.is_task_switch, false);
+});
+
 run("rainy-day backup refinement should not trigger a fake destination switch in English", () => {
   const prev = makePlan("Kyoto six-day trip");
   prev.destinations = ["Kyoto"];

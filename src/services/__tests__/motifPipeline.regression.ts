@@ -340,6 +340,104 @@ run("same-anchor health-related constraints should stay peer-level instead of ch
   );
 });
 
+run("reasoning view should fan out parallel health constraints and merge back downstream", () => {
+  const concepts = [
+    makeConcept("c_budget", "预算上限: 12000元", {
+      kind: "constraint",
+      family: "budget",
+      semanticKey: "slot:budget",
+    }),
+    makeConcept("c_cardiac", "限制因素: 我还有冠心病", {
+      kind: "constraint",
+      family: "limiting_factor",
+      semanticKey: "slot:constraint:limiting:health:coronary",
+    }),
+    makeConcept("c_sleep", "睡眠问题: 早上起不来，晚上需要安眠药", {
+      kind: "constraint",
+      family: "limiting_factor",
+      semanticKey: "slot:constraint:limiting:health:sleep",
+    }),
+    makeConcept("c_lodging", "住宿偏好: 酒店靠车站", {
+      kind: "preference",
+      family: "lodging",
+      semanticKey: "slot:lodging",
+    }),
+    makeConcept("c_goal", "意图: 去台北旅游3天", {
+      kind: "belief",
+      family: "goal",
+      semanticKey: "slot:goal",
+    }),
+  ];
+  const motifs: ConceptMotif[] = [
+    {
+      ...makeMotif({
+        id: "m_budget_goal",
+        conceptIds: ["c_budget", "c_goal"],
+        anchorConceptId: "c_goal",
+        confidence: 0.95,
+        dependencyClass: "constraint",
+      }),
+      title: "预算上限: 12000元 限制 意图: 去台北旅游3天",
+      motif_type_id: "mt_pattern:pair_constraint_budget->goal",
+    },
+    {
+      ...makeMotif({
+        id: "m_cardiac_goal",
+        conceptIds: ["c_cardiac", "c_goal"],
+        anchorConceptId: "c_goal",
+        confidence: 0.93,
+        dependencyClass: "constraint",
+      }),
+      title: "限制因素: 我还有冠心病 限制 意图: 去台北旅游3天",
+      motif_type_id: "mt_pattern:pair_constraint_slot:constraint:limiting:health:coronary->goal",
+    },
+    {
+      ...makeMotif({
+        id: "m_sleep_goal",
+        conceptIds: ["c_sleep", "c_goal"],
+        anchorConceptId: "c_goal",
+        confidence: 0.91,
+        dependencyClass: "constraint",
+      }),
+      title: "睡眠问题: 早上起不来，晚上需要安眠药 限制 意图: 去台北旅游3天",
+      motif_type_id: "mt_pattern:pair_constraint_slot:constraint:limiting:health:sleep->goal",
+    },
+    {
+      ...makeMotif({
+        id: "m_lodging_goal",
+        conceptIds: ["c_lodging", "c_goal"],
+        anchorConceptId: "c_goal",
+        confidence: 0.87,
+        dependencyClass: "enable",
+      }),
+      title: "住宿偏好: 酒店靠车站 支持 意图: 去台北旅游3天",
+      motif_type_id: "mt_pattern:pair_enable_lodging->goal",
+    },
+  ];
+
+  const view = buildMotifReasoningView({
+    concepts,
+    motifs,
+    motifLinks: [],
+    locale: "zh-CN",
+  });
+  const nodeIdByMotifId = new Map(view.nodes.map((node) => [node.motifId, node.id]));
+  const budgetNode = nodeIdByMotifId.get("m_budget_goal")!;
+  const cardiacNode = nodeIdByMotifId.get("m_cardiac_goal")!;
+  const sleepNode = nodeIdByMotifId.get("m_sleep_goal")!;
+  const lodgingNode = nodeIdByMotifId.get("m_lodging_goal")!;
+
+  const hasEdge = (from: string, to: string) =>
+    view.edges.some((edge) => edge.from === from && edge.to === to && edge.synthetic === "parallel_branch");
+
+  assert.equal(hasEdge(budgetNode, cardiacNode), true);
+  assert.equal(hasEdge(budgetNode, sleepNode), true);
+  assert.equal(hasEdge(cardiacNode, lodgingNode), true);
+  assert.equal(hasEdge(sleepNode, lodgingNode), true);
+  assert.equal(view.edges.some((edge) => edge.from === cardiacNode && edge.to === sleepNode), false);
+  assert.equal(view.edges.some((edge) => edge.from === sleepNode && edge.to === cardiacNode), false);
+});
+
 run("reasoning view should produce complete ordered steps under cycle", () => {
   const concepts = [
     makeConcept("c1", "Concept A"),

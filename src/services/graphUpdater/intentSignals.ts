@@ -1977,6 +1977,19 @@ export function isLikelyDestinationCandidate(x: string): boolean {
   ) {
     return false;
   }
+  if (
+    /饮食|忌口|低盐|低脂|高纤维|清淡|少油|少糖|热汤|热食|吃饭|用餐|餐厅|餐馆|饭馆|饭菜|口味|海鲜|安眠药/i.test(
+      s
+    )
+  ) {
+    return false;
+  }
+  if (/(地铁|捷运|机场线|机场快线|高铁站|火车站|车站|站点|电梯|无障碍|步行可达|换乘)/i.test(s)) {
+    return false;
+  }
+  if (/(台阶|楼梯|爬坡|太多坡|暴走|长距离步行|长距离转乘|长距离换乘|连续走|不能久走|少走路|转乘)/i.test(s)) {
+    return false;
+  }
   if (/^(?:比较|更|稍微|尽量|优先|最好)?\s*(?:好|安全|安静|方便|便宜|舒适|舒服|热闹|清净|治安)(?:一点)?$/i.test(s)) {
     return false;
   }

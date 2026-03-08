@@ -1048,6 +1048,41 @@ const cases: Case[] = [
     },
   },
   {
+    name: "hotel plus diet refinement should not create a fake destination",
+    run: () => {
+      const zh = extractIntentSignals("酒店最好靠地铁、有电梯，附近还能吃到清淡一点的饭。", { locale: "zh-CN" });
+      assert.equal((zh.destinations || []).length, 0);
+      assert.equal(zh.destination, undefined);
+      assert.equal(zh.lodgingPreference, "住宿偏好：需满足指定住宿标准");
+      assert.equal(
+        (zh.genericConstraints || []).some(
+          (item) => item.kind === "diet" && /清淡|附近还能吃到清淡一点的饭/.test(String(item.text || item.evidence || ""))
+        ),
+        true
+      );
+    },
+  },
+  {
+    name: "lodging transit and elevator refinement should not create a fake destination",
+    run: () => {
+      const zh = extractIntentSignals("酒店请优先靠地铁或机场线，有电梯，附近最好能吃到清淡一点的饭。", { locale: "zh-CN" });
+      assert.equal((zh.destinations || []).length, 0);
+      assert.equal(zh.destination, undefined);
+      assert.equal(zh.lodgingPreference, "住宿偏好：需满足指定住宿标准");
+    },
+  },
+  {
+    name: "health mobility refinement should not create fake destinations",
+    run: () => {
+      const zh = extractIntentSignals("心血管这条约束继续成立，所以不要连续暴走，也别安排太多坡和长距离转乘。", {
+        locale: "zh-CN",
+      });
+      assert.equal((zh.destinations || []).length, 0);
+      assert.equal(zh.destination, undefined);
+      assert.equal(zh.healthConstraint, "心血管这条约束继续成立");
+    },
+  },
+  {
     name: "revoked boating alternatives should stay on activity axis and not become destination slots",
     run: () => {
       const zh = extractIntentSignals(

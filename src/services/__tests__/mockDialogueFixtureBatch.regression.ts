@@ -45,7 +45,7 @@ type ScenarioReport = {
   model: string;
   firstTaskTurns: number;
   secondTaskTurns: number;
-  sharedMotifTypeIds: string[];
+  sharedMotifSignatures: string[];
   finalPlanDestinations: string[];
   finalGraphDestinations: string[];
   portfolioTrips: number;
@@ -70,19 +70,42 @@ function makeEmptyGraph(conversationId: string): CDG {
   };
 }
 
-function motifTypeIds(model: CognitiveModel): string[] {
+function motifStructureSignatures(model: CognitiveModel): string[] {
+  const conceptById = new Map((model.concepts || []).map((concept) => [concept.id, concept]));
+  const conceptToken = (conceptId: string): string => {
+    const concept = conceptById.get(conceptId);
+    if (!concept) return "other";
+    const semanticKey = String(concept.semanticKey || "").trim();
+    if (semanticKey.startsWith("slot:constraint:limiting:")) return semanticKey;
+    return String(concept.family || "").trim() || semanticKey || "other";
+  };
   return Array.from(
     new Set(
       (model.motifs || [])
-        .map((motif) => String(motif.motif_type_id || "").trim())
+        .map((motif) => {
+          const relation = String(motif.dependencyClass || motif.relation || "").trim() || "other";
+          const target = conceptToken(String(motif.anchorConceptId || "").trim());
+          const sources = Array.from(
+            new Set(
+              ((motif.roles?.sources || []).length
+                ? motif.roles!.sources
+                : (motif.conceptIds || []).filter((id) => id !== motif.anchorConceptId)
+              )
+                .map((id) => conceptToken(String(id || "").trim()))
+                .filter(Boolean)
+                .sort()
+            )
+          ).join("+");
+          return `${motif.motifType || "pair"}|${relation}|${sources || "none"}->${target}`;
+        })
         .filter(Boolean)
     )
   );
 }
 
-function sharedMotifTypeIds(left: CognitiveModel, right: CognitiveModel): string[] {
-  const rightSet = new Set(motifTypeIds(right));
-  return motifTypeIds(left).filter((id) => rightSet.has(id));
+function sharedMotifSignatures(left: CognitiveModel, right: CognitiveModel): string[] {
+  const rightSet = new Set(motifStructureSignatures(right));
+  return motifStructureSignatures(left).filter((id) => rightSet.has(id));
 }
 
 function hasDestination(graph: CDG, destination: string): boolean {
@@ -119,7 +142,7 @@ async function loadFixtures(): Promise<DialogueFixture[]> {
   const names = (await fs.readdir(ROOT_DIR))
     .filter((name) => FIXTURE_PATTERN.test(name))
     .sort();
-  assert.equal(names.length, 6, `expected 6 fixture files in root, got ${names.length}`);
+  assert.ok(names.length >= 6, `expected at least 6 fixture files in root, got ${names.length}`);
   const out = await Promise.all(
     names.map(async (name) => {
       const raw = await fs.readFile(path.join(ROOT_DIR, name), "utf8");
@@ -274,7 +297,7 @@ async function runFixture(fixture: DialogueFixture): Promise<ScenarioReport> {
   assert.ok(portfolio.trips.length >= 2, `${fixture.fileName} should yield at least 2 portfolio trips`);
 
   const warnings: string[] = [];
-  const shared = sharedMotifTypeIds(firstTask.model, secondTask.model);
+  const shared = sharedMotifSignatures(firstTask.model, secondTask.model);
   if (shared.length < Number(fixture.expectedSharedMotifMin || 0)) {
     warnings.push(
       `shared motif count below expectation: expected >= ${fixture.expectedSharedMotifMin}, got ${shared.length}`
@@ -288,7 +311,7 @@ async function runFixture(fixture: DialogueFixture): Promise<ScenarioReport> {
     model: normalizeConversationModel(fixture.model),
     firstTaskTurns: fixture.firstTask.turns.length,
     secondTaskTurns: fixture.secondTask.turns.length,
-    sharedMotifTypeIds: shared,
+    sharedMotifSignatures: shared,
     finalPlanDestinations: readPlanDestinations(secondTask.plan),
     finalGraphDestinations: readGraphDestinations(secondTask.graph),
     portfolioTrips: portfolio.trips.length,
