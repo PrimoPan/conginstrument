@@ -1903,6 +1903,60 @@ const cases: Case[] = [
     },
   },
   {
+    name: "duration lead-in phrase should not become a fake destination or inflate total duration",
+    run: () => {
+      const signals = extractIntentSignals("我想去台北旅游，一个人，为期三天", { locale: "zh-CN" as any });
+      assert.equal(signals.destination, "台北");
+      assert.deepEqual(signals.destinations, ["台北"]);
+      assert.equal(signals.durationDays, 3);
+      assert.equal((signals.cityDurations || []).some((x) => x.city === "为期"), false);
+      assert.equal((signals.destinations || []).includes("为期"), false);
+    },
+  },
+  {
+    name: "graph patch should not emit fake duration city nodes from temporal lead-ins",
+    run: async () => {
+      const baseGraph: any = { id: "g_taipei_three_days", version: 1, nodes: [], edges: [] };
+      const patch = await generateGraphPatch({
+        graph: baseGraph,
+        userText: "我想去台北旅游，一个人，为期三天",
+        recentTurns: [{ role: "user", content: "我想去台北旅游，一个人，为期三天" }],
+        stateContextUserTurns: ["我想去台北旅游，一个人，为期三天"],
+        assistantText: "收到",
+        locale: "zh-CN" as any,
+      });
+      const applied = applyPatchWithGuards(baseGraph, patch).newGraph;
+      const statements = (applied.nodes || []).map((n: any) => String(n.statement || ""));
+      assert.equal(statements.includes("目的地: 为期"), false);
+      assert.equal(statements.includes("城市时长: 为期 3天"), false);
+      assert.equal(statements.includes("总行程时长: 6天"), false);
+      assert.equal(statements.includes("目的地: 台北"), true);
+      assert.equal(statements.includes("总行程时长: 3天"), true);
+    },
+  },
+  {
+    name: "slot extraction sanitization should drop temporal lead-ins from destinations and city durations",
+    run: () => {
+      const signals = slotsToSignals(
+        {
+          destinations: [
+            { name: "台北", evidence: "去台北旅游", role: "travel", granularity: "city" },
+            { name: "为期", evidence: "为期三天", role: "travel", granularity: "city" },
+          ],
+          city_durations: [
+            { city: "台北", days: 3, evidence: "台北3天", kind: "travel" },
+            { city: "为期", days: 3, evidence: "为期三天", kind: "travel" },
+          ],
+          total_duration: { days: 3, evidence: "为期三天", confidence: 0.9, importance: 0.8 },
+        } as any,
+        "zh-CN" as any
+      );
+      assert.deepEqual(signals.destinations, ["台北"]);
+      assert.equal((signals.cityDurations || []).some((x) => x.city === "为期"), false);
+      assert.equal(signals.durationDays, 3);
+    },
+  },
+  {
     name: "later neutral turn should not collapse preserved total duration to partial city sum",
     run: () => {
       const merged = extractIntentSignalsWithRecency(

@@ -259,6 +259,14 @@ function formatCriticalEvidence(locale: AppLocale | undefined, reason: string, d
   return isEnglishLocale(locale) ? `${reason} for ${days} days (hard constraint)` : `${reason} ${days}天（硬约束）`;
 }
 
+function looksLikeDurationLeadInPhrase(raw: string): boolean {
+  const s = cleanStatement(raw, 32)
+    .replace(/[，。,；;：:\s]+/g, "")
+    .trim();
+  if (!s) return false;
+  return /^(?:为期|历时|时长|总时长|行程时长|总行程时长|总共|一共|共计|总计|合计|全程)(?:约|大约|大概)?$/i.test(s);
+}
+
 const LATIN_DESTINATION_CONNECTORS = new Set([
   "de",
   "da",
@@ -1708,6 +1716,7 @@ function inferDurationFromText(
 
 export function normalizeDestination(raw: string): string {
   let s = cleanStatement(raw, 24);
+  if (looksLikeDurationLeadInPhrase(s)) return "";
   s = s.replace(/^(那就先以|那就先按|那就按|就先以|先以|以|就按|先按|按|改成|改为|改到)\s*/i, "");
   s = s.replace(/^(和|与|及|加)\s*/i, "");
   s = s.replace(/^(?:一个|一趟|一段|一次|一版|一轮|one|a|an)\s*/i, "");
@@ -1768,9 +1777,11 @@ export function normalizeDestination(raw: string): string {
   s = s.replace(/本身$/i, "");
   s = s.replace(/的+$/g, "");
   s = s.replace(/[吧啊呀呢嘛]+$/g, "");
+  if (looksLikeDurationLeadInPhrase(s)) return "";
   const routeScoped = s.match(/^(.{2,16}?)(?:自驾)?(?:小)?(?:环岛|环线|环游|环路|一圈)$/i);
   if (routeScoped?.[1]) s = routeScoped[1];
   s = stabilizeLatinDestinationSurface(s.trim());
+  if (looksLikeDurationLeadInPhrase(s)) return "";
   return s;
 }
 
@@ -1870,6 +1881,7 @@ function looksLikeLodgingSequenceFragment(raw: string): boolean {
 export function isLikelyDestinationCandidate(x: string): boolean {
   const s = normalizeDestination(x);
   if (!s) return false;
+  if (looksLikeDurationLeadInPhrase(x) || looksLikeDurationLeadInPhrase(s)) return false;
   if (looksLikeDiscourseFragment(x) || looksLikeDiscourseFragment(s)) return false;
   if (looksLikeMovementFragment(x) || looksLikeMovementFragment(s)) return false;
   if (looksLikeLodgingSequenceFragment(x) || looksLikeLodgingSequenceFragment(s)) return false;
