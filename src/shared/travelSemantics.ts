@@ -21,7 +21,7 @@ export const ABSTRACT_TRAVEL_MODE_RE =
   /(在地体验|当地体验|当地生活|城市生活|生活感|体验感|不要太硬核|太硬核|硬核一点|local experience|local life|city life|street life|daily life|vibe|atmosphere|feel of the city|too hardcore|hardcore)/i;
 
 export const ABSTRACT_PLACE_RE =
-  /(西班牙语地区|英语地区|法语地区|德语地区|语地区|safe area|quiet area|convenient area|affordable area|comfortable area|nearby area|walkable area)|(安全|安静|方便|便宜|舒适|舒服|热闹|清净|治安|人少|不拥挤|离.*近|靠近|附近|safe|quiet|convenient|affordable|comfortable|walkable|nearby).{0,12}(地方|位置|区域|area|place|zone)?/i;
+  /(西班牙语地区|英语地区|法语地区|德语地区|语地区|safe area|quiet area|convenient area|affordable area|comfortable area|nearby area|walkable area|off[-\s]?center area|remote area)|(安全|安静|方便|便宜|舒适|舒服|热闹|清净|治安|人少|不拥挤|离.*近|靠近|附近|很偏|太偏|更偏|偏远|很远|太远|更远|离中心远|safe|quiet|convenient|affordable|comfortable|walkable|nearby|off[-\s]?center|far away|too far|remote).{0,12}(地方|位置|区域|点|area|place|zone|spot)?/i;
 
 export const WEATHER_FALLBACK_RE =
   /(下雨|雨天|暴雨|阴天|高温|太热|太冷|天气不好|天气太热|天气太冷|weather|rain|rainy|storm|heat|hot weather|cold weather|bad weather)/i;

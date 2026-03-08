@@ -46,6 +46,7 @@ export type TurnDoc = {
   _id?: ObjectId;
   conversationId: ObjectId;
   userId: ObjectId;
+  taskId?: string;
   createdAt: Date;
   userText: string;
   assistantText: string;
@@ -135,6 +136,7 @@ export async function connectMongo() {
   await collections.conversations.createIndex({ userId: 1, updatedAt: -1 });
   await collections.conversations.createIndex({ userId: 1, locale: 1, updatedAt: -1 });
   await collections.turns.createIndex({ conversationId: 1, createdAt: 1 });
+  await collections.turns.createIndex({ conversationId: 1, userId: 1, taskId: 1, createdAt: 1 });
   await collections.motifLibrary.createIndex({ userId: 1, locale: 1, motif_type_id: 1 }, { unique: true });
   await collections.motifLibrary.createIndex({ userId: 1, locale: 1, updatedAt: -1 });
   try {

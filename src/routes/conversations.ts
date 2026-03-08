@@ -924,11 +924,33 @@ async function loadRecentTurnsForPlan(params: {
   conversationId: ObjectId;
   userId: ObjectId;
   limit?: number;
+  taskId?: string;
+  since?: string;
+  sortDirection?: 1 | -1;
 }) {
+  const limit = Math.max(1, Math.min(params.limit || 120, 320));
+  const taskId = cleanInput(params.taskId, 120);
+  const sinceIso = cleanInput(params.since, 48);
+  const sortDirection = params.sortDirection === -1 ? -1 : 1;
+  const fallbackFilter: Record<string, any> = {
+    conversationId: params.conversationId,
+    userId: params.userId,
+  };
+  if (sinceIso) fallbackFilter.createdAt = { $gt: new Date(sinceIso) };
+
+  if (taskId) {
+    const scoped = await collections.turns
+      .find({ conversationId: params.conversationId, userId: params.userId, taskId })
+      .sort({ createdAt: sortDirection })
+      .limit(limit)
+      .toArray();
+    if (scoped.length) return scoped;
+  }
+
   return collections.turns
-    .find({ conversationId: params.conversationId, userId: params.userId })
-    .sort({ createdAt: 1 })
-    .limit(Math.max(1, Math.min(params.limit || 120, 320)))
+    .find(fallbackFilter)
+    .sort({ createdAt: sortDirection })
+    .limit(limit)
     .toArray();
 }
 
@@ -936,19 +958,70 @@ async function loadRecentUserTextsForState(params: {
   conversationId: ObjectId;
   userId: ObjectId;
   limit?: number;
+  taskId?: string;
+  since?: string;
 }) {
-  const docs = await collections.turns
-    .find({ conversationId: params.conversationId, userId: params.userId })
-    .sort({ createdAt: -1 })
-    .limit(Math.max(8, Math.min(params.limit || 120, 320)))
-    .toArray();
+  const limit = Math.max(8, Math.min(params.limit || 120, 320));
+  const taskId = cleanInput(params.taskId, 120);
+  const sinceIso = cleanInput(params.since, 48);
+  const fallbackFilter: Record<string, any> = {
+    conversationId: params.conversationId,
+    userId: params.userId,
+  };
+  if (sinceIso) fallbackFilter.createdAt = { $gt: new Date(sinceIso) };
+
+  let docs =
+    taskId
+      ? await collections.turns
+          .find({ conversationId: params.conversationId, userId: params.userId, taskId })
+          .sort({ createdAt: -1 })
+          .limit(limit)
+          .toArray()
+      : [];
+  if (!docs.length) {
+    docs = await collections.turns
+      .find(fallbackFilter)
+      .sort({ createdAt: -1 })
+      .limit(limit)
+      .toArray();
+  }
   return docs
     .reverse()
     .map((t) => String(t.userText || "").trim())
     .filter(Boolean);
 }
 
-async function computeTravelPlanState(params: {
+function latestArchivedTaskClosedAt(plan: TravelPlanState | null | undefined): string | undefined {
+  const history = Array.isArray(plan?.task_history) ? plan?.task_history || [] : [];
+  const last = history[history.length - 1];
+  return cleanInput(last?.closed_at, 48) || undefined;
+}
+
+function predictCurrentTaskId(params: {
+  conversationId: ObjectId | string;
+  previousTravelPlan?: TravelPlanState | null;
+  forceTaskSwitch?: boolean;
+}): string {
+  const baseTaskId = cleanInput(
+    params.previousTravelPlan?.task_id || String(params.conversationId || ""),
+    120
+  ) || cleanInput(String(params.conversationId || ""), 120) || "task_default";
+  if (!params.forceTaskSwitch) return baseTaskId;
+  const previousPlanVersion =
+    Number((params.previousTravelPlan as any)?.plan_version) ||
+    Number(params.previousTravelPlan?.version) ||
+    1;
+  return `${cleanInput(String(params.conversationId || ""), 120) || baseTaskId}:task_${Math.max(1, previousPlanVersion + 1)}`;
+}
+
+function activeTaskScope(plan: TravelPlanState | null | undefined, fallback: string) {
+  return {
+    taskId: currentTaskId(plan, fallback),
+    since: latestArchivedTaskClosedAt(plan),
+  };
+}
+
+export async function computeTravelPlanState(params: {
   conversationId: ObjectId;
   userId: ObjectId;
   graph: CDG;
@@ -957,11 +1030,15 @@ async function computeTravelPlanState(params: {
   previous?: TravelPlanState | null;
   locale: AppLocale;
   forceTaskSwitch?: boolean;
+  queryTaskId?: string;
+  since?: string;
 }): Promise<TravelPlanState> {
   const turns = await loadRecentTurnsForPlan({
     conversationId: params.conversationId,
     userId: params.userId,
     limit: 160,
+    taskId: params.queryTaskId,
+    since: params.since,
   });
   return buildTravelPlanState({
     locale: params.locale,
@@ -1027,6 +1104,9 @@ type TurnRuntimeBase = {
   recentTurns: Array<{ role: "user" | "assistant"; content: string }>;
   stateContextUserTurns: string[];
   forceTaskSwitch: boolean;
+  activeTaskId: string;
+  predictedTaskId: string;
+  taskSince?: string;
 };
 
 function shouldResetTurnBaseline(taskDetection: TaskDetection): boolean {
@@ -1037,7 +1117,7 @@ function shouldResetTurnBaseline(taskDetection: TaskDetection): boolean {
   );
 }
 
-async function buildTurnRuntimeBase(params: {
+export async function buildTurnRuntimeBase(params: {
   conversationId: ObjectId;
   userId: ObjectId;
   conv: any;
@@ -1053,13 +1133,24 @@ async function buildTurnRuntimeBase(params: {
     taskLifecycle: params.taskLifecycle || null,
   });
   const forceTaskSwitch = shouldResetTurnBaseline(taskDetection);
+  const previousTravelPlan = ((params.conv as any).travelPlanState as TravelPlanState | null) || null;
+  const activeTaskId = currentTaskId(previousTravelPlan, String(params.conversationId));
+  const taskSince = latestArchivedTaskClosedAt(previousTravelPlan);
+  const predictedTaskId = predictCurrentTaskId({
+    conversationId: params.conversationId,
+    previousTravelPlan,
+    forceTaskSwitch,
+  });
   const recent = forceTaskSwitch
     ? []
-    : await collections.turns
-        .find({ conversationId: params.conversationId, userId: params.userId })
-        .sort({ createdAt: -1 })
-        .limit(10)
-        .toArray();
+    : await loadRecentTurnsForPlan({
+        conversationId: params.conversationId,
+        userId: params.userId,
+        taskId: activeTaskId,
+        since: taskSince,
+        limit: 10,
+        sortDirection: -1,
+      });
   const recentTurns = recent
     .slice()
     .reverse()
@@ -1073,6 +1164,8 @@ async function buildTurnRuntimeBase(params: {
         conversationId: params.conversationId,
         userId: params.userId,
         limit: 140,
+        taskId: activeTaskId,
+        since: taskSince,
       });
 
   return {
@@ -1088,6 +1181,9 @@ async function buildTurnRuntimeBase(params: {
     recentTurns,
     stateContextUserTurns,
     forceTaskSwitch,
+    activeTaskId,
+    predictedTaskId,
+    taskSince,
   };
 }
 
@@ -1317,6 +1413,8 @@ async function persistConversationModel(params: {
   latestUserText?: string;
   planningBootstrapHints?: PlanningBootstrapHints | null;
   manualGraphOverrides?: ManualGraphOverrides | null;
+  queryTaskId?: string;
+  since?: string;
 }): Promise<PersistedConversationSnapshot> {
   const motifsWithTransfer = applyTransferStateToMotifs({
     motifs: annotateMotifExtractionMeta({
@@ -1352,6 +1450,8 @@ async function persistConversationModel(params: {
     previous: params.previousTravelPlan || null,
     locale: params.locale,
     forceTaskSwitch: !!params.forceTaskSwitch,
+    queryTaskId: params.queryTaskId,
+    since: params.since,
   });
   const persistentMotifLibrary = await listUserMotifLibrary(params.userId, params.locale);
   const planning = await safeBuildPlanningStateBundle({
@@ -1476,6 +1576,7 @@ async function refreshConversationTransferProjection(params: {
     state: params.motifTransferState,
   });
   model.motifGraph = { ...(model.motifGraph || { motifs: [], motifLinks: [] }), motifs: model.motifs };
+  const taskScope = activeTaskScope((params.conv as any).travelPlanState || null, String(params.oid));
 
   const travelPlanState =
     ((params.conv as any).travelPlanState as TravelPlanState | null) ||
@@ -1487,6 +1588,8 @@ async function refreshConversationTransferProjection(params: {
       motifs: model.motifs,
       previous: null,
       locale: params.locale,
+      queryTaskId: taskScope.taskId,
+      since: taskScope.since,
     }));
   const planningBootstrapHints = readPlanningBootstrapHints((params.conv as any).planningBootstrapHints);
   const planning = await safeBuildPlanningStateBundle({
@@ -1911,6 +2014,7 @@ convRouter.put("/:id/graph", asyncRoute(async (req: AuthedRequest, res) => {
   const motifTransferState = readMotifTransferState((conv as any).motifTransferState);
   const taskLifecycle = readTaskLifecycle((conv as any).taskLifecycle);
   const planningBootstrapHints = readPlanningBootstrapHints((conv as any).planningBootstrapHints);
+  const taskScope = activeTaskScope((conv as any).travelPlanState || null, String(oid));
   model.motifs = applyTransferStateToMotifs({
     motifs: model.motifs || [],
     state: motifTransferState,
@@ -1935,6 +2039,8 @@ convRouter.put("/:id/graph", asyncRoute(async (req: AuthedRequest, res) => {
     motifs: model.motifs,
     previous: (conv as any).travelPlanState || null,
     locale,
+    queryTaskId: taskScope.taskId,
+    since: taskScope.since,
   });
   const planning = await safeBuildPlanningStateBundle({
     conversationId: oid,
@@ -1977,12 +2083,16 @@ convRouter.put("/:id/graph", asyncRoute(async (req: AuthedRequest, res) => {
   let adviceError = "";
   if (requestAdvice && !conflictGate) {
     try {
-      const recent = await collections.turns
-        .find({ conversationId: oid, userId })
-        .sort({ createdAt: -1 })
-        .limit(12)
-        .toArray();
+      const recent = await loadRecentTurnsForPlan({
+        conversationId: oid,
+        userId,
+        taskId: taskScope.taskId,
+        since: taskScope.since,
+        limit: 12,
+        sortDirection: -1,
+      });
       const recentTurns = recent
+        .slice()
         .reverse()
         .flatMap((t) => [
           { role: "user" as const, content: t.userText },
@@ -2063,6 +2173,7 @@ convRouter.put("/:id/concepts", asyncRoute(async (req: AuthedRequest, res) => {
   const motifTransferState = readMotifTransferState((conv as any).motifTransferState);
   const taskLifecycle = readTaskLifecycle((conv as any).taskLifecycle);
   const planningBootstrapHints = readPlanningBootstrapHints((conv as any).planningBootstrapHints);
+  const taskScope = activeTaskScope((conv as any).travelPlanState || null, String(oid));
   model.motifs = applyTransferStateToMotifs({
     motifs: model.motifs || [],
     state: motifTransferState,
@@ -2083,6 +2194,8 @@ convRouter.put("/:id/concepts", asyncRoute(async (req: AuthedRequest, res) => {
     motifs: model.motifs,
     previous: (conv as any).travelPlanState || null,
     locale,
+    queryTaskId: taskScope.taskId,
+    since: taskScope.since,
   });
   const planning = await safeBuildPlanningStateBundle({
     conversationId: oid,
@@ -2154,6 +2267,7 @@ convRouter.get("/:id/turns", asyncRoute(async (req: AuthedRequest, res) => {
     turns.map((t) => ({
       id: String(t._id),
       createdAt: t.createdAt,
+      taskId: cleanInput((t as any).taskId, 120) || undefined,
       userText: t.userText,
       assistantText: t.assistantText,
       graphVersion: t.graphVersion,
@@ -2173,7 +2287,7 @@ async function handleTravelPlanPdfExport(req: AuthedRequest, res: any) {
     const conv = await collections.conversations.findOne({ _id: oid, userId });
     if (!conv) return res.status(404).json({ error: "conversation not found" });
     const locale = normalizeLocale((conv as any).locale);
-    const turns = await loadRecentTurnsForPlan({ conversationId: oid, userId, limit: 240 });
+    const taskScope = activeTaskScope((conv as any).travelPlanState || null, String(oid));
 
     const graph: CDG = {
       id: String(conv.graph?.id || id),
@@ -2199,19 +2313,17 @@ async function handleTravelPlanPdfExport(req: AuthedRequest, res: any) {
     });
     model.motifGraph = { ...(model.motifGraph || { motifs: [], motifLinks: [] }), motifs: model.motifs };
     const travelPlanState =
-      turns.length > 0
-        ? buildTravelPlanState({
-            locale,
+      (conv as any).travelPlanState
+        ? await computeTravelPlanState({
+            conversationId: oid,
+            userId,
             graph,
             concepts: model.concepts || [],
             motifs: model.motifs || [],
-            taskId: String(oid),
-            turns: turns.map((t) => ({
-              createdAt: t.createdAt,
-              userText: t.userText,
-              assistantText: t.assistantText,
-            })),
             previous: (conv as any).travelPlanState || null,
+            locale,
+            queryTaskId: taskScope.taskId,
+            since: taskScope.since,
           })
         : ((conv as any).travelPlanState as TravelPlanState | null);
     if (!travelPlanState) {
@@ -2384,6 +2496,7 @@ convRouter.post("/:id/turn", asyncRoute(async (req: AuthedRequest, res) => {
     await collections.turns.insertOne({
       conversationId: oid,
       userId,
+      taskId: turnBase.predictedTaskId,
       createdAt: now,
       userText,
       assistantText: conflictGate.message,
@@ -2407,6 +2520,8 @@ convRouter.post("/:id/turn", asyncRoute(async (req: AuthedRequest, res) => {
       latestUserText: userText,
       planningBootstrapHints: retrievalHints,
       manualGraphOverrides: turnBase.manualGraphOverrides,
+      queryTaskId: turnBase.predictedTaskId,
+      since: turnBase.taskSince,
     });
 
     return res.json({
@@ -2512,6 +2627,7 @@ convRouter.post("/:id/turn", asyncRoute(async (req: AuthedRequest, res) => {
   await collections.turns.insertOne({
     conversationId: oid,
     userId,
+    taskId: turnBase.predictedTaskId,
     createdAt: now,
     userText,
     assistantText: out.assistant_text,
@@ -2535,6 +2651,8 @@ convRouter.post("/:id/turn", asyncRoute(async (req: AuthedRequest, res) => {
     latestUserText: userText,
     planningBootstrapHints: retrievalHints,
     manualGraphOverrides: turnBase.manualGraphOverrides,
+    queryTaskId: turnBase.predictedTaskId,
+    since: turnBase.taskSince,
   });
 
   res.json({
@@ -2652,6 +2770,7 @@ convRouter.post("/:id/turn/stream", asyncRoute(async (req: AuthedRequest, res) =
     await collections.turns.insertOne({
       conversationId: oid,
       userId,
+      taskId: turnBase.predictedTaskId,
       createdAt: now,
       userText,
       assistantText: conflictGate.message,
@@ -2675,6 +2794,8 @@ convRouter.post("/:id/turn/stream", asyncRoute(async (req: AuthedRequest, res) =
       latestUserText: userText,
       planningBootstrapHints: retrievalHints,
       manualGraphOverrides: turnBase.manualGraphOverrides,
+      queryTaskId: turnBase.predictedTaskId,
+      since: turnBase.taskSince,
     });
 
     res.status(200);
@@ -2835,6 +2956,7 @@ convRouter.post("/:id/turn/stream", asyncRoute(async (req: AuthedRequest, res) =
     await collections.turns.insertOne({
       conversationId: oid,
       userId,
+      taskId: turnBase.predictedTaskId,
       createdAt: now,
       userText,
       assistantText: out.assistant_text,
@@ -2858,6 +2980,8 @@ convRouter.post("/:id/turn/stream", asyncRoute(async (req: AuthedRequest, res) =
       latestUserText: userText,
       planningBootstrapHints: retrievalHints,
       manualGraphOverrides: turnBase.manualGraphOverrides,
+      queryTaskId: turnBase.predictedTaskId,
+      since: turnBase.taskSince,
     });
 
     sseSend(res, "done", {
@@ -2967,6 +3091,7 @@ convRouter.post("/:id/turn/stream", asyncRoute(async (req: AuthedRequest, res) =
         await collections.turns.insertOne({
           conversationId: oid,
           userId,
+          taskId: turnBase.predictedTaskId,
           createdAt: now,
           userText,
           assistantText: out2.assistant_text,
@@ -2990,6 +3115,8 @@ convRouter.post("/:id/turn/stream", asyncRoute(async (req: AuthedRequest, res) =
           latestUserText: userText,
           planningBootstrapHints: retrievalHints,
           manualGraphOverrides: turnBase.manualGraphOverrides,
+          queryTaskId: turnBase.predictedTaskId,
+          since: turnBase.taskSince,
         });
 
         sseSend(res, "done", {

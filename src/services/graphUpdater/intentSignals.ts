@@ -1892,8 +1892,12 @@ export function isLikelyDestinationCandidate(x: string): boolean {
   if (NON_PLACE_TOKEN_RE.test(s)) return false;
   if (/^(?:[0-9]+|[一二三四五六七八九十两百千]+)$/.test(s)) return false;
   if (/(很高的建筑|高空建筑|高层建筑|摩天楼|高楼|楼顶|屋顶观景|高空观景)/i.test(s)) return false;
+  if (/(划船|坐船|乘船|游船|夜景船|boat|boating|ferry|cruise|kayak|rowing|paddl(?:e|ing))/i.test(s)) {
+    return false;
+  }
   if (/^(所以|因此|然后|另外|此外|这|那|此次|本次)/.test(s)) return false;
   if (!/^[A-Za-z\u4e00-\u9fff]+$/.test(s)) return false;
+  if (/(或者|还是)|(?:^|\s)or(?:\s|$)/i.test(s)) return false;
   if (/[\u4e00-\u9fffA-Za-z]{1,12}(和|与|及|、|,|，)[\u4e00-\u9fffA-Za-z]{1,12}/.test(s)) return false;
   if (DESTINATION_NOISE_RE.test(s)) return false;
   if (PLACE_STOPWORD_RE.test(s)) return false;
@@ -1924,6 +1928,13 @@ export function isLikelyDestinationCandidate(x: string): boolean {
     return false;
   }
   if (/^(更|比较|尽量|优先|最好|稍微)?\s*(安全|安静|方便|便宜|舒适|舒服|热闹|清净|治安|人少|离中心近|靠近中心)$/i.test(s)) {
+    return false;
+  }
+  if (
+    /^(?:更|太|很|有点|比较|稍微)?\s*(?:偏|偏远|远|离中心远|off[-\s]?center|far(?: away)?|too far|remote)(?:一点)?(?:的?(?:点|地方|位置|区域|spot))?$/i.test(
+      s
+    )
+  ) {
     return false;
   }
   if (/^(安全|安静|方便|便宜|舒适|舒服|热闹|清净|治安|人少|近一点|远一点)/i.test(s) && s.length <= 8) {
@@ -3033,6 +3044,16 @@ function detectPreferenceRevocationAxesFromText(raw: string): PreferenceAxis[] {
   if (SCENIC_PREF_NEGATION_RE.test(s)) out.push("preference:scenic");
   if (LODGING_PREF_NEGATION_RE.test(s)) out.push("preference:lodging");
   if (ACTIVITY_PREF_NEGATION_RE.test(s)) out.push("preference:activity");
+  const hasRevisionNegationCue =
+    REVISION_CURRENT_CUE_RE.test(s) &&
+    /(?:不想|不要|不再|取消|去掉|别再|don't|do not|no longer|anymore|not want(?: it| them| either)?)/i.test(s);
+  const hasActivityMention =
+    /(?:球|比赛|球赛|演出|演唱会|展览|赛事|划船|坐船|乘船|游船|皮划艇|漂流|match|game|concert|show|event|boat|boating|ferry|cruise|kayak|rowing|paddl(?:e|ing))/i.test(
+      s
+    );
+  if (hasRevisionNegationCue && hasActivityMention && !out.includes("preference:activity")) {
+    out.push("preference:activity");
+  }
   return out;
 }
 

@@ -694,6 +694,50 @@ const scenarios: ScenarioDefinition[] = [
     },
   },
   {
+    name: "long-form 8+8 restart should keep only ningbo when discarded side-cities and overnight fragments appear in the new task",
+    locale: "zh-CN",
+    firstTask: {
+      name: "quanzhou_parents_longform",
+      turns: [
+        "先规划一个泉州任务：想带父母去4天，重点是住得稳、吃得方便、每天不要走太多路。我们可以看看老街和寺庙，但不想为了打卡把白天排得太满，晚上也尽量早点回住处。",
+        "预算总共控制在1万4左右，酒店不需要豪华，关键是打车和步行都方便、有电梯、附近有吃饭的地方，别为了景观去很偏的区域。",
+        "活动上宁可上午一个重点、下午留白，也不想把很多点拼成一串；如果天气热或者下雨，希望直接切到室内替代。",
+        "父母脚力一般，台阶多或者要反复折返的地方都不想要；如果某段主要只是拍照，我宁可删掉。",
+        "我还想留一点街区慢逛和喝茶时间，但不是非得逛到很晚，重点还是节奏稳一点。",
+        "酒店尽量别换，如果必须换也最多一次，而且要有明确理由，比如返程更方便。",
+        "最后一天请自动留足返程缓冲，不要把退房前时间排满。",
+        "如果要做备选，请优先保留低强度版本，不要因此再加新的城市或郊区点。",
+      ],
+    },
+    secondTask: {
+      name: "ningbo_parents_longform",
+      turns: [
+        "重新规划一个新任务：这次改成带父母去宁波5天。先说清楚，我一开始脑子里想过顺便去绍兴或者杭州，也想过中间住一晚再分段，但后来想想都不要了，这趟只保留宁波本身，节奏越稳越好。",
+        "住宿方面，一开始也想过住高星酒店，后来觉得没必要；真正重要的是回酒店省力、附近吃饭方便、父母累了能随时回去休息，所以交通便利比星级和景观都重要。",
+        "活动上我最开始还想安排游船或者夜景船，但现在也不想了，宁可换成沿江慢走、老街散步、找舒服的店坐一会儿，而且不要因为删掉游船就自动给我新增更远的点。",
+        "我希望每天最多一个重点区域，别把看起来顺路但实际上换乘复杂的地方硬拼在一起。",
+        "如果中午太热、下雨或者父母状态不太好，希望能直接压缩成半天版本，不要因此外插杭州、绍兴或者别的城市支线。",
+        "吃饭不用追网红，离住处近、排队别太久、能坐得舒服就行；晚饭后也尽量只留附近散步。",
+        "最后两晚请住稳一点，不要再为了所谓体验换片区；回程前一天尤其轻，方便收拾和调整状态。",
+        "如果要做总结，请保持这几个最终结论：只保留宁波、不住高星酒店、不要游船、优先交通方便，但不要凭这些再生成新的城市节点。",
+      ],
+    },
+    secondTaskShouldSwitch: true,
+    validate: ({ firstTask, secondTask }) => {
+      assert.ok(hasDestination(firstTask.graph, "泉州"));
+      assert.ok(hasDestination(secondTask.graph, "宁波"));
+      assert.equal(hasDestination(secondTask.graph, "泉州"), false);
+      assert.equal(hasDestination(secondTask.graph, "杭州"), false);
+      assert.equal(hasDestination(secondTask.graph, "绍兴"), false);
+      assert.equal(hasDestination(secondTask.graph, "中间住"), false);
+      assert.ok(planHasDestination(secondTask.plan, "宁波"));
+      assert.equal(planHasDestination(secondTask.plan, "泉州"), false);
+      const statements = (secondTask.graph.nodes || []).map((node) => String(node.statement || ""));
+      assert.equal(statements.some((text) => /游船|夜景船|boat|boating|cruise/i.test(text)), false);
+      assert.equal(statements.some((text) => /高星|五星|luxury hotel|five-star/i.test(text)), false);
+    },
+  },
+  {
     name: "english 4+4 tasks keep destination boundaries stable with lightweight refinements",
     locale: "en-US",
     firstTask: {
@@ -722,6 +766,40 @@ const scenarios: ScenarioDefinition[] = [
       assert.equal(hasDestination(secondTask.graph, "new task"), false);
       assert.ok(planHasDestination(secondTask.plan, "Vienna") || planHasDestination(secondTask.plan, "维也纳"));
       assert.equal(planHasDestination(secondTask.plan, "Seoul"), false);
+    },
+  },
+  {
+    name: "english 4+4 restart should keep only porto when later turns revoke lisbon cruise and luxury-hotel ideas",
+    locale: "en-US",
+    firstTask: {
+      name: "seoul_food_trip",
+      turns: [
+        "Plan a 4-day Seoul trip for me and my sister. Keep it easy and food-focused.",
+        "Budget around 2600 dollars total.",
+        "Hotel near a subway stop and keep the last evening light.",
+        "If it rains, give me one indoor backup and do not add another city.",
+      ],
+    },
+    secondTask: {
+      name: "porto_mother_trip",
+      turns: [
+        "Start a new task: plan a 4-day Porto trip with my mother. At first I thought about adding Lisbon, but I do not want that anymore. Keep it to Porto only.",
+        "Budget around 3200 euros total.",
+        "I also first imagined a river cruise and a luxury hotel, but I do not want either anymore. Easy transit and low hassle matter more.",
+        "Keep the final day light, avoid extra city branches, and give me one indoor fallback if it rains.",
+      ],
+    },
+    secondTaskShouldSwitch: true,
+    validate: ({ firstTask, secondTask }) => {
+      assert.ok(hasDestination(firstTask.graph, "Seoul") || hasDestination(firstTask.graph, "首尔"));
+      assert.ok(hasDestination(secondTask.graph, "Porto") || hasDestination(secondTask.graph, "波尔图"));
+      assert.equal(hasDestination(secondTask.graph, "Seoul"), false);
+      assert.equal(hasDestination(secondTask.graph, "Lisbon"), false);
+      assert.ok(planHasDestination(secondTask.plan, "Porto") || planHasDestination(secondTask.plan, "波尔图"));
+      assert.equal(planHasDestination(secondTask.plan, "Seoul"), false);
+      const statements = (secondTask.graph.nodes || []).map((node) => String(node.statement || ""));
+      assert.equal(statements.some((text) => /cruise|boat|river cruise/i.test(text)), false);
+      assert.equal(statements.some((text) => /luxury hotel|five-star/i.test(text)), false);
     },
   },
 ];

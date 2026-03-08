@@ -1015,6 +1015,38 @@ const cases: Case[] = [
     },
   },
   {
+    name: "area-quality wording like 很偏的区域 should not create fake destinations",
+    run: () => {
+      const zh = extractIntentSignals("酒店不需要豪华，别为了景观去很偏的区域。", { locale: "zh-CN" });
+      assert.equal((zh.destinations || []).length, 0);
+      assert.equal(zh.destination, undefined);
+
+      const en = extractIntentSignals("Do not move to an off-center area just for the view.", { locale: "en-US" });
+      assert.equal((en.destinations || []).length, 0);
+      assert.equal(en.destination, undefined);
+    },
+  },
+  {
+    name: "revoked boating alternatives should stay on activity axis and not become destination slots",
+    run: () => {
+      const zh = extractIntentSignals(
+        "活动上我最开始还想安排游船或者夜景船，但现在也不想了，宁可沿江慢走，也不要因为删掉游船就自动新增更远的点。",
+        { locale: "zh-CN" }
+      );
+      assert.equal((zh.destinations || []).length, 0);
+      assert.equal(zh.destination, undefined);
+      assert.equal((zh.revokedPreferenceAxes || []).includes("preference:activity"), true);
+
+      const en = extractIntentSignals(
+        "I first imagined a river cruise or boat ride, but I do not want either anymore. Keep it easy and do not add a farther spot.",
+        { locale: "en-US" }
+      );
+      assert.equal((en.destinations || []).length, 0);
+      assert.equal(en.destination, undefined);
+      assert.equal((en.revokedPreferenceAxes || []).includes("preference:activity"), true);
+    },
+  },
+  {
     name: "trip-phase buffer phrasing should not create fake destinations or reset total duration",
     run: async () => {
       const zh = extractIntentSignals("回程前一晚要特别稳，不折腾换酒店。", { locale: "zh-CN" });
