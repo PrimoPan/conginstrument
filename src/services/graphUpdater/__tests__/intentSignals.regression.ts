@@ -647,6 +647,9 @@ const cases: Case[] = [
       const signals = extractIntentSignals("晚上别安排太晚，爸妈休息要稳一点。");
       assert.equal((signals.destinations || []).length, 0);
       assert.equal(signals.destination, undefined);
+      const sectionSignals = extractIntentSignals("每天最好只安排一个重点片区，中午留休息。");
+      assert.equal((sectionSignals.destinations || []).length, 0);
+      assert.equal(sectionSignals.destination, undefined);
       assert.equal(
         (signals.genericConstraints || []).some((item) => /安排太晚/.test(String(item.text || ""))),
         true
@@ -798,6 +801,12 @@ const cases: Case[] = [
       assert.ok((en.destinations || []).includes("Kyoto"));
       assert.equal((en.destinations || []).some((item) => /new task|start over/i.test(String(item))), false);
       assert.equal((en.destinations || []).includes("New"), false);
+
+      const zhDomestic = extractIntentSignals("先规划一个国内任务，想带父母去苏州4天，园林可以看，但整体慢一点。", {
+        locale: "zh-CN",
+      });
+      assert.equal(zhDomestic.destination, "苏州");
+      assert.deepEqual(zhDomestic.destinations, ["苏州"]);
     },
   },
   {
