@@ -6,6 +6,7 @@ import {
   looksLikeAbstractPlaceText,
   looksLikeAbstractTravelModeText,
   looksLikeBroadDestination,
+  looksLikeLodgingSequenceFragmentText,
 } from "../../shared/travelSemantics.js";
 
 const SUB_LOCATION_HINT_RE =
@@ -73,6 +74,7 @@ function isNoiseCityLike(name: string): boolean {
   if (NON_CITY_NOISE_RE.test(s)) return true;
   if (looksLikeAbstractTravelModeText(s)) return true;
   if (looksLikeAbstractPlaceText(s)) return true;
+  if (looksLikeLodgingSequenceFragmentText(s)) return true;
   if (/^(?:比(?:较)?|更|比较|尽量|优先|最好|稍微)?\s*(?:好|更好|好点|好一点|好些|合适|更合适|比较合适)(?:的地方|一点)?(?:吧|呢|呀|啊|吗)?$/i.test(s)) {
     return true;
   }

@@ -32,6 +32,7 @@ import {
   looksLikeAbstractTravelModeText,
   looksLikeDiscourseFragmentText,
   looksLikeFallbackPlanText,
+  looksLikeLodgingSequenceFragmentText,
   looksLikeMovementFragmentText,
   looksLikeTaskRestart,
   looksLikeTripPhaseCueText,
@@ -1764,6 +1765,7 @@ export function normalizeDestination(raw: string): string {
   s = s.replace(/(不确定要不要去|不确定要不要|不确定是否去|不确定|不是必须|先完全|完全|了)$/i, "");
   s = s.replace(/(地方|区域|位置|片区)(吧|呢|呀|啊)?$/i, "");
   s = s.replace(/(的地方|的区域)$/i, "");
+  s = s.replace(/本身$/i, "");
   s = s.replace(/的+$/g, "");
   s = s.replace(/[吧啊呀呢嘛]+$/g, "");
   const routeScoped = s.match(/^(.{2,16}?)(?:自驾)?(?:小)?(?:环岛|环线|环游|环路|一圈)$/i);
@@ -1859,11 +1861,18 @@ function looksLikeMovementFragment(raw: string): boolean {
   return looksLikeMovementFragmentText(text) || looksLikeMovementFragmentText(normalized);
 }
 
+function looksLikeLodgingSequenceFragment(raw: string): boolean {
+  const text = cleanStatement(raw, 96);
+  const normalized = normalizeDestination(raw);
+  return looksLikeLodgingSequenceFragmentText(text) || looksLikeLodgingSequenceFragmentText(normalized);
+}
+
 export function isLikelyDestinationCandidate(x: string): boolean {
   const s = normalizeDestination(x);
   if (!s) return false;
   if (looksLikeDiscourseFragment(x) || looksLikeDiscourseFragment(s)) return false;
   if (looksLikeMovementFragment(x) || looksLikeMovementFragment(s)) return false;
+  if (looksLikeLodgingSequenceFragment(x) || looksLikeLodgingSequenceFragment(s)) return false;
   if (looksLikeNonPlaceSituationPhrase(x) || looksLikeNonPlaceSituationPhrase(s)) return false;
   if (looksLikeAbstractTravelModePhrase(x) || looksLikeAbstractTravelModePhrase(s)) return false;
   if (looksLikeAbstractPlaceText(x) || looksLikeAbstractPlaceText(s)) return false;
@@ -2004,6 +2013,7 @@ function extractDestinationList(text: string): Array<{ city: string; evidence: s
   const push = (raw: string, evidence: string, index: number) => {
     if (looksLikeDiscourseFragment(raw) || looksLikeDiscourseFragment(evidence)) return;
     if (looksLikeMovementFragment(raw) || looksLikeMovementFragment(evidence)) return;
+    if (looksLikeLodgingSequenceFragment(raw) || looksLikeLodgingSequenceFragment(evidence)) return;
     if (looksLikeNonPlaceSituationPhrase(raw)) return;
     if (looksLikeAbstractTravelModePhrase(raw) || looksLikeAbstractTravelModePhrase(evidence)) return;
     if (looksLikeAbstractPlaceText(raw) || looksLikeAbstractPlaceText(evidence)) return;
@@ -2015,6 +2025,7 @@ function extractDestinationList(text: string): Array<{ city: string; evidence: s
       for (const city of expanded) {
         if (looksLikeDiscourseFragment(city)) continue;
         if (looksLikeMovementFragment(city)) continue;
+        if (looksLikeLodgingSequenceFragment(city)) continue;
         if (looksLikeNonPlaceSituationPhrase(city)) continue;
         if (looksLikeAbstractTravelModePhrase(city)) continue;
         if (looksLikeAbstractPlaceText(city)) continue;

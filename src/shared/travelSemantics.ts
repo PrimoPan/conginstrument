@@ -35,6 +35,9 @@ export const DISCOURSE_FRAGMENT_RE =
 export const MOTION_FRAGMENT_RE =
   /(之间|来回|穿梭|折返|散步|慢逛|逛到|spot[-\s]?hopping|back and forth|stroll|wander)/i;
 
+export const LODGING_SEQUENCE_FRAGMENT_RE =
+  /(中间住|住一晚|住[一二三四五六七八九十0-9]+晚|想过中间住|stay one night|overnight in between|stay in between)/i;
+
 export function looksLikeBroadDestination(text: string): boolean {
   return BROAD_DESTINATION_RE.test(cleanTravelText(text, 80));
 }
@@ -78,4 +81,8 @@ export function looksLikeDiscourseFragmentText(text: string): boolean {
 
 export function looksLikeMovementFragmentText(text: string): boolean {
   return MOTION_FRAGMENT_RE.test(cleanTravelText(text, 120));
+}
+
+export function looksLikeLodgingSequenceFragmentText(text: string): boolean {
+  return LODGING_SEQUENCE_FRAGMENT_RE.test(cleanTravelText(text, 120));
 }

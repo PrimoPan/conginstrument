@@ -4319,6 +4319,17 @@ const cases: Case[] = [
       assert.equal((signals.destinations || []).some((item) => /热门点之间来回穿梭/.test(String(item))), false);
     },
   },
+  {
+    name: "explicit restart revision should keep only the stable city and drop lodging-sequence fragments",
+    run: () => {
+      const signals = extractIntentSignals(
+        "重新规划一个新任务：这次想带父母去京都6天。我一开始脑子里闪过大阪、神户这些顺路城市，也想过中间住一晚，但后来想想不想折腾了，这趟就把目标收回到京都本身。住宿方面，本来最开始也想过住高星酒店，后来又觉得没有必要；真正重要的是交通便利、从车站回酒店省力、附近吃饭方便。"
+      );
+      assert.equal(signals.destination, "京都");
+      assert.deepEqual(signals.destinations || [], ["京都"]);
+      assert.deepEqual((signals.cityDurations || []).map((item) => item.city), ["京都"]);
+    },
+  },
 ];
 
 async function main() {
