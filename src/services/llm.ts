@@ -71,7 +71,7 @@ export async function generateTurn(params: {
   let assistant_text = await generateAssistantTextNonStreaming({
     graph: params.graph,
     userText: params.userText,
-    recentTurns: recentWithCurrentUser,
+    recentTurns: safeRecent,
     systemPrompt: params.systemPrompt,
     locale: params.locale,
     motifTransferState: params.motifTransferState,
@@ -130,7 +130,7 @@ export async function generateTurnStreaming(params: {
   let assistant_text = await streamAssistantText({
     graph: params.graph,
     userText: params.userText,
-    recentTurns: recentWithCurrentUser,
+    recentTurns: safeRecent,
     systemPrompt: params.systemPrompt,
     locale: params.locale,
     onToken: params.onToken,

@@ -30,6 +30,9 @@ import { isEnglishLocale, type AppLocale } from "../../i18n/locale.js";
 import {
   looksLikeAbstractPlaceText,
   looksLikeAbstractTravelModeText,
+  looksLikeDiscourseFragmentText,
+  looksLikeFallbackPlanText,
+  looksLikeMovementFragmentText,
   looksLikeTaskRestart,
   looksLikeTripPhaseCueText,
 } from "../../shared/travelSemantics.js";
@@ -1706,8 +1709,14 @@ export function normalizeDestination(raw: string): string {
   let s = cleanStatement(raw, 24);
   s = s.replace(/^(那就先以|那就先按|那就按|就先以|先以|以|就按|先按|按|改成|改为|改到)\s*/i, "");
   s = s.replace(/^(和|与|及|加)\s*/i, "");
+  s = s.replace(/^(?:一个|一趟|一段|一次|一版|一轮|one|a|an)\s*/i, "");
   s = s.replace(/^(在|于|到|去|从|飞到|前往|抵达)\s*/i, "");
-  s = s.replace(/^(我想|想|想去|想到|想逛|想安排|安排|规划|计划|逛一逛|逛逛|逛|游览|游玩|探索|体验|顺带|顺便|顺路|顺道)\s*/i, "");
+  const planningPrefixRe =
+    /^(我想|想|想去|想到|想逛|想安排|想规划|想计划|安排|规划|计划|逛一逛|逛逛|逛|游览|游玩|探索|体验|顺带|顺便|顺路|顺道)\s*/i;
+  while (planningPrefixRe.test(s)) {
+    s = s.replace(planningPrefixRe, "");
+  }
+  s = s.replace(/^(?:一个|一趟|一段|一次|一版|一轮|one|a|an)\s*/i, "");
   s = s.replace(
     /^(?:我|我们)?\s*(?:一个人|两个人|三个人|[0-9一二三四五六七八九十两]{1,2}\s*个?人|独自|单人|solo|一家[三四五六七八九十0-9]*口|全家)(?:一起)?\s*去\s*/i,
     ""
@@ -1779,13 +1788,13 @@ function looksLikeNonPlaceSituationPhrase(raw: string): boolean {
     return true;
   }
 
-  if (/^(?:太晚|太早|晚一点|早一点|早点|晚点|晚上|早上|上午|下午|傍晚|深夜)$/.test(normalized)) return true;
-  if (/^(?:late|early|later|earlier|evening|morning|afternoon|night|nighttime|bedtime)$/.test(normalizedLower)) {
+  if (/^(?:太晚|很晚|太早|很早|晚一点|早一点|早点|晚点|晚上|早上|上午|下午|傍晚|深夜)$/.test(normalized)) return true;
+  if (/^(?:too late|very late|too early|very early|late|early|later|earlier|evening|morning|afternoon|night|nighttime|bedtime)$/.test(normalizedLower)) {
     return true;
   }
 
   const paceOrRestRe =
-    /(休息|午休|睡眠|体力|状态|节奏|强度|稳一点|轻一点|轻松一点|太晚|太早|晚一点|早一点|rest|nap|sleep|energy|fatigue|pace|pacing|rhythm|intensity|late night|too late|too early|lighter|easier|slow(?:er)?|gentler)/i;
+    /(休息|午休|睡眠|体力|状态|节奏|强度|稳一点|轻一点|轻松一点|太晚|很晚|太早|很早|晚一点|早一点|rest|nap|sleep|energy|fatigue|pace|pacing|rhythm|intensity|late night|too late|very late|too early|very early|lighter|easier|slow(?:er)?|gentler)/i;
   if (paceOrRestRe.test(original) || paceOrRestRe.test(normalized) || paceOrRestRe.test(originalLower) || paceOrRestRe.test(normalizedLower)) {
     return true;
   }
@@ -1832,12 +1841,33 @@ function looksLikeTripPhaseCue(raw: string): boolean {
   return looksLikeTripPhaseCueText(text);
 }
 
+function looksLikeFallbackPlanCue(raw: string): boolean {
+  const text = cleanStatement(raw, 96);
+  const normalized = normalizeDestination(raw);
+  return looksLikeFallbackPlanText(text) || looksLikeFallbackPlanText(normalized);
+}
+
+function looksLikeDiscourseFragment(raw: string): boolean {
+  const text = cleanStatement(raw, 96);
+  const normalized = normalizeDestination(raw);
+  return looksLikeDiscourseFragmentText(text) || looksLikeDiscourseFragmentText(normalized);
+}
+
+function looksLikeMovementFragment(raw: string): boolean {
+  const text = cleanStatement(raw, 96);
+  const normalized = normalizeDestination(raw);
+  return looksLikeMovementFragmentText(text) || looksLikeMovementFragmentText(normalized);
+}
+
 export function isLikelyDestinationCandidate(x: string): boolean {
   const s = normalizeDestination(x);
   if (!s) return false;
+  if (looksLikeDiscourseFragment(x) || looksLikeDiscourseFragment(s)) return false;
+  if (looksLikeMovementFragment(x) || looksLikeMovementFragment(s)) return false;
   if (looksLikeNonPlaceSituationPhrase(x) || looksLikeNonPlaceSituationPhrase(s)) return false;
   if (looksLikeAbstractTravelModePhrase(x) || looksLikeAbstractTravelModePhrase(s)) return false;
   if (looksLikeAbstractPlaceText(x) || looksLikeAbstractPlaceText(s)) return false;
+  if (looksLikeFallbackPlanCue(x) || looksLikeFallbackPlanCue(s)) return false;
   if (looksLikeTaskControlPhrase(x) || looksLikeTaskControlPhrase(s)) return false;
   if (looksLikeTripPhaseCue(x) || looksLikeTripPhaseCue(s)) return false;
   if (/(?:^|[\s])(?:是因为|因为|because)(?:[\s]|$)/i.test(String(x || ""))) return false;
@@ -1972,17 +2002,23 @@ function extractDestinationList(text: string): Array<{ city: string; evidence: s
     (m) => "，".repeat(m.length)
   );
   const push = (raw: string, evidence: string, index: number) => {
+    if (looksLikeDiscourseFragment(raw) || looksLikeDiscourseFragment(evidence)) return;
+    if (looksLikeMovementFragment(raw) || looksLikeMovementFragment(evidence)) return;
     if (looksLikeNonPlaceSituationPhrase(raw)) return;
     if (looksLikeAbstractTravelModePhrase(raw) || looksLikeAbstractTravelModePhrase(evidence)) return;
     if (looksLikeAbstractPlaceText(raw) || looksLikeAbstractPlaceText(evidence)) return;
+    if (looksLikeFallbackPlanCue(raw) || looksLikeFallbackPlanCue(evidence)) return;
     if (looksLikeTaskControlPhrase(raw) || looksLikeTaskControlPhrase(evidence)) return;
     if (looksLikeTripPhaseCue(raw) || looksLikeTripPhaseCue(evidence)) return;
     const expanded = expandCompoundDestinations(raw);
     if (expanded.length >= 2) {
       for (const city of expanded) {
+        if (looksLikeDiscourseFragment(city)) continue;
+        if (looksLikeMovementFragment(city)) continue;
         if (looksLikeNonPlaceSituationPhrase(city)) continue;
         if (looksLikeAbstractTravelModePhrase(city)) continue;
         if (looksLikeAbstractPlaceText(city)) continue;
+        if (looksLikeFallbackPlanCue(city)) continue;
         if (looksLikeTaskControlPhrase(city)) continue;
         if (looksLikeTripPhaseCue(city)) continue;
         out.push({
@@ -2007,6 +2043,13 @@ function extractDestinationList(text: string): Array<{ city: string; evidence: s
   for (const m of scanText.matchAll(routeRe)) {
     if (!m?.[2]) continue;
     push(m[2], m[0] || m[2], Number(m.index) || 0);
+  }
+
+  const taskNamedRe =
+    /(?:^|[，。、；;！!？?\s])(?:先|先帮我|先规划一个|重新规划一个|规划一个|开一个|新建一个|做一个|开始一个)?\s*([A-Za-z\u4e00-\u9fff]{2,16})\s*(?:任务|行程|旅行|trip|task|plan)(?=[：:，。,；;！!？?\s]|$)/gi;
+  for (const m of scanText.matchAll(taskNamedRe)) {
+    if (!m?.[1]) continue;
+    push(m[1], m[1], Number(m.index) || 0);
   }
 
   const goRe =

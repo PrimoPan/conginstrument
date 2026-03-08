@@ -132,7 +132,6 @@ type MotifLifecycleEvent =
   | "manual_disable";
 
 const MAX_ACTIVE_MOTIFS_PER_ANCHOR = 3;
-const MAX_ACTIVE_GOAL_MOTIFS_PER_ANCHOR = 6;
 
 function cleanText(input: any, max = 200): string {
   return String(input ?? "")
@@ -2416,7 +2415,8 @@ function isSoftPruneReason(reason: string): boolean {
     r.startsWith("redundant_with:") ||
     r.startsWith("subsumed_by:") ||
     r.startsWith("density_pruned:") ||
-    r.startsWith("relation_shadowed_by:")
+    r.startsWith("relation_shadowed_by:") ||
+    r.includes("objective_pruned")
   );
 }
 
@@ -2508,23 +2508,32 @@ function motifRedundancyPenalty(keyCount: number): number {
 }
 
 function activeMotifLimitForAnchor(anchorConceptId: string, conceptById: Map<string, ConceptItem>): number {
-  const family = canonicalConceptFamily(conceptById.get(anchorConceptId));
-  if (family === "goal") return MAX_ACTIVE_GOAL_MOTIFS_PER_ANCHOR;
+  // Keep the same cap for every anchor family so pruning behavior stays predictable
+  // and matches the product rule that motif explosion is bounded per anchor.
+  void anchorConceptId;
+  void conceptById;
   return MAX_ACTIVE_MOTIFS_PER_ANCHOR;
 }
 
 export function motifObjectiveScore(params: {
   motif: ConceptMotif;
   redundancyGroupSize: number;
+  bookkeepingPenalty?: number;
 }): number {
   const coverage = motifCoverageComponent(params.motif);
   const confidence = clamp01(params.motif.confidence, 0.7);
   const transferability = motifTransferabilityComponent(params.motif);
   const redundancy = motifRedundancyPenalty(params.redundancyGroupSize);
   const conflictPenalty = motifConflictPenalty(params.motif);
+  const bookkeepingPenalty = clamp01(params.bookkeepingPenalty, 0);
   return Number(
     clamp01(
-      coverage * 0.45 + confidence * 0.22 + transferability * 0.14 - redundancy * 0.11 - conflictPenalty * 0.08,
+      coverage * 0.45 +
+        confidence * 0.22 +
+        transferability * 0.14 -
+        redundancy * 0.11 -
+        conflictPenalty * 0.08 -
+        bookkeepingPenalty,
       confidence
     ).toFixed(4)
   );
@@ -2544,9 +2553,11 @@ export function selectMotifSetGreedy(motifs: ConceptMotif[], conceptById: Map<st
   const withScore = motifs.map((m) => {
     const sourceSig = sourceSigById.get(m.id) || "none";
     const key = `${motifDependencyClass(m)}|${cleanText(m.anchorConceptId, 120)}|${sourceSig}`;
+    const bookkeepingPenalty = motifSourceIds(m).some((id) => isBudgetBookkeepingConcept(conceptById.get(id))) ? 0.32 : 0;
     const selectionScore = motifObjectiveScore({
       motif: m,
       redundancyGroupSize: Number(keyCount.get(key) || 1),
+      bookkeepingPenalty,
     });
     return {
       ...m,

@@ -4280,6 +4280,45 @@ const cases: Case[] = [
       );
     },
   },
+  {
+    name: "weather fallback phrases should not be promoted into destinations in Chinese or English",
+    run: () => {
+      const zh = extractIntentSignals(
+        "如果下雨，希望直接切到室内方案，不要让我临时再从头重排。"
+      );
+      assert.equal((zh.destinations || []).length, 0);
+      assert.equal(Boolean(zh.destination), false);
+
+      const en = extractIntentSignals(
+        "If it rains, switch to indoor backups and shorten the day instead of adding another city.",
+        { locale: "en-US" }
+      );
+      assert.equal((en.destinations || []).length, 0);
+      assert.equal(Boolean(en.destination), false);
+    },
+  },
+  {
+    name: "revision discourse fragments should not be promoted into destination slots",
+    run: () => {
+      const zh = extractIntentSignals(
+        "活动上我一开始还想安排划船、夜游船或者特别打卡式的体验，但现在也不想了，而且不要因为删掉划船就自动给我新增别的远点。"
+      );
+      assert.equal((zh.destinations || []).length, 0);
+      assert.equal((zh.removedDestinations || []).length, 0);
+      assert.equal(Boolean(zh.destination), false);
+    },
+  },
+  {
+    name: "task label destination should win over movement fragments in long-form Chinese turns",
+    run: () => {
+      const signals = extractIntentSignals(
+        "先规划一个苏州任务：想带父母去4天，核心不是景点数量，而是住得稳、走得慢、每天只做一件主线事情。我们不排斥园林，但也不想整趟都在热门点之间来回穿梭。"
+      );
+      assert.equal(signals.destination, "苏州");
+      assert.equal((signals.destinations || []).includes("苏州"), true);
+      assert.equal((signals.destinations || []).some((item) => /热门点之间来回穿梭/.test(String(item))), false);
+    },
+  },
 ];
 
 async function main() {

@@ -193,7 +193,7 @@ run("motif greedy selection should keep at most 3 active motifs per anchor", () 
 });
 
 run("lifecycle automaton should always return a valid status", () => {
-  const states: MotifLifecycleStatus[] = ["active", "uncertain", "deprecated", "cancelled"];
+  const states: MotifLifecycleStatus[] = ["active", "uncertain", "deprecated", "cancelled", "disabled"];
   const events = [
     "evidence_up",
     "evidence_down",

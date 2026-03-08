@@ -23,6 +23,18 @@ export const ABSTRACT_TRAVEL_MODE_RE =
 export const ABSTRACT_PLACE_RE =
   /(西班牙语地区|英语地区|法语地区|德语地区|语地区|safe area|quiet area|convenient area|affordable area|comfortable area|nearby area|walkable area)|(安全|安静|方便|便宜|舒适|舒服|热闹|清净|治安|人少|不拥挤|离.*近|靠近|附近|safe|quiet|convenient|affordable|comfortable|walkable|nearby).{0,12}(地方|位置|区域|area|place|zone)?/i;
 
+export const WEATHER_FALLBACK_RE =
+  /(下雨|雨天|暴雨|阴天|高温|太热|太冷|天气不好|天气太热|天气太冷|weather|rain|rainy|storm|heat|hot weather|cold weather|bad weather)/i;
+
+export const FALLBACK_PLAN_RE =
+  /(室内方案|室内替代|室内备选|室内版本|雨天方案|雨天备选|备选方案|替代方案|备用方案|后备方案|半天版本|压缩成半天|缩成半天|室内优先|indoor option|indoor backup|indoor alternative|rainy[-\s]?day backup|rain backup|backup plan|fallback plan|plan b|half[-\s]?day version|shortened version)/i;
+
+export const DISCOURSE_FRAGMENT_RE =
+  /^(但|但是|不过|而且|并且|另外|此外|如果|希望|现在|如今|后来|同时|因为|所以|因此|而不是|不要因为|也不想|不想了|别的)|^(but|however|if|because|now|instead|rather than|also|so|then)\b/i;
+
+export const MOTION_FRAGMENT_RE =
+  /(之间|来回|穿梭|折返|散步|慢逛|逛到|spot[-\s]?hopping|back and forth|stroll|wander)/i;
+
 export function looksLikeBroadDestination(text: string): boolean {
   return BROAD_DESTINATION_RE.test(cleanTravelText(text, 80));
 }
@@ -50,4 +62,20 @@ export function looksLikeAbstractTravelModeText(text: string): boolean {
 
 export function looksLikeAbstractPlaceText(text: string): boolean {
   return ABSTRACT_PLACE_RE.test(cleanTravelText(text, 120));
+}
+
+export function looksLikeFallbackPlanText(text: string): boolean {
+  const cleaned = cleanTravelText(text, 120);
+  if (!cleaned) return false;
+  if (WEATHER_FALLBACK_RE.test(cleaned)) return true;
+  if (FALLBACK_PLAN_RE.test(cleaned)) return true;
+  return /(室内|备选|替代|备用|方案|版本|压缩|半天|indoor|backup|fallback|alternative|option|version|half[-\s]?day)/i.test(cleaned);
+}
+
+export function looksLikeDiscourseFragmentText(text: string): boolean {
+  return DISCOURSE_FRAGMENT_RE.test(cleanTravelText(text, 120));
+}
+
+export function looksLikeMovementFragmentText(text: string): boolean {
+  return MOTION_FRAGMENT_RE.test(cleanTravelText(text, 120));
 }

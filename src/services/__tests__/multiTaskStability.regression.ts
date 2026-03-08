@@ -650,6 +650,50 @@ const scenarios: ScenarioDefinition[] = [
     },
   },
   {
+    name: "long-form 8+8 tasks keep revised negations local and prevent destination leakage after model switch",
+    locale: "zh-CN",
+    firstTask: {
+      name: "suzhou_parents_longform",
+      turns: [
+        "先规划一个苏州任务：想带父母去4天，核心不是景点数量，而是住得稳、走得慢、每天只做一件主线事情。我们不排斥园林，但也不想整趟都在热门点之间来回穿梭，更希望上午一个重点、下午留白，晚上尽量在住处附近解决吃饭和散步。",
+        "预算总共控制在1万5左右，酒店不需要豪华，但要地铁方便、有电梯、周边吃饭容易，不希望为了住得好看一点反而每天换乘很多次。",
+        "拙政园和苏州博物馆可以选一个重点去，其他景点不必都打卡；如果遇到下雨，希望直接切到室内方案，不要让我临时再从头重排。",
+        "父母脚力一般，台阶太多或者需要长距离折返的安排都不想要；如果某段路主要是为了拍照而不是体验，就宁可删掉。",
+        "我还想留半天给喝茶、在平江路附近慢慢走，但不是非得逛到很晚，重点是节奏稳一点。",
+        "酒店尽量别换，如果必须换，也最多一次，而且要有明确原因，比如返程更方便，而不是为了尝试不同片区。",
+        "最后一天请自动留足回程缓冲，不要把退房前的时间塞满。",
+        "如果天气太热或下雨，优先保留室内园林、博物馆、茶馆这些低强度版本，不要再加新的城市或郊区点。",
+      ],
+    },
+    secondTask: {
+      name: "kyoto_parents_longform",
+      turns: [
+        "重新规划一个新任务：这次想带父母去京都6天。先说清楚，我一开始脑子里闪过大阪、神户这些顺路城市，也想过中间住一晚，但后来想想不想折腾了，这趟就把目标收回到京都本身，节奏越稳越好。",
+        "住宿方面，本来最开始也想过住高星酒店，后来又觉得没有必要；真正重要的是从车站回酒店省力、附近吃饭方便、父母累了能随时回去休息，所以交通便利比星级和景观都重要。",
+        "活动上我一开始还想安排划船、夜游船或者特别打卡式的体验，但现在也不想了，宁可换成鸭川散步、街区慢逛、寺院庭园这种低强度内容，而且不要因为删掉划船就自动给我新增别的远点。",
+        "我希望每天最多一个重点区域，比如清水寺和祇园算一组、岚山算一组，别把看起来顺路但实际上换乘复杂的地方硬拼在一起。",
+        "如果中午天气热、下雨或者父母状态不太好，希望能直接压缩成半天版本，不要因此推导出新的目的地或临时外插神户、大阪这种支线。",
+        "吃饭不用追网红，离住处近、排队别太久、能坐得舒服就行；晚饭后也尽量只留附近散步，不安排额外的夜间移动。",
+        "最后两晚请住稳一点，不要再为了所谓体验换片区；回程前一天尤其轻，方便收拾和调整状态。",
+        "如果要做总结，请保持这几个最终结论：只保留京都、不住高星酒店、不要划船、优先交通方便、可以轻松散步，但不要凭这些再生成新的城市节点。",
+      ],
+    },
+    secondTaskShouldSwitch: true,
+    validate: ({ firstTask, secondTask }) => {
+      assert.ok(hasDestination(firstTask.graph, "苏州"));
+      assert.ok(hasDestination(secondTask.graph, "京都"));
+      assert.equal(hasDestination(secondTask.graph, "苏州"), false);
+      assert.equal(hasDestination(secondTask.graph, "大阪"), false);
+      assert.equal(hasDestination(secondTask.graph, "神户"), false);
+      assert.ok(planHasDestination(secondTask.plan, "京都"));
+      assert.equal(planHasDestination(secondTask.plan, "苏州"), false);
+
+      const statements = (secondTask.graph.nodes || []).map((node) => String(node.statement || ""));
+      assert.equal(statements.some((text) => /划船|夜游船|boat|boating|ferry|cruise/i.test(text)), false);
+      assert.equal(statements.some((text) => /高星|五星|luxury hotel|five-star/i.test(text)), false);
+    },
+  },
+  {
     name: "english 4+4 tasks keep destination boundaries stable with lightweight refinements",
     locale: "en-US",
     firstTask: {

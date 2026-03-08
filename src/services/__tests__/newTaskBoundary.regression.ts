@@ -211,6 +211,21 @@ run("coarse region refined into city-night allocation should stay in the same ta
   assert.equal(out.is_task_switch, false);
 });
 
+run("weather fallback refinement should not trigger a fake destination switch in Chinese", () => {
+  const prev = makePlan("苏州四天旅行");
+  prev.destinations = ["苏州"];
+  prev.destination_scope = ["苏州"];
+  prev.travel_dates_or_duration = "4天";
+  const out = detectTaskSwitchFromLatestUserTurn({
+    conversationId: "conv_weather_zh",
+    locale,
+    previousTravelPlan: prev,
+    latestUserText: "拙政园和苏州博物馆可以选一个重点去；如果下雨，希望直接切到室内方案，不要让我临时再从头重排。",
+  });
+  assert.equal(out.switch_reason_code, "continuous");
+  assert.equal(out.is_task_switch, false);
+});
+
 run("country refined into city allocation with transition stop should stay in the same task", () => {
   const prev = makePlan("摩洛哥八天旅行");
   prev.destinations = ["摩洛哥"];
@@ -221,6 +236,37 @@ run("country refined into city allocation with transition stop should stay in th
     locale,
     previousTravelPlan: prev,
     latestUserText: "先按马拉喀什4晚、非斯2晚，卡萨最多半天过渡，整体还是8天。",
+  });
+  assert.equal(out.switch_reason_code, "continuous");
+  assert.equal(out.is_task_switch, false);
+});
+
+run("rainy-day backup refinement should not trigger a fake destination switch in English", () => {
+  const prev = makePlan("Kyoto six-day trip");
+  prev.destinations = ["Kyoto"];
+  prev.destination_scope = ["Kyoto"];
+  prev.travel_dates_or_duration = "6 days";
+  const out = detectTaskSwitchFromLatestUserTurn({
+    conversationId: "conv_weather_en",
+    locale: "en-US",
+    previousTravelPlan: prev,
+    latestUserText: "If it rains, switch to indoor backups and shorten the day instead of adding another city.",
+  });
+  assert.equal(out.switch_reason_code, "continuous");
+  assert.equal(out.is_task_switch, false);
+});
+
+run("revision discourse fragments should not trigger a fake destination switch", () => {
+  const prev = makePlan("京都六天旅行");
+  prev.destinations = ["京都"];
+  prev.destination_scope = ["京都"];
+  prev.travel_dates_or_duration = "6天";
+  const out = detectTaskSwitchFromLatestUserTurn({
+    conversationId: "conv_revision_zh",
+    locale,
+    previousTravelPlan: prev,
+    latestUserText:
+      "活动上我一开始还想安排划船、夜游船或者特别打卡式的体验，但现在也不想了，而且不要因为删掉划船就自动给我新增别的远点。",
   });
   assert.equal(out.switch_reason_code, "continuous");
   assert.equal(out.is_task_switch, false);
