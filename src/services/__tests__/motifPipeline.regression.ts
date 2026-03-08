@@ -303,6 +303,43 @@ run("same-anchor motifs should form a topology chain instead of remaining isolat
   );
 });
 
+run("same-anchor health-related constraints should stay peer-level instead of chaining", () => {
+  const motifs: ConceptMotif[] = [
+    {
+      ...makeMotif({
+        id: "m_cardiac_goal",
+        conceptIds: ["c_cardiac", "c_goal"],
+        anchorConceptId: "c_goal",
+        confidence: 0.94,
+        dependencyClass: "constraint",
+      }),
+      title: "限制因素: 我还有冠心病 限制 意图: 去台北旅游3天",
+      motif_type_id: "mt_pattern:pair_constraint_slot:constraint:limiting:health:coronary->goal",
+    },
+    {
+      ...makeMotif({
+        id: "m_sleep_goal",
+        conceptIds: ["c_sleep", "c_goal"],
+        anchorConceptId: "c_goal",
+        confidence: 0.91,
+        dependencyClass: "constraint",
+      }),
+      title: "睡眠问题：早上起不来，晚上需要吃安眠药 限制 意图: 去台北旅游3天",
+      motif_type_id: "mt_pattern:pair_constraint_slot:constraint:limiting:health:sleep->goal",
+    },
+  ];
+
+  const links = reconcileMotifLinks({ motifs, baseLinks: [] });
+  assert.equal(
+    links.some(
+      (link) =>
+        (link.fromMotifId === "m_cardiac_goal" && link.toMotifId === "m_sleep_goal") ||
+        (link.fromMotifId === "m_sleep_goal" && link.toMotifId === "m_cardiac_goal")
+    ),
+    false
+  );
+});
+
 run("reasoning view should produce complete ordered steps under cycle", () => {
   const concepts = [
     makeConcept("c1", "Concept A"),

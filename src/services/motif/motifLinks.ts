@@ -125,6 +125,48 @@ function isSameAnchorTopologyCandidate(m: ConceptMotif): boolean {
   return !!m.anchorConceptId && (m.status === "active" || m.status === "uncertain");
 }
 
+function motifParallelRiskClass(m: ConceptMotif): string | null {
+  const text = cleanText(
+    [
+      (m as any)?.motif_type_id,
+      m.templateKey,
+      (m as any)?.motif_type_title,
+      m.title,
+      m.description,
+    ]
+      .filter(Boolean)
+      .join(" "),
+    320
+  ).toLowerCase();
+  if (!text) return null;
+  if (
+    /slot:constraint:limiting:health|冠心|冠脉|心脏|心血管|支架|慢性病|糖尿病|哮喘|medical|cardiac|heart|health/.test(
+      text
+    )
+  ) {
+    return "health";
+  }
+  if (/睡眠|失眠|安眠药|起不来|太晚|太早|sleep|insomnia|rest|nap|late night|too late|too early/.test(text)) {
+    return "sleep";
+  }
+  if (/行动不便|不能久走|不能爬|轮椅|mobility|walking|stairs|fatigue|体力/.test(text)) {
+    return "mobility";
+  }
+  if (/低盐|低脂|高纤维|饮食|忌口|过敏|diet|allergy/.test(text)) {
+    return "diet";
+  }
+  return null;
+}
+
+function shouldKeepPeerLevelSameAnchorMotifs(a: ConceptMotif, b: ConceptMotif): boolean {
+  if (!a.anchorConceptId || a.anchorConceptId !== b.anchorConceptId) return false;
+  if (a.motifType !== "pair" || b.motifType !== "pair") return false;
+  if (dependencyClassOf(a) !== dependencyClassOf(b)) return false;
+  const classA = motifParallelRiskClass(a);
+  const classB = motifParallelRiskClass(b);
+  return !!classA && !!classB;
+}
+
 function motifSpecificity(m: ConceptMotif): number {
   return Math.max(0, Array.isArray(m.conceptIds) ? m.conceptIds.length : 0);
 }
@@ -284,6 +326,7 @@ function buildAutoLinks(motifs: ConceptMotif[]): MotifLink[] {
       const from = ordered[i - 1];
       const to = ordered[i];
       if (from.id === to.id) continue;
+      if (shouldKeepPeerLevelSameAnchorMotifs(from, to)) continue;
       if (hasLinkEitherWay(seen, from.id, to.id)) continue;
 
       const fromCnt = outDegree.get(from.id) || 0;
