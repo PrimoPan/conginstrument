@@ -113,6 +113,21 @@ function readEdge(graph: CDG, fromId: string, toId: string): CDGEdge | undefined
   return (graph.edges || []).find((edge) => edge.from === fromId && edge.to === toId);
 }
 
+function motifTypeIds(model: CognitiveModel): string[] {
+  return Array.from(
+    new Set(
+      (model.motifs || [])
+        .map((motif) => String(motif.motif_type_id || "").trim())
+        .filter(Boolean)
+    )
+  );
+}
+
+function sharedMotifTypeIds(left: CognitiveModel, right: CognitiveModel): string[] {
+  const rightSet = new Set(motifTypeIds(right));
+  return motifTypeIds(left).filter((id) => rightSet.has(id));
+}
+
 function applyManualConceptEdge(params: {
   graph: CDG;
   manualGraphOverrides: ManualGraphOverrides;
@@ -291,6 +306,52 @@ async function runTask(params: {
 }
 
 const scenarios: ScenarioDefinition[] = [
+  {
+    name: "long-form 10+10 domestic -> international restart keeps shared pace and transit motifs while destinations stay scoped",
+    locale: "zh-CN",
+    firstTask: {
+      name: "hangzhou_parents_10x10",
+      turns: [
+        "想带父母去杭州6天，第一次一起去，核心是慢一点、稳一点，不要被景点密度推着走。",
+        "总预算控制在2万2左右，花钱可以均衡一些，也希望预算留一点余量。",
+        "酒店最好靠地铁而且有电梯，爸妈累了能比较快回去休息。",
+        "西湖可以看，但不想每天都换一个热门点，宁可上午一个重点、下午留白。",
+        "中午最好能安排明确午休，上午和下午之间留出稳定休息空档。",
+        "如果下雨，希望直接切到室内备选，不要让我临时再从头重排。",
+        "最多换一次酒店，而且要有很明确的理由，比如返程方便。",
+        "晚上别安排太晚，吃饭也尽量在住处附近解决。",
+        "最后一天一定给返程留缓冲，不要把退房前塞满。",
+        "如果要总结这趟的原则，请保留慢节奏、交通方便、可午休、雨天有备选这几条。",
+      ],
+    },
+    secondTask: {
+      name: "kyoto_parents_10x10",
+      turns: [
+        "重新规划一个新任务，这次想带父母去京都6天，整体还是慢一点、稳一点，但不要把杭州那边的地点带过来。",
+        "京都这趟预算大概3万2左右，能接受稍微贵一点，但还是不想为豪华感牺牲便利。",
+        "京都这趟的酒店请优先靠车站或者地铁，爸妈累了能快速回房间休息。",
+        "景点上以京都本身为主，不想顺手再加大阪或奈良这种支线。",
+        "京都这趟每天最多一个重点片区，中午留午休或者低强度时段。",
+        "如果京都下雨，也要直接切到室内寺院、博物馆、商场一类的备选。",
+        "京都这趟最多换一次酒店，最后两晚最好住稳一点。",
+        "在京都晚上不想跑很远吃饭，住处附近方便坐下吃就行。",
+        "京都回程前一天尤其轻一点，方便收拾和调整状态。",
+        "如果要总结这趟京都行，请保留慢节奏、交通便利、午休、雨天备选这些原则，但只服务京都这趟行程。",
+      ],
+    },
+    secondTaskShouldSwitch: true,
+    validate: ({ firstTask, secondTask }) => {
+      assert.ok(hasDestination(firstTask.graph, "杭州"));
+      assert.ok(hasDestination(secondTask.graph, "京都"));
+      assert.equal(hasDestination(secondTask.graph, "杭州"), false);
+      assert.equal(hasDestination(secondTask.graph, "大阪"), false);
+      assert.equal(hasDestination(secondTask.graph, "奈良"), false);
+      assert.ok(planHasDestination(secondTask.plan, "京都"));
+      assert.equal(planHasDestination(secondTask.plan, "杭州"), false);
+      assert.ok(sharedMotifTypeIds(firstTask.model, secondTask.model).length >= 1);
+      assert.ok((secondTask.plan.task_history || []).some((item) => item.task_id === firstTask.plan.task_id));
+    },
+  },
   {
     name: "domestic -> domestic stays clean across 8+8 turns",
     locale: "zh-CN",

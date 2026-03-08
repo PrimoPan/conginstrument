@@ -17,7 +17,7 @@ export const config = {
   mongoDb: process.env.MONGO_DB || "conginstrument",
   openaiKey: process.env.OPENAI_API_KEY || "",
   openaiBaseUrl: process.env.OPENAI_BASE_URL || "",
-  model: normalizeConversationModel(process.env.MODEL || "gpt-5.2"),
+  model: normalizeConversationModel(process.env.MODEL || "gpt-5.1"),
   sessionTtlDays: Number(process.env.SESSION_TTL_DAYS || 7),
   timezone: process.env.TZ || process.env.TIMEZONE || "Asia/Shanghai",
   corsOrigins: parseCsv(process.env.CORS_ORIGINS || ""),
