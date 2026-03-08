@@ -67,6 +67,24 @@ function localizedRelation(locale: AppLocale | undefined, relation?: string): st
   return isEnglishLocale(locale) ? "supports" : "推动";
 }
 
+function localizedConceptFamily(locale: AppLocale | undefined, family?: string): string {
+  if (family === "goal") return isEnglishLocale(locale) ? "goal" : "目标";
+  if (family === "destination") return isEnglishLocale(locale) ? "destination" : "目的地";
+  if (family === "duration_total") return isEnglishLocale(locale) ? "trip duration" : "总时长";
+  if (family === "duration_city") return isEnglishLocale(locale) ? "city stay" : "城市停留";
+  if (family === "budget") return isEnglishLocale(locale) ? "budget" : "预算";
+  if (family === "people") return isEnglishLocale(locale) ? "traveler profile" : "出行人群";
+  if (family === "lodging") return isEnglishLocale(locale) ? "lodging" : "住宿";
+  if (family === "activity_preference") return isEnglishLocale(locale) ? "activity choice" : "活动选择";
+  if (family === "meeting_critical") return isEnglishLocale(locale) ? "fixed agenda" : "关键日程";
+  if (family === "limiting_factor") return isEnglishLocale(locale) ? "limiting factor" : "限制因素";
+  if (family === "scenic_preference") return isEnglishLocale(locale) ? "scenic preference" : "景点偏好";
+  if (family === "generic_constraint") return isEnglishLocale(locale) ? "constraint" : "约束";
+  if (family === "sub_location") return isEnglishLocale(locale) ? "sub-location" : "子地点";
+  if (family === "conflict") return isEnglishLocale(locale) ? "conflict" : "冲突";
+  return isEnglishLocale(locale) ? "concept" : "概念";
+}
+
 function preserveConceptQualifier(concept: ConceptItem | undefined): boolean {
   const key = cleanText(concept?.semanticKey, 120).toLowerCase();
   return (
@@ -126,6 +144,65 @@ function motifRefs(motif: ConceptMotif, conceptById: Map<string, ConceptItem>) {
   };
 }
 
+function motifPatternSchemaFamilies(params: {
+  motif: ConceptMotif;
+  conceptById: Map<string, ConceptItem>;
+}): { drivers: string[]; target: string[] } {
+  const schemaDrivers = uniq(
+    (Array.isArray((params.motif as any)?.motif_type_role_schema?.drivers)
+      ? (params.motif as any).motif_type_role_schema.drivers
+      : []
+    )
+      .map((family: any) => cleanText(family, 60).toLowerCase())
+      .filter(Boolean),
+    6
+  );
+  const schemaTarget = uniq(
+    (Array.isArray((params.motif as any)?.motif_type_role_schema?.target)
+      ? (params.motif as any).motif_type_role_schema.target
+      : []
+    )
+      .map((family: any) => cleanText(family, 60).toLowerCase())
+      .filter(Boolean),
+    3
+  );
+  if (schemaDrivers.length && schemaTarget.length) {
+    return {
+      drivers: schemaDrivers,
+      target: schemaTarget,
+    };
+  }
+
+  const sourceIds = uniq(
+    (
+      Array.isArray(params.motif.source_concept_ids) && params.motif.source_concept_ids.length
+        ? params.motif.source_concept_ids
+        : Array.isArray(params.motif.roles?.sources)
+        ? params.motif.roles.sources
+        : (params.motif.conceptIds || []).filter((id) => id !== params.motif.anchorConceptId)
+    )
+      .map((id) => cleanText(id, 100))
+      .filter(Boolean),
+    8
+  );
+  const targetId =
+    cleanText(params.motif.target_concept_id, 100) ||
+    cleanText(params.motif.anchorConceptId, 100) ||
+    cleanText(params.motif.roles?.target, 100);
+
+  const drivers = uniq(
+    sourceIds
+      .map((id) => cleanText(resolveConceptByRef(id, params.conceptById)?.family, 60).toLowerCase())
+      .filter(Boolean),
+    6
+  );
+  const target = uniq(
+    [cleanText(resolveConceptByRef(targetId, params.conceptById)?.family, 60).toLowerCase()].filter(Boolean),
+    3
+  );
+  return { drivers, target };
+}
+
 function normalizeForMatch(text: string): string {
   return cleanText(text, 120)
     .toLowerCase()
@@ -145,6 +222,46 @@ function generatedTitleMentionsEndpoints(params: {
   const normalizedSources = refs.sources.map((source) => normalizeForMatch(source)).filter((source) => source.length >= 2);
   if (!normalizedTarget || !normalizedSources.length) return false;
   return normalizedTitle.includes(normalizedTarget) && normalizedSources.some((source) => normalizedTitle.includes(source));
+}
+
+function generatedPatternTitleMentionsConcreteInstanceText(params: {
+  generatedTitle: string;
+  motif: ConceptMotif;
+  concepts: ConceptItem[];
+  locale?: AppLocale;
+}): boolean {
+  const normalizedTitle = normalizeForMatch(params.generatedTitle);
+  if (!normalizedTitle) return false;
+  const conceptById = new Map((params.concepts || []).map((concept) => [concept.id, concept]));
+
+  const inspectConcept = (conceptId: string): boolean => {
+    const concept = resolveConceptByRef(conceptId, conceptById);
+    if (!concept) return false;
+    const concreteSurface = normalizeForMatch(
+      conceptSurfaceTitle(cleanText(concept.title, 80), preserveConceptQualifier(concept))
+    );
+    const genericSurface = normalizeForMatch(localizedConceptFamily(params.locale, cleanText(concept.family, 60).toLowerCase()));
+    if (!concreteSurface || concreteSurface === genericSurface) return false;
+    return normalizedTitle.includes(concreteSurface);
+  };
+
+  const sourceIds = uniq(
+    (
+      Array.isArray(params.motif.source_concept_ids) && params.motif.source_concept_ids.length
+        ? params.motif.source_concept_ids
+        : Array.isArray(params.motif.roles?.sources)
+        ? params.motif.roles.sources
+        : (params.motif.conceptIds || []).filter((id) => id !== params.motif.anchorConceptId)
+    )
+      .map((id) => cleanText(id, 100))
+      .filter(Boolean),
+    8
+  );
+  const targetId =
+    cleanText(params.motif.target_concept_id, 100) ||
+    cleanText(params.motif.anchorConceptId, 100) ||
+    cleanText(params.motif.roles?.target, 100);
+  return sourceIds.some(inspectConcept) || (!!targetId && inspectConcept(targetId));
 }
 
 export function fallbackMotifDisplayTitle(params: {
@@ -253,35 +370,53 @@ function fallbackMotifPatternTitle(params: {
   locale?: AppLocale;
 }): string {
   const conceptById = new Map((params.concepts || []).map((concept) => [concept.id, concept]));
-  const refs = motifRefs(params.motif, conceptById);
-  const sourceText = refs.sources.join(isEnglishLocale(params.locale) ? " + " : "、");
-  const targetText = refs.target;
+  const schema = motifPatternSchemaFamilies({
+    motif: params.motif,
+    conceptById,
+  });
+  const driverText = schema.drivers
+    .map((family) => localizedConceptFamily(params.locale, family))
+    .join(isEnglishLocale(params.locale) ? " + " : "与");
+  const targetText = schema.target
+    .map((family) => localizedConceptFamily(params.locale, family))
+    .join(isEnglishLocale(params.locale) ? " + " : "与");
   const relation = cleanText(params.motif.dependencyClass || params.motif.relation, 40);
-  if (sourceText && targetText) {
+  if (driverText && targetText) {
     if (relation === "constraint") {
       return isEnglishLocale(params.locale)
-        ? `${sourceText} filters ${targetText} first`
-        : `${sourceText}先过滤${targetText}`;
+        ? `${driverText} filters ${targetText} first`
+        : `${driverText}先过滤${targetText}`;
     }
     if (relation === "determine") {
       return isEnglishLocale(params.locale)
-        ? `${sourceText} locks ${targetText}`
-        : `${sourceText}直接锁定${targetText}`;
+        ? `${driverText} locks ${targetText}`
+        : `${driverText}锁定${targetText}`;
     }
     if (relation === "conflicts_with") {
       return isEnglishLocale(params.locale)
-        ? `${sourceText} conflicts with ${targetText}`
-        : `${sourceText}与${targetText}冲突`;
+        ? `${driverText} conflicts with ${targetText}`
+        : `${driverText}与${targetText}冲突`;
     }
     return isEnglishLocale(params.locale)
-      ? `${sourceText} drives ${targetText}`
-      : `${sourceText}驱动${targetText}`;
+      ? `${driverText} supports ${targetText}`
+      : `${driverText}支撑${targetText}`;
   }
   const stored =
-    cleanText((params.motif as any).pattern_type, 80) ||
     cleanText((params.motif as any).motif_type_title, 80) ||
+    cleanText((params.motif as any).pattern_type, 80) ||
     cleanText(params.motif.title, 80);
-  if (stored && !hasCodeLikePatternTitle(stored)) return stored;
+  if (
+    stored &&
+    !hasCodeLikePatternTitle(stored) &&
+    !generatedPatternTitleMentionsConcreteInstanceText({
+      generatedTitle: stored,
+      motif: params.motif,
+      concepts: params.concepts,
+      locale: params.locale,
+    })
+  ) {
+    return stored;
+  }
   return isEnglishLocale(params.locale) ? "Reusable decision rule" : "可复用决策规则";
 }
 
@@ -299,6 +434,16 @@ export function pickMotifPatternTitle(params: {
   const generatedTitle = cleanText(params.generatedTitle, 80);
   if (!generatedTitle) return fallbackTitle;
   if (hasCodeLikePatternTitle(generatedTitle)) return fallbackTitle;
+  if (
+    generatedPatternTitleMentionsConcreteInstanceText({
+      generatedTitle,
+      motif: params.motif,
+      concepts: params.concepts,
+      locale: params.locale,
+    })
+  ) {
+    return fallbackTitle;
+  }
   return generatedTitle;
 }
 

@@ -8,6 +8,8 @@ export type MotifReasoningNode = {
   id: string;
   motifId: string;
   title: string;
+  patternType?: string;
+  instanceTitle?: string;
   relation: ConceptMotif["relation"];
   dependencyClass: ConceptMotif["dependencyClass"];
   causalOperator: ConceptMotif["causalOperator"];
@@ -581,7 +583,12 @@ export function buildMotifReasoningView(params: {
 }): MotifReasoningView {
   const conceptById = new Map((params.concepts || []).map((c) => [c.id, c]));
   const motifs = (params.motifs || [])
-    .filter((m) => m.status !== "cancelled" && (m.reuseClass || "reusable") === "reusable")
+    .filter(
+      (m) =>
+        m.status !== "cancelled" &&
+        (m.reuseClass || "reusable") === "reusable" &&
+        m.reasoning_eligible !== false
+    )
     .slice();
   const motifById = new Map(motifs.map((m) => [m.id, m]));
 
@@ -597,10 +604,24 @@ export function buildMotifReasoningView(params: {
         }),
         8
       );
+      const patternType =
+        cleanText((m as any).pattern_type, 160) ||
+        cleanText((m as any).motif_type_title, 160) ||
+        "";
+      const instanceTitle = cleanText(m.display_title, 160) || cleanText(m.title, 160) || "";
       return {
         id: `rm_${cleanText(m.id, 120)}`,
         motifId: m.id,
-        title: cleanText(m.title, 160) || cleanText(m.templateKey, 120) || (isEnglishLocale(params.locale) ? "motif" : "母题"),
+        title:
+          patternType ||
+          instanceTitle ||
+          cleanText(m.templateKey, 120) ||
+          (isEnglishLocale(params.locale) ? "motif" : "母题"),
+        patternType: patternType || undefined,
+        instanceTitle:
+          instanceTitle && (!patternType || cleanText(instanceTitle, 160) !== cleanText(patternType, 160))
+            ? instanceTitle
+            : undefined,
         relation: m.relation,
         dependencyClass: m.dependencyClass || m.relation,
         causalOperator: m.causalOperator,
@@ -640,16 +661,7 @@ export function buildMotifReasoningView(params: {
     }
   }
   const structuralEdges: MotifReasoningEdge[] = Array.from(edgeByKey.values());
-  const syntheticBranch = buildSyntheticParallelBranchEdges({ motifs, motifIdToNodeId, edgeByKey });
-  const displayEdgeByKey = new Map(edgeByKey);
-  for (const suppressKey of syntheticBranch.suppressKeys) {
-    displayEdgeByKey.delete(suppressKey);
-  }
-  for (const edge of syntheticBranch.additions) {
-    const key = `${edge.from}=>${edge.to}::${edge.type}`;
-    if (!displayEdgeByKey.has(key)) displayEdgeByKey.set(key, edge);
-  }
-  const edges: MotifReasoningEdge[] = Array.from(displayEdgeByKey.values()).sort(
+  const edges: MotifReasoningEdge[] = structuralEdges.slice().sort(
     (a, b) => b.confidence - a.confidence || a.id.localeCompare(b.id)
   );
 

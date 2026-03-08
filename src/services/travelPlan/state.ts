@@ -141,6 +141,37 @@ function clean(input: any, max = 200): string {
     .slice(0, max);
 }
 
+const TRAVEL_TASK_ID_MAX = 80;
+
+function stripTravelTaskSuffix(input: any): string {
+  return clean(input, 240).replace(/:task_\d+$/i, "");
+}
+
+function travelTaskOrdinal(input: any): number {
+  const match = /:task_(\d+)$/i.exec(clean(input, 240));
+  const ordinal = Number(match?.[1] || 0);
+  return Number.isFinite(ordinal) && ordinal >= 2 ? Math.trunc(ordinal) : 1;
+}
+
+export function nextTravelTaskOrdinal(previous?: Pick<TravelPlanState, "task_id" | "task_history"> | null): number {
+  const history = Array.isArray(previous?.task_history) ? previous?.task_history : [];
+  const maxOrdinal = Math.max(
+    1,
+    travelTaskOrdinal(previous?.task_id),
+    ...history.map((item) => travelTaskOrdinal(item?.task_id))
+  );
+  return maxOrdinal + 1;
+}
+
+export function buildTravelTaskId(baseInput: any, ordinal = 1): string {
+  const normalizedOrdinal = Number.isFinite(ordinal) ? Math.max(1, Math.trunc(ordinal)) : 1;
+  const suffix = normalizedOrdinal >= 2 ? `:task_${normalizedOrdinal}` : "";
+  const baseMax = Math.max(1, TRAVEL_TASK_ID_MAX - suffix.length);
+  const base =
+    clean(stripTravelTaskSuffix(baseInput) || "task_default", baseMax).replace(/[:\s]+$/g, "") || "task_default";
+  return `${base}${suffix}`;
+}
+
 function formatDateLabel(locale: AppLocale | undefined, month: number, day: number): string {
   return isEnglishLocale(locale) ? `${month}/${day}` : `${month}月${day}日`;
 }
@@ -1538,7 +1569,7 @@ export function buildTravelPlanState(params: {
     dayPlans,
     assistantPlan,
   });
-  const baseTaskId = clean(params.taskId || graph.id || "task_default", 80) || "task_default";
+  const baseTaskId = buildTravelTaskId(params.taskId || graph.id || "task_default");
   const previousDestinations = dedupe(
     ((params.previous?.destination_scope || params.previous?.destinations || []) as string[])
       .map((x) => clean(x, 40))
@@ -1554,7 +1585,7 @@ export function buildTravelPlanState(params: {
       detectDestinationTaskSwitch(destinations, previousDestinations)
     );
   const taskId = isTaskSwitch
-    ? `${baseTaskId}:task_${Math.max(1, Number(params.previous?.plan_version || params.previous?.version || 0) + 1)}`
+    ? buildTravelTaskId(params.taskId || graph.id || baseTaskId, nextTravelTaskOrdinal(params.previous || null))
     : clean(params.previous?.task_id, 80) || baseTaskId;
   const travelDatesOrDuration = buildTravelDatesOrDuration(totalDays, dateAnchor, locale);
   const travelers = extractTravelers(graph, locale);

@@ -356,6 +356,34 @@ async function main() {
     assert.ok((second.task_history || []).some((x) => x.task_id === first.task_id));
   });
 
+  await run("task switch preserves :task_2 suffix even when the base task id is long", () => {
+    const longTaskId = "conv_long_form_10_10_domestic_international_restart_keeps_shared_pace_and_transitions";
+    const first = buildTravelPlanState({
+      locale: "zh-CN",
+      graph: graphWithDestination("杭州", longTaskId),
+      turns: turnsFixture(),
+      concepts: [],
+      motifs: [],
+      taskId: longTaskId,
+      previous: null,
+    });
+
+    const second = buildTravelPlanState({
+      locale: "zh-CN",
+      graph: graphWithDestination("京都", longTaskId),
+      turns: turnsFixture(),
+      concepts: [],
+      motifs: [],
+      taskId: longTaskId,
+      previous: first,
+    });
+
+    assert.notEqual(second.task_id, first.task_id);
+    assert.match(second.task_id, /:task_2$/);
+    assert.equal(second.task_id.length <= 80, true);
+    assert.ok((second.task_history || []).some((x) => x.task_id === first.task_id));
+  });
+
   await run("forceTaskSwitch false should preserve current task track for coarse-to-fine refinements", () => {
     const first = buildTravelPlanState({
       locale: "zh-CN",

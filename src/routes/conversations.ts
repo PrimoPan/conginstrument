@@ -18,8 +18,10 @@ import {
 } from "../services/motif/clarificationLoop.js";
 import { planMotifQuestion } from "../services/motif/questionPlanner.js";
 import {
+  buildTravelTaskId,
   buildTravelPlanState,
   buildTravelPlanSourceMapKey,
+  nextTravelTaskOrdinal,
   type TravelPlanSourceMap,
   type TravelPlanState,
 } from "../services/travelPlan/state.js";
@@ -1186,16 +1188,15 @@ function predictCurrentTaskId(params: {
   previousTravelPlan?: TravelPlanState | null;
   forceTaskSwitch?: boolean;
 }): string {
-  const baseTaskId = cleanInput(
-    params.previousTravelPlan?.task_id || String(params.conversationId || ""),
-    120
-  ) || cleanInput(String(params.conversationId || ""), 120) || "task_default";
+  const baseTaskId =
+    cleanInput(params.previousTravelPlan?.task_id, 80) ||
+    buildTravelTaskId(String(params.conversationId || ""), 1) ||
+    "task_default";
   if (!params.forceTaskSwitch) return baseTaskId;
-  const previousPlanVersion =
-    Number((params.previousTravelPlan as any)?.plan_version) ||
-    Number(params.previousTravelPlan?.version) ||
-    1;
-  return `${cleanInput(String(params.conversationId || ""), 120) || baseTaskId}:task_${Math.max(1, previousPlanVersion + 1)}`;
+  return buildTravelTaskId(
+    String(params.conversationId || "") || baseTaskId,
+    nextTravelTaskOrdinal(params.previousTravelPlan || null)
+  );
 }
 
 function activeTaskScope(plan: TravelPlanState | null | undefined, fallback: string) {
@@ -1570,13 +1571,29 @@ async function applyDisplayTitlesToModel(params: {
     ...(params.model.motifGraph || { motifs: [], motifLinks: [] }),
     motifs,
   };
-  const titleByMotifId = new Map(motifs.map((motif) => [motif.id, String(motif.display_title || motif.title || "").trim()]));
+  const namingByMotifId = new Map(
+    motifs.map((motif) => [
+      motif.id,
+      {
+        patternType: String((motif as any).pattern_type || (motif as any).motif_type_title || motif.title || "").trim(),
+        instanceTitle: String(motif.display_title || motif.title || "").trim(),
+      },
+    ])
+  );
   if (params.model.motifReasoningView?.nodes) {
     params.model.motifReasoningView = {
       ...params.model.motifReasoningView,
       nodes: (params.model.motifReasoningView.nodes || []).map((node: any) => ({
         ...node,
-        title: titleByMotifId.get(String(node?.motifId || "")) || node.title,
+        title: namingByMotifId.get(String(node?.motifId || ""))?.patternType || node.title,
+        patternType:
+          namingByMotifId.get(String(node?.motifId || ""))?.patternType ||
+          cleanInput(node?.patternType, 160) ||
+          undefined,
+        instanceTitle:
+          namingByMotifId.get(String(node?.motifId || ""))?.instanceTitle ||
+          cleanInput(node?.instanceTitle, 160) ||
+          undefined,
       })),
     };
   }

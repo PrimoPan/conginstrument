@@ -35,8 +35,12 @@ function stableId(input: string): string {
   return `ml_${safe.slice(0, 120) || "link"}`;
 }
 
+function cleanMotifId(input: any): string {
+  return cleanText(input, 240);
+}
+
 function linkKey(fromMotifId: string, toMotifId: string): string {
-  return `${cleanText(fromMotifId, 100)}=>${cleanText(toMotifId, 100)}`;
+  return `${cleanMotifId(fromMotifId)}=>${cleanMotifId(toMotifId)}`;
 }
 
 function dependencyClassOf(m: ConceptMotif): "enable" | "constraint" | "determine" {
@@ -75,13 +79,124 @@ function motifStatePenalty(status: ConceptMotif["status"]): number {
   return 0.48;
 }
 
+function motifTargetConceptId(m: ConceptMotif): string {
+  return (
+    cleanText((m as any)?.target_concept_id, 100) ||
+    cleanText(m.anchorConceptId, 100) ||
+    cleanText(m.roles?.target, 100)
+  );
+}
+
+function motifSourceConceptIds(m: ConceptMotif): string[] {
+  return Array.from(
+    new Set(
+      (
+        Array.isArray((m as any)?.source_concept_ids) && (m as any).source_concept_ids.length
+          ? (m as any).source_concept_ids
+          : Array.isArray(m.roles?.sources) && m.roles.sources.length
+          ? m.roles.sources
+          : (m.conceptIds || []).filter((id) => cleanText(id, 100) !== motifTargetConceptId(m))
+      )
+        .map((id: any) => cleanText(id, 100))
+        .filter(Boolean)
+    )
+  ).slice(0, 8);
+}
+
+function explicitConflictTargetMotifId(m: ConceptMotif): string {
+  const reason = cleanText((m as any)?.statusReason || (m as any)?.state_transition_reason, 180);
+  const match = reason.match(/^relation_conflict_with:([A-Za-z0-9_\-:>+.]+)$/);
+  return cleanMotifId(match?.[1]);
+}
+
+function structuralLinkConfidence(a: ConceptMotif, b: ConceptMotif, multiplier = 1): number {
+  return clamp01(
+    ((a.confidence + b.confidence) / 2) * motifStatePenalty(a.status) * motifStatePenalty(b.status) * multiplier,
+    0.72
+  );
+}
+
+function properSubset(a: string[], b: string[]): boolean {
+  if (!a.length || a.length >= b.length) return false;
+  const setB = new Set(b);
+  return a.every((item) => setB.has(item));
+}
+
+function inferStructuralLinks(a: ConceptMotif, b: ConceptMotif): Array<{ from: ConceptMotif; to: ConceptMotif; type: MotifLinkType; confidence: number }> {
+  const out: Array<{ from: ConceptMotif; to: ConceptMotif; type: MotifLinkType; confidence: number }> = [];
+  const aConflictTarget = explicitConflictTargetMotifId(a);
+  const bConflictTarget = explicitConflictTargetMotifId(b);
+  if (aConflictTarget && aConflictTarget === cleanMotifId(b.id)) {
+    out.push({
+      from: a,
+      to: b,
+      type: "conflicts_with",
+      confidence: structuralLinkConfidence(a, b, 0.82),
+    });
+  }
+  if (bConflictTarget && bConflictTarget === cleanMotifId(a.id)) {
+    out.push({
+      from: b,
+      to: a,
+      type: "conflicts_with",
+      confidence: structuralLinkConfidence(a, b, 0.82),
+    });
+  }
+
+  const aTarget = motifTargetConceptId(a);
+  const bTarget = motifTargetConceptId(b);
+  const aSources = motifSourceConceptIds(a);
+  const bSources = motifSourceConceptIds(b);
+
+  const aFeedsB = !!aTarget && aTarget !== bTarget && bSources.includes(aTarget);
+  const bFeedsA = !!bTarget && bTarget !== aTarget && aSources.includes(bTarget);
+  if (aFeedsB && !bFeedsA) {
+    out.push({
+      from: a,
+      to: b,
+      type: "precedes",
+      confidence: structuralLinkConfidence(a, b),
+    });
+  }
+  if (bFeedsA && !aFeedsB) {
+    out.push({
+      from: b,
+      to: a,
+      type: "precedes",
+      confidence: structuralLinkConfidence(a, b),
+    });
+  }
+
+  const depA = dependencyClassOf(a);
+  const depB = dependencyClassOf(b);
+  if (!!aTarget && aTarget === bTarget && depA === depB) {
+    if (properSubset(aSources, bSources)) {
+      out.push({
+        from: b,
+        to: a,
+        type: "refines",
+        confidence: structuralLinkConfidence(a, b, 0.92),
+      });
+    } else if (properSubset(bSources, aSources)) {
+      out.push({
+        from: a,
+        to: b,
+        type: "refines",
+        confidence: structuralLinkConfidence(a, b, 0.92),
+      });
+    }
+  }
+
+  return out;
+}
+
 function normalizeLinks(input: any): MotifLink[] {
   const arr = Array.isArray(input) ? input : [];
   const out: MotifLink[] = [];
   const seen = new Set<string>();
   for (const raw of arr) {
-    const fromMotifId = cleanText((raw as any)?.fromMotifId, 100);
-    const toMotifId = cleanText((raw as any)?.toMotifId, 100);
+    const fromMotifId = cleanMotifId((raw as any)?.fromMotifId);
+    const toMotifId = cleanMotifId((raw as any)?.toMotifId);
     if (!fromMotifId || !toMotifId || fromMotifId === toMotifId) continue;
     const k = linkKey(fromMotifId, toMotifId);
     if (seen.has(k)) continue;
@@ -243,108 +358,26 @@ function buildAutoLinks(motifs: ConceptMotif[]): MotifLink[] {
     const a = candidates[i];
     for (let j = i + 1; j < candidates.length; j += 1) {
       const b = candidates[j];
-      const overlap = intersectCount(a.conceptIds || [], b.conceptIds || []);
-      if (overlap <= 0) continue;
-      const sharedIds = sharedConceptIds(a.conceptIds || [], b.conceptIds || []);
-      const type = autoType(a, b);
-      const aDependsOnB = !!b.anchorConceptId && (a.conceptIds || []).includes(b.anchorConceptId);
-      const bDependsOnA = !!a.anchorConceptId && (b.conceptIds || []).includes(a.anchorConceptId);
-      const sameAnchor = !!a.anchorConceptId && a.anchorConceptId === b.anchorConceptId;
-      const sharedOnlyAnchor =
-        sameAnchor && sharedIds.length === 1 && sharedIds[0] === cleanText(a.anchorConceptId, 120);
-      const depA = dependencyClassOf(a);
-      const depB = dependencyClassOf(b);
-      const sourceSetA = new Set((a.conceptIds || []).filter((id) => id !== a.anchorConceptId));
-      const sourceSetB = new Set((b.conceptIds || []).filter((id) => id !== b.anchorConceptId));
-      const sharedSourceDriver = sharedIds.some((id) => sourceSetA.has(id) && sourceSetB.has(id));
-
-      // Avoid artificial chains for parallel motifs that only share the same anchor.
-      if (type === "supports") {
-        const strongOverlap = sharedIds.length >= 2;
-        const mixedDependencySameAnchor = sameAnchor && depA !== depB;
-        const structuralBridge = aDependsOnB || bDependsOnA;
-        const sharedDriverDifferentTargets = sharedSourceDriver && !sameAnchor && depA !== depB;
-        if (sharedOnlyAnchor) continue;
-        if (!strongOverlap && !mixedDependencySameAnchor && !structuralBridge && !sharedDriverDifferentTargets) continue;
+      const structuralLinks = inferStructuralLinks(a, b);
+      for (const link of structuralLinks) {
+        if (link.from.id === link.to.id) continue;
+        const fromCnt = outDegree.get(link.from.id) || 0;
+        if (fromCnt >= 3) continue;
+        const k = linkKey(link.from.id, link.to.id);
+        if (seen.has(k)) continue;
+        seen.add(k);
+        outDegree.set(link.from.id, fromCnt + 1);
+        out.push({
+          id: stableId(`${link.from.id}:${link.to.id}:${link.type}`),
+          fromMotifId: link.from.id,
+          toMotifId: link.to.id,
+          type: link.type,
+          confidence: link.confidence,
+          source: "system",
+          updatedAt: now,
+        });
+        if (out.length >= 220) break;
       }
-
-      const from =
-        type === "refines"
-          ? (a.conceptIds || []).length >= (b.conceptIds || []).length
-            ? a
-            : b
-          : aDependsOnB && !bDependsOnA
-          ? b
-          : bDependsOnA && !aDependsOnB
-          ? a
-          : a.confidence >= b.confidence
-          ? a
-          : b;
-      const to = from.id === a.id ? b : a;
-
-      const fromCnt = outDegree.get(from.id) || 0;
-      if (fromCnt >= 3) continue;
-
-      const k = linkKey(from.id, to.id);
-      if (seen.has(k)) continue;
-      seen.add(k);
-      outDegree.set(from.id, fromCnt + 1);
-
-      out.push({
-        id: stableId(`${from.id}:${to.id}:${type}`),
-        fromMotifId: from.id,
-        toMotifId: to.id,
-        type,
-        confidence: clamp01(
-          ((from.confidence + to.confidence) / 2) *
-            motifStatePenalty(from.status) *
-            motifStatePenalty(to.status),
-          0.72
-        ),
-        source: "system",
-        updatedAt: now,
-      });
-
-      if (out.length >= 220) break;
-    }
-    if (out.length >= 220) break;
-  }
-
-  const anchorGroups = new Map<string, ConceptMotif[]>();
-  for (const motif of candidates) {
-    if (!isSameAnchorTopologyCandidate(motif)) continue;
-    const anchor = cleanText(motif.anchorConceptId, 120);
-    if (!anchor) continue;
-    if (!anchorGroups.has(anchor)) anchorGroups.set(anchor, []);
-    anchorGroups.get(anchor)!.push(motif);
-  }
-
-  for (const group of anchorGroups.values()) {
-    if (group.length < 2) continue;
-    const ordered = group.slice().sort(sameAnchorSort);
-    for (let i = 1; i < ordered.length; i += 1) {
-      const from = ordered[i - 1];
-      const to = ordered[i];
-      if (from.id === to.id) continue;
-      if (shouldKeepPeerLevelSameAnchorMotifs(from, to)) continue;
-      if (hasLinkEitherWay(seen, from.id, to.id)) continue;
-
-      const fromCnt = outDegree.get(from.id) || 0;
-      if (fromCnt >= 3) continue;
-
-      const k = linkKey(from.id, to.id);
-      seen.add(k);
-      outDegree.set(from.id, fromCnt + 1);
-      out.push({
-        id: stableId(`${from.id}:${to.id}:supports:anchor_chain`),
-        fromMotifId: from.id,
-        toMotifId: to.id,
-        type: "supports",
-        confidence: sameAnchorLinkConfidence(from, to),
-        source: "system",
-        updatedAt: now,
-      });
-
       if (out.length >= 220) break;
     }
     if (out.length >= 220) break;
@@ -362,8 +395,8 @@ function buildAdjacency(links: MotifLink[]): Map<string, Array<{ to: string; key
   const out = new Map<string, Array<{ to: string; key: string; confidence: number }>>();
   for (const l of links || []) {
     if (!canParticipateInTransitivePath(l)) continue;
-    const from = cleanText(l.fromMotifId, 120);
-    const to = cleanText(l.toMotifId, 120);
+    const from = cleanMotifId(l.fromMotifId);
+    const to = cleanMotifId(l.toMotifId);
     if (!from || !to || from === to) continue;
     if (!out.has(from)) out.set(from, []);
     out.get(from)!.push({
@@ -424,8 +457,8 @@ function transitiveReduceSystemLinks(links: MotifLink[]): MotifLink[] {
   for (const edge of sorted) {
     if (edge.source === "user") continue;
     if (!canParticipateInTransitivePath(edge)) continue;
-    const from = cleanText(edge.fromMotifId, 120);
-    const to = cleanText(edge.toMotifId, 120);
+    const from = cleanMotifId(edge.fromMotifId);
+    const to = cleanMotifId(edge.toMotifId);
     const key = linkKey(from, to);
     const alt = findAlternatePathStrength({
       from,
@@ -450,17 +483,17 @@ export function reconcileMotifLinks(params: {
   const effectiveMotifs = (params.motifs || []).filter((m) => (m.reuseClass || "reusable") === "reusable");
   const aliasToCanonical = new Map<string, string>();
   for (const m of effectiveMotifs || []) {
-    const canonicalId = cleanText(m.id, 120);
+    const canonicalId = cleanMotifId(m.id);
     if (!canonicalId) continue;
     aliasToCanonical.set(canonicalId, canonicalId);
-    const motifId = cleanText((m as any)?.motif_id, 120);
+    const motifId = cleanMotifId((m as any)?.motif_id);
     if (motifId) aliasToCanonical.set(motifId, canonicalId);
     for (const alias of Array.isArray((m as any)?.aliases) ? (m as any).aliases : []) {
-      const aid = cleanText(alias, 120);
+      const aid = cleanMotifId(alias);
       if (aid) aliasToCanonical.set(aid, canonicalId);
     }
   }
-  const remapMotifId = (id: string) => aliasToCanonical.get(cleanText(id, 120)) || cleanText(id, 120);
+  const remapMotifId = (id: string) => aliasToCanonical.get(cleanMotifId(id)) || cleanMotifId(id);
   const motifIds = new Set((effectiveMotifs || []).map((m) => m.id));
   const auto = buildAutoLinks(effectiveMotifs || []);
   const base = normalizeLinks(params.baseLinks)

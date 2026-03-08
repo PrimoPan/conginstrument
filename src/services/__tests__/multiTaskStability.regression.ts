@@ -917,6 +917,40 @@ async function runScenario(scenario: ScenarioDefinition): Promise<ScenarioRunRes
       },
     ],
   });
+
+  assert.ok(firstTask.plan.task_id, `${scenario.name}: first task should produce a task_id`);
+  assert.ok(secondTask.plan.task_id, `${scenario.name}: second task should produce a task_id`);
+  assert.notEqual(
+    secondTask.plan.task_id,
+    firstTask.plan.task_id,
+    `${scenario.name}: second task should be a newly created travel task, not a continuation of the first one`
+  );
+  assert.match(
+    secondTask.plan.task_id,
+    /:task_2$/,
+    `${scenario.name}: the first task switch should allocate a dedicated second-task id`
+  );
+  assert.equal(
+    portfolio.trips.some((trip) => trip.task_id === firstTask.plan.task_id),
+    true,
+    `${scenario.name}: portfolio should retain the first task section`
+  );
+  assert.equal(
+    portfolio.trips.some((trip) => trip.task_id === secondTask.plan.task_id),
+    true,
+    `${scenario.name}: portfolio should contain the second task as a separate section`
+  );
+  assert.equal(
+    portfolio.trips.some((trip) => trip.task_id === secondTask.plan.task_id && trip.status === "active"),
+    true,
+    `${scenario.name}: second task section should be active`
+  );
+  assert.equal(
+    portfolio.trips.some((trip) => trip.task_id === firstTask.plan.task_id && trip.status === "archived"),
+    true,
+    `${scenario.name}: first task section should be archived after the new task starts`
+  );
+
   const out = { firstTask, secondTask, portfolio };
   scenario.validate?.(out);
   return out;

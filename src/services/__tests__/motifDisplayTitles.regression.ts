@@ -324,7 +324,57 @@ run("pickMotifPatternTitle should reject code-like generated pattern names", () 
     },
   });
 
-  assert.equal(patternTitle, "预算先过滤住宿档位");
+  assert.equal(patternTitle, "预算先过滤住宿");
+});
+
+run("pickMotifPatternTitle should reject instance-specific generated pattern names", () => {
+  const concepts: ConceptItem[] = [
+    makeConcept({
+      id: "c_budget",
+      title: "预算上限12000元",
+      semanticKey: "slot:budget",
+      family: "budget",
+      nodeId: "n_budget",
+      kind: "constraint",
+    }),
+    makeConcept({
+      id: "c_goal",
+      title: "去台北旅游3天",
+      semanticKey: "slot:goal",
+      family: "goal",
+      nodeId: "n_goal",
+    }),
+  ];
+  const patternTitle = pickMotifPatternTitle({
+    locale: "zh-CN",
+    concepts,
+    generatedTitle: "预算上限12000元先过滤去台北旅游3天",
+    motif: {
+      id: "m_pattern_instance_reject",
+      motif_id: "m_pattern_instance_reject",
+      motif_type: "constraint",
+      templateKey: "pair",
+      motifType: "pair",
+      relation: "constraint",
+      dependencyClass: "constraint",
+      roles: { sources: ["c_budget"], target: "c_goal" },
+      scope: "global",
+      aliases: [],
+      concept_bindings: ["c_budget", "c_goal"],
+      conceptIds: ["c_budget", "c_goal"],
+      anchorConceptId: "c_goal",
+      title: "预算上限12000元 constraints 去台北旅游3天",
+      description: "",
+      confidence: 0.84,
+      supportEdgeIds: [],
+      supportNodeIds: [],
+      status: "active",
+      novelty: "new",
+      updatedAt: "2026-03-08T00:00:00.000Z",
+    },
+  });
+
+  assert.equal(patternTitle, "预算先过滤目标");
 });
 
 run("fallback title should prefer resolvable conceptIds over broken role source refs", () => {
