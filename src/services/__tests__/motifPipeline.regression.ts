@@ -541,4 +541,62 @@ run("milan limiting constraints should stay visible in motif titles", () => {
   assert.equal(/同行人数|2人/.test(titles), true);
 });
 
+run("tautological duration-to-goal motif should not be exposed when goal already encodes the same duration", () => {
+  const graph: CDG = {
+    id: "g_taipei_duration_tautology",
+    version: 1,
+    nodes: [
+      { id: "n_goal", type: "belief", statement: "意图: 去台北旅游3天", status: "confirmed", confidence: 0.9, importance: 0.9 },
+      { id: "n_duration", type: "constraint", statement: "总行程时长: 3天", status: "confirmed", confidence: 0.9, importance: 0.86 },
+      { id: "n_budget", type: "constraint", statement: "预算上限: 12000元", status: "confirmed", confidence: 0.9, importance: 0.88 },
+    ],
+    edges: [
+      { id: "e_duration", from: "n_duration", to: "n_goal", type: "constraint", confidence: 0.92 },
+      { id: "e_budget", from: "n_budget", to: "n_goal", type: "constraint", confidence: 0.92 },
+    ],
+  };
+
+  const concepts: ConceptItem[] = [
+    makeConcept("c_goal", "意图: 去台北旅游3天", {
+      kind: "belief",
+      family: "goal",
+      semanticKey: "slot:goal",
+      nodeIds: ["n_goal"],
+    }),
+    makeConcept("c_duration", "总行程时长: 3天", {
+      kind: "constraint",
+      family: "duration_total",
+      semanticKey: "slot:duration_total",
+      nodeIds: ["n_duration"],
+    }),
+    makeConcept("c_budget", "预算上限: 12000元", {
+      kind: "constraint",
+      family: "budget",
+      semanticKey: "slot:budget",
+      nodeIds: ["n_budget"],
+    }),
+  ];
+
+  const motifs = reconcileMotifsWithGraph({
+    graph,
+    concepts,
+    baseMotifs: [],
+    locale: "zh-CN",
+  });
+
+  const tautological = motifs.find((motif) => {
+    const ids = motif.conceptIds || [];
+    return ids.includes("c_duration") && ids.includes("c_goal");
+  });
+  assert.equal(!!tautological, false);
+  assert.equal(
+    motifs.some((motif) => {
+      if (motif.motifType !== "pair") return false;
+      const ids = motif.conceptIds || [];
+      return ids.includes("c_budget") && ids.includes("c_goal");
+    }),
+    true
+  );
+});
+
 console.log("All motif pipeline checks passed.");

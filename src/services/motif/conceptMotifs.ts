@@ -292,10 +292,80 @@ function motifSourceIds(m: ConceptMotif): string[] {
   return ids;
 }
 
+function parseChineseNumberToken(raw: string): number | null {
+  const text = cleanText(raw, 24);
+  if (!text) return null;
+  if (/^\d+$/.test(text)) return Number(text);
+  const digits: Record<string, number> = {
+    零: 0,
+    一: 1,
+    二: 2,
+    两: 2,
+    三: 3,
+    四: 4,
+    五: 5,
+    六: 6,
+    七: 7,
+    八: 8,
+    九: 9,
+  };
+  if (text === "十") return 10;
+  if (text.includes("十")) {
+    const [leftRaw, rightRaw] = text.split("十");
+    const left = leftRaw ? digits[leftRaw] ?? null : 1;
+    const right = rightRaw ? digits[rightRaw] ?? null : 0;
+    if (left == null || right == null) return null;
+    return left * 10 + right;
+  }
+  return digits[text] ?? null;
+}
+
+function extractDurationValue(text: string): number | null {
+  const raw = cleanText(text, 180);
+  if (!raw) return null;
+  const direct = raw.match(/(\d{1,3})\s*(?:天|day|days)(?!\d)/i);
+  if (direct?.[1]) return Number(direct[1]);
+  const zh = raw.match(/([零一二两三四五六七八九十]{1,4})\s*天/);
+  if (zh?.[1]) return parseChineseNumberToken(zh[1]);
+  return null;
+}
+
+function isTautologicalDurationGoalBinding(params: {
+  relation: EdgeType;
+  source: ConceptItem | undefined;
+  target: ConceptItem | undefined;
+}): boolean {
+  if (params.relation !== "constraint") return false;
+  const source = params.source;
+  const target = params.target;
+  if (!source || !target) return false;
+  if (canonicalConceptFamily(source) !== "duration_total") return false;
+  if (canonicalConceptFamily(target) !== "goal") return false;
+  const sourceDuration = extractDurationValue(`${source.title} ${source.description}`);
+  const targetDuration = extractDurationValue(`${target.title} ${target.description}`);
+  return sourceDuration != null && targetDuration != null && sourceDuration === targetDuration;
+}
+
+function isTautologicalDurationGoalMotif(m: ConceptMotif, conceptById: Map<string, ConceptItem>): boolean {
+  if (m.motifType !== "pair") return false;
+  const dep = motifDependencyClass(m);
+  const sourceId = motifSourceIds(m)[0];
+  const source = sourceId ? conceptById.get(sourceId) : undefined;
+  const target = conceptById.get(m.anchorConceptId);
+  return isTautologicalDurationGoalBinding({
+    relation: dep,
+    source,
+    target,
+  });
+}
+
 function motifReuseInfo(m: ConceptMotif, conceptById: Map<string, ConceptItem>): MotifReuseInfo {
   const dep = motifDependencyClass(m);
   if (dep === "conflicts_with") {
     return { reuseClass: "reusable" };
+  }
+  if (isTautologicalDurationGoalMotif(m, conceptById)) {
+    return { reuseClass: "context_specific", reuseReason: "tautological_duration_goal_binding" };
   }
   const matrix = REUSE_MATRIX[dep as "constraint" | "determine" | "enable"];
   if (!matrix) return { reuseClass: "reusable" };
@@ -2886,6 +2956,24 @@ function isCoverageEligiblePair(params: {
       llmRejected: false,
     };
   }
+  if (
+    isTautologicalDurationGoalBinding({
+      relation: params.relation,
+      source: params.fromConcept,
+      target: params.toConcept,
+    })
+  ) {
+    return {
+      eligible: false,
+      reason: "tautological_duration_goal_binding",
+      score: 0,
+      boundaryChecked: false,
+      boundaryLlmCalled: false,
+      highImpact: false,
+      llmValidated: false,
+      llmRejected: false,
+    };
+  }
 
   const score = edgeReasoningScore({
     relation: params.relation,
@@ -3174,6 +3262,15 @@ function buildEdgeRepairMotif(params: {
   const source = params.conceptById.get(sourceId);
   const target = params.conceptById.get(targetId);
   if (!source || !target) return null;
+  if (
+    isTautologicalDurationGoalBinding({
+      relation: params.edge.relation,
+      source,
+      target,
+    })
+  ) {
+    return null;
+  }
 
   const motifId = stableId(`repair:${params.edge.edgeId}:${params.edge.relation}:${sourceId}->${targetId}`);
   const templateKey = `coverage_repair:${params.edge.relation}:${source.family}->${target.family}`;

@@ -3595,17 +3595,17 @@ const cases: Case[] = [
             key: "slot:goal",
           },
           {
-            id: "n_duration",
+            id: "n_budget",
             type: "constraint",
             layer: "requirement",
-            statement: "总行程时长: 7天",
+            statement: "预算上限: 20000元",
             status: "confirmed",
             confidence: 0.95,
             importance: 0.8,
-            key: "slot:duration_total",
+            key: "slot:budget",
           },
         ] as any,
-        edges: [{ id: "e1", from: "n_duration", to: "n_goal", type: "constraint", confidence: 0.9 }] as any,
+        edges: [{ id: "e1", from: "n_budget", to: "n_goal", type: "constraint", confidence: 0.9 }] as any,
       } as any;
 
       const baseConcepts = [
@@ -3615,19 +3615,19 @@ const cases: Case[] = [
           semanticKey: "slot:goal",
         },
         {
-          id: "c_semantic:slot:duration_total_constraint_positive_global_18gtnyd",
-          title: "总行程时长: 7天",
-          semanticKey: "slot:duration_total",
+          id: "c_semantic:slot:budget_constraint_positive_global_e52mz9",
+          title: "预算上限: 20000元",
+          semanticKey: "slot:budget",
         },
       ] as any;
       const baseMotifs = [
         {
-          id: "m_pattern:pair_constraint_duration_total->goal",
-          title: "总行程时长: 7天 限制 意图：去关西和京都和大阪旅游7天",
+          id: "m_pattern:pair_constraint_budget->goal",
+          title: "预算上限: 20000元 限制 意图：去关西和京都和大阪旅游7天",
           relation: "constraint",
           dependencyClass: "constraint",
           conceptIds: [
-            "c_semantic:slot:duration_total_constraint_positive_global_18gtnyd",
+            "c_semantic:slot:budget_constraint_positive_global_e52mz9",
             "c_semantic:slot:goal_belief_positive_global_dv4jnl",
           ],
           anchorConceptId: "c_semantic:slot:goal_belief_positive_global_dv4jnl",
@@ -3642,7 +3642,7 @@ const cases: Case[] = [
       assert.equal(goalConcept!.title.includes("意图：去京都和大阪旅游7天"), true);
 
       const motifs = reconcileMotifsWithGraph({ graph, concepts, baseMotifs, locale: "zh-CN" });
-      const target = motifs.find((m) => m.id === "m_pattern:pair_constraint_duration_total->goal");
+      const target = motifs.find((m) => m.id === "m_pattern:pair_constraint_budget->goal");
       assert.ok(target);
       assert.equal(target!.title.includes("关西"), false);
       assert.equal(target!.title.includes("意图：去京都和大阪旅游7天"), true);

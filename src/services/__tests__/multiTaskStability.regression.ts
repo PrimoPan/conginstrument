@@ -113,19 +113,42 @@ function readEdge(graph: CDG, fromId: string, toId: string): CDGEdge | undefined
   return (graph.edges || []).find((edge) => edge.from === fromId && edge.to === toId);
 }
 
-function motifTypeIds(model: CognitiveModel): string[] {
+function motifStructureSignatures(model: CognitiveModel): string[] {
+  const conceptById = new Map((model.concepts || []).map((concept) => [concept.id, concept]));
+  const conceptToken = (conceptId: string): string => {
+    const concept = conceptById.get(conceptId);
+    if (!concept) return "other";
+    const semanticKey = String(concept.semanticKey || "").trim();
+    if (semanticKey.startsWith("slot:constraint:limiting:")) return semanticKey;
+    return String(concept.family || "").trim() || semanticKey || "other";
+  };
   return Array.from(
     new Set(
       (model.motifs || [])
-        .map((motif) => String(motif.motif_type_id || "").trim())
+        .map((motif) => {
+          const relation = String(motif.dependencyClass || motif.relation || "").trim() || "other";
+          const target = conceptToken(String(motif.anchorConceptId || "").trim());
+          const sources = Array.from(
+            new Set(
+              ((motif.roles?.sources || []).length
+                ? motif.roles!.sources
+                : (motif.conceptIds || []).filter((id) => id !== motif.anchorConceptId)
+              )
+                .map((id) => conceptToken(String(id || "").trim()))
+                .filter(Boolean)
+                .sort()
+            )
+          ).join("+");
+          return `${motif.motifType || "pair"}|${relation}|${sources || "none"}->${target}`;
+        })
         .filter(Boolean)
     )
   );
 }
 
 function sharedMotifTypeIds(left: CognitiveModel, right: CognitiveModel): string[] {
-  const rightSet = new Set(motifTypeIds(right));
-  return motifTypeIds(left).filter((id) => rightSet.has(id));
+  const rightSet = new Set(motifStructureSignatures(right));
+  return motifStructureSignatures(left).filter((id) => rightSet.has(id));
 }
 
 function applyManualConceptEdge(params: {
