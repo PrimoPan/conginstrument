@@ -107,6 +107,10 @@ export function resolveRevisionRequest(params: {
   motifTypeId?: string;
   choice: RevisionChoice;
   targetCandidateIds?: string[];
+  revisedTitle?: string;
+  revisedDependency?: string;
+  revisedText?: string;
+  revisedVersionId?: string;
 }): MotifTransferState {
   const now = new Date().toISOString();
   const state: MotifTransferState = params.currentState
@@ -156,8 +160,14 @@ export function resolveRevisionRequest(params: {
       chosen.has(clean(x.candidate_id, 220))
         ? {
             ...x,
-            injection_state: "disabled",
-            disabled_reason: `revision_${params.choice}`,
+            motif_type_title: clean(params.revisedTitle, 180) || x.motif_type_title,
+            dependency: clean(params.revisedDependency, 40) || x.dependency,
+            constraint_text: clean(params.revisedText, 320) || x.constraint_text,
+            library_version_id: clean(params.revisedVersionId, 120) || x.library_version_id,
+            injection_state: "injected",
+            disabled_reason: undefined,
+            transfer_confidence: Math.max(0.72, Math.min(1, Number(x.transfer_confidence || 0.7))),
+            adopted_at: now,
           }
         : x
     );
@@ -167,6 +177,9 @@ export function resolveRevisionRequest(params: {
             ...x,
             decision_status: "revised",
             decision_at: now,
+            motif_type_title: clean(params.revisedTitle, 180) || x.motif_type_title,
+            dependency: clean(params.revisedDependency, 40) || x.dependency,
+            reusable_description: clean(params.revisedText, 320) || x.reusable_description,
           }
         : x
     );

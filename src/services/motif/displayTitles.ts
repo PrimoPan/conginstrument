@@ -5,6 +5,12 @@ import type { ConceptItem } from "../concepts.js";
 import type { ConceptMotif } from "./conceptMotifs.js";
 
 const DISPLAY_TITLE_TIMEOUT_MS = Math.max(4_000, Number(process.env.CI_MOTIF_TITLE_TIMEOUT_MS || 12_000));
+const MOTIF_NAMING_TOOL = "rewrite_motif_titles";
+
+type GeneratedMotifNaming = {
+  display_title?: string;
+  pattern_type?: string;
+};
 
 function cleanText(input: any, max = 160): string {
   return String(input ?? "")
@@ -235,6 +241,67 @@ function normalizeTitleKey(text: string): string {
     .replace(/[\s\p{P}\p{S}]+/gu, "");
 }
 
+function hasCodeLikePatternTitle(text: string): boolean {
+  return /->|<-|::|\b(do\(|enable|constraint|determine|motif|pattern|causal|dependency|direct causation|mediated causation|confounding|intervention|contradiction)\b/i.test(
+    text
+  );
+}
+
+function fallbackMotifPatternTitle(params: {
+  motif: ConceptMotif;
+  concepts: ConceptItem[];
+  locale?: AppLocale;
+}): string {
+  const conceptById = new Map((params.concepts || []).map((concept) => [concept.id, concept]));
+  const refs = motifRefs(params.motif, conceptById);
+  const sourceText = refs.sources.join(isEnglishLocale(params.locale) ? " + " : "、");
+  const targetText = refs.target;
+  const relation = cleanText(params.motif.dependencyClass || params.motif.relation, 40);
+  if (sourceText && targetText) {
+    if (relation === "constraint") {
+      return isEnglishLocale(params.locale)
+        ? `${sourceText} filters ${targetText} first`
+        : `${sourceText}先过滤${targetText}`;
+    }
+    if (relation === "determine") {
+      return isEnglishLocale(params.locale)
+        ? `${sourceText} locks ${targetText}`
+        : `${sourceText}直接锁定${targetText}`;
+    }
+    if (relation === "conflicts_with") {
+      return isEnglishLocale(params.locale)
+        ? `${sourceText} conflicts with ${targetText}`
+        : `${sourceText}与${targetText}冲突`;
+    }
+    return isEnglishLocale(params.locale)
+      ? `${sourceText} drives ${targetText}`
+      : `${sourceText}驱动${targetText}`;
+  }
+  const stored =
+    cleanText((params.motif as any).pattern_type, 80) ||
+    cleanText((params.motif as any).motif_type_title, 80) ||
+    cleanText(params.motif.title, 80);
+  if (stored && !hasCodeLikePatternTitle(stored)) return stored;
+  return isEnglishLocale(params.locale) ? "Reusable decision rule" : "可复用决策规则";
+}
+
+export function pickMotifPatternTitle(params: {
+  motif: ConceptMotif;
+  concepts: ConceptItem[];
+  locale?: AppLocale;
+  generatedTitle?: string;
+}): string {
+  const fallbackTitle = fallbackMotifPatternTitle({
+    motif: params.motif,
+    concepts: params.concepts,
+    locale: params.locale,
+  });
+  const generatedTitle = cleanText(params.generatedTitle, 80);
+  if (!generatedTitle) return fallbackTitle;
+  if (hasCodeLikePatternTitle(generatedTitle)) return fallbackTitle;
+  return generatedTitle;
+}
+
 function disambiguateDuplicateDisplayTitles(params: {
   motifs: ConceptMotif[];
   concepts: ConceptItem[];
@@ -316,7 +383,7 @@ async function generateDisplayTitleBatch(params: {
   concepts: ConceptItem[];
   locale?: AppLocale;
   model?: string;
-}): Promise<Map<string, string>> {
+}): Promise<Map<string, GeneratedMotifNaming>> {
   const conceptById = new Map((params.concepts || []).map((concept) => [concept.id, concept]));
   const payload = params.motifs.map((motif) => {
     const refs = motifRefs(motif, conceptById);
@@ -331,14 +398,14 @@ async function generateDisplayTitleBatch(params: {
       current_title: cleanText(motif.title, 160),
     };
   });
-  if (!payload.length || !config.openaiKey) return new Map<string, string>();
+  if (!payload.length || !config.openaiKey) return new Map<string, GeneratedMotifNaming>();
 
   const system = isEnglishLocale(params.locale)
-    ? "You rewrite motif titles for a consumer UI. Return JSON only in the shape {\"items\":[{\"id\":\"...\",\"display_title\":\"...\"}]}. Titles must be natural, short, concrete, and easy to understand. Avoid arrows, code-like syntax, category labels, and theory jargon. Keep the original meaning."
-    : "你负责把 motif 标题改写成面向普通用户的界面标题。只返回 JSON，格式必须是 {\"items\":[{\"id\":\"...\",\"display_title\":\"...\"}]}。标题要自然、简短、具体、好理解，不要出现箭头、代码式结构、类别名或理论术语，且不能改变原意。";
+    ? 'You rewrite motif names for a consumer UI. Call the provided function only. "display_title" must be a concrete current-task title that keeps the source and target meaning. "pattern_type" must be a reusable readable pattern name, not theory jargon, not arrows, not code-like syntax, and not labels like enable/constraint/determine.'
+    : '你负责把 motif 名称改写成面向普通用户的界面用语。只能调用提供的 function。"display_title" 必须是当前任务里的具体实例标题，保持 source 和 target 的原意。"pattern_type" 必须是可复用、可读的模式名，不能写理论术语、箭头、代码式结构，也不要写 enable/constraint/determine 这类标签。';
   const user = isEnglishLocale(params.locale)
-    ? `Rewrite these motif titles. Prefer a single short sentence. Return JSON only with an "items" array.\n${JSON.stringify(payload, null, 2)}`
-    : `请改写下面这些 motif 标题。优先用一句简短自然的话。只返回带 "items" 数组的 JSON。\n${JSON.stringify(payload, null, 2)}`;
+    ? `Rewrite these motif names. Prefer short natural UI wording.\n${JSON.stringify(payload, null, 2)}`
+    : `请改写下面这些 motif 名称，优先用简短自然的界面表达。\n${JSON.stringify(payload, null, 2)}`;
 
   try {
     const resp = await createChatCompletionWithTimeout(
@@ -352,14 +419,51 @@ async function generateDisplayTitleBatch(params: {
             ],
             max_tokens: 360,
             temperature: 0.2,
-            response_format: { type: "json_object" },
+            tools: [
+              {
+                type: "function",
+                function: {
+                  name: MOTIF_NAMING_TOOL,
+                  description: isEnglishLocale(params.locale)
+                    ? "Rewrite motif display titles and reusable pattern names for UI."
+                    : "为 motif 生成实例标题与可复用模式名。",
+                  parameters: {
+                    type: "object",
+                    additionalProperties: false,
+                    properties: {
+                      items: {
+                        type: "array",
+                        items: {
+                          type: "object",
+                          additionalProperties: false,
+                          properties: {
+                            id: { type: "string" },
+                            display_title: { type: "string" },
+                            pattern_type: { type: "string" },
+                          },
+                          required: ["id", "display_title", "pattern_type"],
+                        },
+                      },
+                    },
+                    required: ["items"],
+                  },
+                },
+              },
+            ],
+            tool_choice: {
+              type: "function",
+              function: { name: MOTIF_NAMING_TOOL },
+            },
           },
           { signal }
         ),
       DISPLAY_TITLE_TIMEOUT_MS
     );
-    const raw = readTextContent(resp.choices?.[0]?.message?.content);
-    const parsed = extractJson(raw);
+    const msg = resp.choices?.[0]?.message as any;
+    const toolCall = (msg?.tool_calls || []).find(
+      (item: any) => item?.type === "function" && item?.function?.name === MOTIF_NAMING_TOOL
+    );
+    const parsed = extractJson(String(toolCall?.function?.arguments || "")) || extractJson(readTextContent(msg?.content));
     const items = Array.isArray(parsed)
       ? parsed
       : Array.isArray(parsed?.items)
@@ -367,16 +471,20 @@ async function generateDisplayTitleBatch(params: {
       : Array.isArray(parsed?.titles)
       ? parsed.titles
       : [];
-    const out = new Map<string, string>();
+    const out = new Map<string, GeneratedMotifNaming>();
     for (const item of items) {
       const id = cleanText(item?.id, 120);
       const displayTitle = cleanText(item?.display_title || item?.title, 80);
-      if (!id || !displayTitle) continue;
-      out.set(id, displayTitle);
+      const patternType = cleanText(item?.pattern_type || item?.motif_type_title || item?.pattern_title, 80);
+      if (!id || (!displayTitle && !patternType)) continue;
+      out.set(id, {
+        display_title: displayTitle || undefined,
+        pattern_type: patternType || undefined,
+      });
     }
     return out;
   } catch {
-    return new Map<string, string>();
+    return new Map<string, GeneratedMotifNaming>();
   }
 }
 
@@ -400,10 +508,13 @@ export async function enrichMotifDisplayTitles(params: {
     const prevTitle = cleanText(prev?.display_title, 80);
     const sameSignature =
       motifDisplaySignature(motif, currentConceptById) === motifDisplaySignature(prev, previousConceptById as any);
+    const prevPatternType = cleanText((prev as any)?.pattern_type || (prev as any)?.motif_type_title, 80);
     if (prevTitle && sameSignature) {
       return {
         ...motif,
         display_title: prevTitle,
+        pattern_type: prevPatternType || cleanText((motif as any)?.pattern_type, 80) || cleanText((motif as any)?.motif_type_title, 80) || undefined,
+        motif_type_title: prevPatternType || cleanText((motif as any)?.motif_type_title, 80) || undefined,
       };
     }
     if (!cleanText(motif.display_title, 80) || !sameSignature || !prevTitle) {
@@ -412,6 +523,9 @@ export async function enrichMotifDisplayTitles(params: {
     return {
       ...motif,
       display_title: cleanText(motif.display_title, 80) || prevTitle || undefined,
+      pattern_type:
+        cleanText((motif as any)?.pattern_type, 80) || prevPatternType || cleanText((motif as any)?.motif_type_title, 80) || undefined,
+      motif_type_title: cleanText((motif as any)?.motif_type_title, 80) || prevPatternType || undefined,
     };
   });
 
@@ -423,7 +537,7 @@ export async function enrichMotifDisplayTitles(params: {
     });
   }
 
-  const generated = await generateDisplayTitleBatch({
+  const generatedTitles = await generateDisplayTitleBatch({
     motifs: candidates,
     concepts: params.concepts,
     locale: params.locale,
@@ -431,15 +545,27 @@ export async function enrichMotifDisplayTitles(params: {
   });
 
   const titled = next.map((motif) => {
+    const generated = generatedTitles.get(motif.id);
+    const patternType = pickMotifPatternTitle({
+      motif,
+      concepts: params.concepts,
+      locale: params.locale,
+      generatedTitle:
+        cleanText(generated?.pattern_type, 80) ||
+        cleanText((motif as any).pattern_type, 80) ||
+        cleanText((motif as any).motif_type_title, 80),
+    });
     const displayTitle = pickMotifDisplayTitle({
       motif,
       concepts: params.concepts,
       locale: params.locale,
-      generatedTitle: cleanText(generated.get(motif.id), 80) || cleanText(motif.display_title, 80),
+      generatedTitle: cleanText(generated?.display_title, 80) || cleanText(motif.display_title, 80),
     });
     return {
       ...motif,
       display_title: displayTitle,
+      pattern_type: patternType,
+      motif_type_title: patternType,
     };
   });
   return disambiguateDuplicateDisplayTitles({

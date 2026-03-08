@@ -11,6 +11,13 @@ import { generateAssistantTextNonStreaming } from "../services/chatResponder.js"
 import { buildCognitiveModel } from "../services/cognitiveModel.js";
 import { buildConflictGatePayload } from "../services/motif/conflictGate.js";
 import {
+  normalizeMotifClarificationState,
+  resolveMotifClarificationTurn,
+  updateMotifClarificationState,
+  type MotifClarificationState,
+} from "../services/motif/clarificationLoop.js";
+import { planMotifQuestion } from "../services/motif/questionPlanner.js";
+import {
   buildTravelPlanState,
   buildTravelPlanSourceMapKey,
   type TravelPlanSourceMap,
@@ -527,6 +534,10 @@ function readMotifTransferState(raw: any): MotifTransferState {
   return normalizeMotifTransferState(raw);
 }
 
+function readMotifClarificationState(raw: any): MotifClarificationState {
+  return normalizeMotifClarificationState(raw);
+}
+
 function currentTaskId(plan: TravelPlanState | null | undefined, fallback: string): string {
   return cleanInput((plan as any)?.task_id, 80) || cleanInput(fallback, 80);
 }
@@ -599,6 +610,85 @@ function isNegativeForTransfer(userText: string): boolean {
   const text = cleanInput(userText, 280).toLowerCase();
   if (!text) return false;
   return /(不适用|不要沿用|这次不用|不继续|no|not apply|don't apply|skip it)/i.test(text);
+}
+
+function nextMotifClarificationState(params: {
+  currentState?: MotifClarificationState | null;
+  model: ReturnType<typeof buildCognitiveModel>;
+  recentTurns: Array<{ role: "user" | "assistant"; content: string }>;
+  locale: AppLocale;
+  motifTransferState?: MotifTransferState | null;
+  askedAt?: string;
+}): MotifClarificationState {
+  const plan = planMotifQuestion({
+    motifs: params.model.motifs || [],
+    concepts: params.model.concepts || [],
+    recentTurns: params.recentTurns || [],
+    locale: params.locale,
+    transferState: params.motifTransferState || null,
+  });
+  return updateMotifClarificationState({
+    currentState: params.currentState,
+    plan,
+    motifs: params.model.motifs || [],
+    askedAt: params.askedAt,
+  });
+}
+
+function motifOverrideFingerprint(motif: any) {
+  return JSON.stringify({
+    title: cleanInput(motif?.title, 180),
+    description: cleanInput(motif?.description, 260),
+    status: cleanInput(motif?.status, 32),
+    relation: cleanInput(motif?.relation || motif?.dependencyClass, 40),
+    source_concept_ids: Array.isArray(motif?.source_concept_ids)
+      ? motif.source_concept_ids.map((x: any) => cleanInput(x, 120))
+      : Array.isArray(motif?.roles?.sources)
+      ? motif.roles.sources.map((x: any) => cleanInput(x, 120))
+      : [],
+    target_concept_id:
+      cleanInput(motif?.target_concept_id, 120) ||
+      cleanInput(motif?.anchorConceptId, 120) ||
+      cleanInput(motif?.roles?.target, 120),
+    concept_ids: Array.isArray(motif?.conceptIds) ? motif.conceptIds.map((x: any) => cleanInput(x, 120)) : [],
+    causal_operator: cleanInput(motif?.causalOperator, 40),
+  });
+}
+
+function detectTransferredMotifOverrides(params: {
+  previousMotifs: any[];
+  nextMotifs: any[];
+  motifTransferState: MotifTransferState;
+}): Array<{ motifTypeId: string; signalText: string }> {
+  const previousById = new Map((params.previousMotifs || []).map((motif: any) => [cleanInput(motif?.id, 140), motif]));
+  const activeTypeIds = new Set(
+    (params.motifTransferState.activeInjections || [])
+      .filter((item) => item.injection_state === "injected" || item.injection_state === "pending_confirmation")
+      .map((item) => cleanInput(item.motif_type_id, 180))
+      .filter(Boolean)
+  );
+  const changedByType = new Map<string, Set<string>>();
+
+  for (const motif of params.nextMotifs || []) {
+    const motifId = cleanInput(motif?.id, 140);
+    const motifTypeId = cleanInput(motif?.motif_type_id, 180);
+    if (!motifId || !motifTypeId || !activeTypeIds.has(motifTypeId)) continue;
+    const previous = previousById.get(motifId);
+    if (!previous) continue;
+    const previousData = JSON.parse(motifOverrideFingerprint(previous));
+    const nextData = JSON.parse(motifOverrideFingerprint(motif));
+    const changedFields = Object.keys(nextData).filter(
+      (field) => JSON.stringify((previousData as any)[field]) !== JSON.stringify((nextData as any)[field])
+    );
+    if (!changedFields.length) continue;
+    if (!changedByType.has(motifTypeId)) changedByType.set(motifTypeId, new Set<string>());
+    for (const field of changedFields) changedByType.get(motifTypeId)!.add(field);
+  }
+
+  return Array.from(changedByType.entries()).map(([motifTypeId, fields]) => ({
+    motifTypeId,
+    signalText: `manual_motif_override:${Array.from(fields).sort().join(",")}`,
+  }));
 }
 
 type ConversationPlanningBootstrap = {
@@ -1509,6 +1599,7 @@ async function persistConversationModel(params: {
   latestUserText?: string;
   planningBootstrapHints?: PlanningBootstrapHints | null;
   manualGraphOverrides?: ManualGraphOverrides | null;
+  motifClarificationState?: MotifClarificationState | null;
   queryTaskId?: string;
   since?: string;
   conversationModel?: string;
@@ -1581,6 +1672,7 @@ async function persistConversationModel(params: {
         cognitiveState: planning.cognitiveState,
         portfolioDocumentState: planning.portfolioDocumentState,
         motifTransferState: params.motifTransferState || readMotifTransferState(null),
+        motifClarificationState: params.motifClarificationState || readMotifClarificationState(null),
         taskLifecycle: params.taskLifecycle || readTaskLifecycle(null),
         manualGraphOverrides: normalizeManualGraphOverrides(params.manualGraphOverrides),
         updatedAt: params.updatedAt,
@@ -1657,6 +1749,7 @@ async function refreshConversationTransferProjection(params: {
   locale: AppLocale;
   conv: any;
   motifTransferState: MotifTransferState;
+  motifClarificationState?: MotifClarificationState | null;
   taskLifecycle?: TaskLifecycleState;
   latestUserText?: string;
 }) {
@@ -1720,6 +1813,7 @@ async function refreshConversationTransferProjection(params: {
         cognitiveState: planning.cognitiveState,
         portfolioDocumentState: planning.portfolioDocumentState,
         motifTransferState: params.motifTransferState,
+        motifClarificationState: params.motifClarificationState || readMotifClarificationState((params.conv as any).motifClarificationState),
         taskLifecycle: params.taskLifecycle || readTaskLifecycle((params.conv as any)?.taskLifecycle),
         updatedAt: now,
       },
@@ -1850,7 +1944,36 @@ convRouter.post("/", asyncRoute(async (req: AuthedRequest, res) => {
     previous: null,
     locale,
   });
-  const motifTransferState = readMotifTransferState((conv as any).motifTransferState);
+  let motifTransferState = readMotifTransferState((conv as any).motifTransferState);
+  let motifClarificationState = readMotifClarificationState((conv as any).motifClarificationState);
+  const manualTransferOverrides = detectTransferredMotifOverrides({
+    previousMotifs: (conv as any).motifs || [],
+    nextMotifs: Array.isArray(req.body?.motifs)
+      ? req.body.motifs
+      : Array.isArray(req.body?.motif_graph?.motifs)
+      ? req.body.motif_graph.motifs
+      : [],
+    motifTransferState,
+  });
+  for (const override of manualTransferOverrides) {
+    const feedback = applyTransferFeedback({
+      locale,
+      currentState: motifTransferState,
+      signal: "manual_override",
+      signalText: override.signalText,
+      motifTypeId: override.motifTypeId,
+    });
+    motifTransferState = feedback.state;
+    if (feedback.event.motif_type_id) {
+      await recordTransferUsage({
+        userId,
+        locale,
+        motifTypeId: feedback.event.motif_type_id,
+        action: "feedback_negative",
+        confidenceDelta: Number(feedback.event.delta || -0.08),
+      });
+    }
+  }
   const taskLifecycle = readTaskLifecycle((conv as any).taskLifecycle);
   model.motifs = applyTransferStateToMotifs({
     motifs: model.motifs || [],
@@ -2207,6 +2330,7 @@ convRouter.put("/:id/graph", asyncRoute(async (req: AuthedRequest, res) => {
         cognitiveState: planning.cognitiveState,
         portfolioDocumentState: planning.portfolioDocumentState,
         motifTransferState,
+        motifClarificationState,
         taskLifecycle,
         manualGraphOverrides,
         updatedAt: now,
@@ -2270,6 +2394,7 @@ convRouter.put("/:id/graph", asyncRoute(async (req: AuthedRequest, res) => {
     cognitiveState: planning.cognitiveState,
     portfolioDocumentState: planning.portfolioDocumentState,
     motifTransferState,
+    motifClarificationState,
     taskLifecycle,
     updatedAt: now,
     assistantText,
@@ -2555,6 +2680,7 @@ convRouter.post("/:id/turn", asyncRoute(async (req: AuthedRequest, res) => {
   const locale = normalizeLocale((conv as any).locale);
   const conversationModel = conversationModelFromDoc(conv);
   let motifTransferState = readMotifTransferState((conv as any).motifTransferState);
+  let motifClarificationState = readMotifClarificationState((conv as any).motifClarificationState);
   let taskLifecycle = readTaskLifecycle((conv as any).taskLifecycle);
   const retrievalHints = readPlanningBootstrapHints((conv as any).planningBootstrapHints);
   const allowTransferRecommendations = transferRecommendationsEnabled(retrievalHints);
@@ -2579,6 +2705,14 @@ convRouter.post("/:id/turn", asyncRoute(async (req: AuthedRequest, res) => {
   const baseMotifLinks = turnBase.motifLinks;
   const baseContexts = turnBase.contexts;
   const turnNumber = Number(turnBase.recentDocs.length || 0) + 1;
+  const clarificationResolved = resolveMotifClarificationTurn({
+    locale,
+    currentState: motifClarificationState,
+    motifs: baseMotifs,
+    userText,
+  });
+  motifClarificationState = clarificationResolved.state;
+  const turnBaseMotifs = clarificationResolved.motifs;
 
   const revisionProbe = registerRevisionRequestFromUtterance({
     locale,
@@ -2620,7 +2754,7 @@ convRouter.post("/:id/turn", asyncRoute(async (req: AuthedRequest, res) => {
     graph,
     prevConcepts: baseConcepts,
     baseConcepts,
-    baseMotifs,
+    baseMotifs: turnBaseMotifs,
     baseMotifLinks,
     baseContexts,
     locale,
@@ -2653,9 +2787,10 @@ convRouter.post("/:id/turn", asyncRoute(async (req: AuthedRequest, res) => {
       previousTravelPlan: (conv as any).travelPlanState || null,
       locale,
       motifTransferState,
+      motifClarificationState,
       taskLifecycle,
       forceTaskSwitch: turnBase.forceTaskSwitch,
-      previousMotifs: baseMotifs,
+      previousMotifs: turnBaseMotifs,
       previousConcepts: baseConcepts,
       turnNumber,
       latestUserText: userText,
@@ -2704,7 +2839,7 @@ convRouter.post("/:id/turn", asyncRoute(async (req: AuthedRequest, res) => {
     graph: graphWithOverrides,
     prevConcepts: baseConcepts,
     baseConcepts,
-    baseMotifs,
+    baseMotifs: turnBaseMotifs,
     baseMotifLinks,
     baseContexts,
     locale,
@@ -2766,6 +2901,14 @@ convRouter.post("/:id/turn", asyncRoute(async (req: AuthedRequest, res) => {
     state: motifTransferState,
   });
   model.motifGraph = { ...(model.motifGraph || { motifs: [], motifLinks: [] }), motifs: model.motifs };
+  motifClarificationState = nextMotifClarificationState({
+    currentState: motifClarificationState,
+    model,
+    recentTurns,
+    locale,
+    motifTransferState,
+    askedAt: new Date().toISOString(),
+  });
 
   const now = new Date();
   await collections.turns.insertOne({
@@ -2787,9 +2930,10 @@ convRouter.post("/:id/turn", asyncRoute(async (req: AuthedRequest, res) => {
     previousTravelPlan: (conv as any).travelPlanState || null,
     locale,
     motifTransferState,
+    motifClarificationState,
     taskLifecycle,
     forceTaskSwitch: turnBase.forceTaskSwitch,
-    previousMotifs: baseMotifs,
+    previousMotifs: turnBaseMotifs,
     previousConcepts: baseConcepts,
     turnNumber,
     latestUserText: userText,
@@ -2834,6 +2978,7 @@ convRouter.post("/:id/turn/stream", asyncRoute(async (req: AuthedRequest, res) =
   const locale = normalizeLocale((conv as any).locale);
   const conversationModel = conversationModelFromDoc(conv);
   let motifTransferState = readMotifTransferState((conv as any).motifTransferState);
+  let motifClarificationState = readMotifClarificationState((conv as any).motifClarificationState);
   let taskLifecycle = readTaskLifecycle((conv as any).taskLifecycle);
   const retrievalHints = readPlanningBootstrapHints((conv as any).planningBootstrapHints);
   const allowTransferRecommendations = transferRecommendationsEnabled(retrievalHints);
@@ -2858,6 +3003,14 @@ convRouter.post("/:id/turn/stream", asyncRoute(async (req: AuthedRequest, res) =
   const baseMotifLinks = turnBase.motifLinks;
   const baseContexts = turnBase.contexts;
   const turnNumber = Number(turnBase.recentDocs.length || 0) + 1;
+  const clarificationResolved = resolveMotifClarificationTurn({
+    locale,
+    currentState: motifClarificationState,
+    motifs: baseMotifs,
+    userText,
+  });
+  motifClarificationState = clarificationResolved.state;
+  const turnBaseMotifs = clarificationResolved.motifs;
 
   const revisionProbe = registerRevisionRequestFromUtterance({
     locale,
@@ -2899,7 +3052,7 @@ convRouter.post("/:id/turn/stream", asyncRoute(async (req: AuthedRequest, res) =
     graph,
     prevConcepts: baseConcepts,
     baseConcepts,
-    baseMotifs,
+    baseMotifs: turnBaseMotifs,
     baseMotifLinks,
     baseContexts,
     locale,
@@ -2933,9 +3086,10 @@ convRouter.post("/:id/turn/stream", asyncRoute(async (req: AuthedRequest, res) =
       previousTravelPlan: (conv as any).travelPlanState || null,
       locale,
       motifTransferState,
+      motifClarificationState,
       taskLifecycle,
       forceTaskSwitch: turnBase.forceTaskSwitch,
-      previousMotifs: baseMotifs,
+      previousMotifs: turnBaseMotifs,
       previousConcepts: baseConcepts,
       turnNumber,
       latestUserText: userText,
@@ -3043,7 +3197,7 @@ convRouter.post("/:id/turn/stream", asyncRoute(async (req: AuthedRequest, res) =
       graph: graphWithOverrides,
       prevConcepts: baseConcepts,
       baseConcepts,
-      baseMotifs,
+      baseMotifs: turnBaseMotifs,
       baseMotifLinks,
       baseContexts,
       locale,
@@ -3101,6 +3255,14 @@ convRouter.post("/:id/turn/stream", asyncRoute(async (req: AuthedRequest, res) =
       state: motifTransferState,
     });
     model.motifGraph = { ...(model.motifGraph || { motifs: [], motifLinks: [] }), motifs: model.motifs };
+    motifClarificationState = nextMotifClarificationState({
+      currentState: motifClarificationState,
+      model,
+      recentTurns,
+      locale,
+      motifTransferState,
+      askedAt: new Date().toISOString(),
+    });
 
     const now = new Date();
     await collections.turns.insertOne({
@@ -3122,9 +3284,10 @@ convRouter.post("/:id/turn/stream", asyncRoute(async (req: AuthedRequest, res) =
       previousTravelPlan: (conv as any).travelPlanState || null,
       locale,
       motifTransferState,
+      motifClarificationState,
       taskLifecycle,
       forceTaskSwitch: turnBase.forceTaskSwitch,
-      previousMotifs: baseMotifs,
+      previousMotifs: turnBaseMotifs,
       previousConcepts: baseConcepts,
       turnNumber,
       latestUserText: userText,
@@ -3180,7 +3343,7 @@ convRouter.post("/:id/turn/stream", asyncRoute(async (req: AuthedRequest, res) =
           graph: graphWithOverrides2,
           prevConcepts: baseConcepts,
           baseConcepts,
-          baseMotifs,
+          baseMotifs: turnBaseMotifs,
           baseMotifLinks,
           baseContexts,
           locale,
@@ -3239,6 +3402,14 @@ convRouter.post("/:id/turn/stream", asyncRoute(async (req: AuthedRequest, res) =
           state: motifTransferState,
         });
         model2.motifGraph = { ...(model2.motifGraph || { motifs: [], motifLinks: [] }), motifs: model2.motifs };
+        motifClarificationState = nextMotifClarificationState({
+          currentState: motifClarificationState,
+          model: model2,
+          recentTurns,
+          locale,
+          motifTransferState,
+          askedAt: new Date().toISOString(),
+        });
 
         const now = new Date();
         await collections.turns.insertOne({
@@ -3260,9 +3431,10 @@ convRouter.post("/:id/turn/stream", asyncRoute(async (req: AuthedRequest, res) =
           previousTravelPlan: (conv as any).travelPlanState || null,
           locale,
           motifTransferState,
+          motifClarificationState,
           taskLifecycle,
           forceTaskSwitch: turnBase.forceTaskSwitch,
-          previousMotifs: baseMotifs,
+          previousMotifs: turnBaseMotifs,
           previousConcepts: baseConcepts,
           turnNumber,
           latestUserText: userText,
@@ -3738,6 +3910,9 @@ convRouter.post("/:id/motif-library/revise", asyncRoute(async (req: AuthedReques
     sourceConversationId: String(oid),
   });
   if (!revisedResult) return res.status(404).json({ error: "motif library entry not found" });
+  const currentVersion =
+    revisedResult.entry.versions.find((item) => cleanInput(item.version_id, 120) === cleanInput(revisedResult.entry.current_version_id, 120)) ||
+    revisedResult.entry.versions[revisedResult.entry.versions.length - 1];
 
   let motifTransferState = readMotifTransferState((conv as any).motifTransferState);
   motifTransferState = resolveRevisionRequest({
@@ -3745,6 +3920,10 @@ convRouter.post("/:id/motif-library/revise", asyncRoute(async (req: AuthedReques
     requestId: cleanInput(req.body?.request_id, 80) || undefined,
     motifTypeId,
     choice,
+    revisedTitle: cleanInput(currentVersion?.title, 180) || cleanInput(revisedResult.entry.motif_type_title, 180),
+    revisedDependency: cleanInput(currentVersion?.dependency, 40) || cleanInput(revisedResult.entry.dependency, 40),
+    revisedText: cleanInput(currentVersion?.reusable_description, 260),
+    revisedVersionId: cleanInput(currentVersion?.version_id, 120),
     targetCandidateIds: Array.isArray(req.body?.target_candidate_ids)
       ? req.body.target_candidate_ids.map((x: any) => cleanInput(x, 220)).filter(Boolean)
       : undefined,

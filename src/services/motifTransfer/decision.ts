@@ -31,6 +31,13 @@ function normalizeApplicationScope(raw: any): TransferApplicationScope {
   return clean(raw, 24) === "local" ? "local" : "trip";
 }
 
+function candidateVersionId(candidateId: string): string | undefined {
+  const raw = clean(candidateId, 220);
+  if (!raw.includes("::")) return undefined;
+  const suffix = clean(raw.split("::").slice(1).join("::"), 120);
+  return suffix || undefined;
+}
+
 function nextMode(
   action: MotifTransferDecisionAction,
   recMode: TransferRecommendedMode,
@@ -68,10 +75,12 @@ function upsertInjection(params: {
       candidate_id: params.recommendation.candidate_id,
       motif_type_id: params.recommendation.motif_type_id,
       motif_type_title: params.recommendation.motif_type_title,
+      dependency: clean(params.recommendation.dependency, 40) || "enable",
       mode,
       injection_state: "pending_confirmation",
       transfer_confidence: baseConfidence,
       constraint_text: constraintText,
+      library_version_id: candidateVersionId(params.recommendation.candidate_id),
       source_task_id: params.recommendation.source_task_id,
       source_conversation_id: params.recommendation.source_conversation_id,
       adopted_at: params.at,

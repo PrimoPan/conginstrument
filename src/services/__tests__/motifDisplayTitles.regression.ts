@@ -1,8 +1,15 @@
 import assert from "node:assert/strict";
 
+import { config } from "../../server/config.js";
+import { openai } from "../llmClient.js";
 import type { ConceptItem } from "../concepts.js";
 import { reconcileMotifsWithGraph } from "../motif/conceptMotifs.js";
-import { enrichMotifDisplayTitles, fallbackMotifDisplayTitle, pickMotifDisplayTitle } from "../motif/displayTitles.js";
+import {
+  enrichMotifDisplayTitles,
+  fallbackMotifDisplayTitle,
+  pickMotifDisplayTitle,
+  pickMotifPatternTitle,
+} from "../motif/displayTitles.js";
 
 function run(name: string, fn: () => Promise<void> | void) {
   Promise.resolve()
@@ -270,6 +277,56 @@ run("pickMotifDisplayTitle should keep generated titles that preserve source and
   assert.equal(displayTitle, "携家出游会优先考虑儿童友好选项");
 });
 
+run("pickMotifPatternTitle should reject code-like generated pattern names", () => {
+  const concepts: ConceptItem[] = [
+    makeConcept({
+      id: "c_budget",
+      title: "预算",
+      semanticKey: "slot:budget",
+      family: "budget",
+      nodeId: "n_budget",
+      kind: "constraint",
+    }),
+    makeConcept({
+      id: "c_lodging",
+      title: "住宿档位",
+      semanticKey: "slot:lodging",
+      family: "lodging",
+      nodeId: "n_lodging",
+    }),
+  ];
+  const patternTitle = pickMotifPatternTitle({
+    locale: "zh-CN",
+    concepts,
+    generatedTitle: "Budget + Lodging constraint motif",
+    motif: {
+      id: "m_pattern_fallback",
+      motif_id: "m_pattern_fallback",
+      motif_type: "constraint",
+      templateKey: "pair",
+      motifType: "pair",
+      relation: "constraint",
+      dependencyClass: "constraint",
+      roles: { sources: ["c_budget"], target: "c_lodging" },
+      scope: "global",
+      aliases: [],
+      concept_bindings: ["c_budget", "c_lodging"],
+      conceptIds: ["c_budget", "c_lodging"],
+      anchorConceptId: "c_lodging",
+      title: "预算 constraints 住宿档位",
+      description: "",
+      confidence: 0.84,
+      supportEdgeIds: [],
+      supportNodeIds: [],
+      status: "active",
+      novelty: "new",
+      updatedAt: "2026-03-08T00:00:00.000Z",
+    },
+  });
+
+  assert.equal(patternTitle, "预算先过滤住宿档位");
+});
+
 run("fallback title should prefer resolvable conceptIds over broken role source refs", () => {
   const concepts: ConceptItem[] = [
     makeConcept({
@@ -476,4 +533,92 @@ run("budget and remaining budget motifs should not collapse into the same consum
   assert.equal(budget?.display_title, "预算上限12000元会限制去台北旅游3天");
   assert.equal(remaining?.display_title, "剩余预算12000元会限制去台北旅游3天");
   assert.notEqual(budget?.display_title, remaining?.display_title);
+});
+
+run("enrichMotifDisplayTitles should apply function-call naming to both pattern and display titles", async () => {
+  const originalKey = config.openaiKey;
+  const originalCreate = openai.chat.completions.create.bind(openai.chat.completions);
+  (config as any).openaiKey = "test-key";
+  (openai.chat.completions as any).create = async () => ({
+    choices: [
+      {
+        message: {
+          tool_calls: [
+            {
+              type: "function",
+              function: {
+                name: "rewrite_motif_titles",
+                arguments: JSON.stringify({
+                  items: [
+                    {
+                      id: "m_fn",
+                      display_title: "携家出游会优先考虑儿童友好选项",
+                      pattern_type: "家庭出游优先儿童友好筛选",
+                    },
+                  ],
+                }),
+              },
+            },
+          ],
+        },
+      },
+    ],
+  });
+
+  try {
+    const concepts: ConceptItem[] = [
+      makeConcept({
+        id: "c_people",
+        title: "携家出游",
+        semanticKey: "slot:people",
+        family: "people",
+        nodeId: "n_people",
+      }),
+      makeConcept({
+        id: "c_target",
+        title: "儿童友好选项",
+        semanticKey: "slot:lodging",
+        family: "lodging",
+        nodeId: "n_target",
+      }),
+    ];
+
+    const motifs = await enrichMotifDisplayTitles({
+      locale: "zh-CN",
+      model: "gpt-4o",
+      concepts,
+      motifs: [
+        {
+          id: "m_fn",
+          motif_id: "m_fn",
+          motif_type: "enable",
+          templateKey: "pair",
+          motifType: "pair",
+          relation: "enable",
+          dependencyClass: "enable",
+          roles: { sources: ["c_people"], target: "c_target" },
+          scope: "global",
+          aliases: [],
+          concept_bindings: ["c_people", "c_target"],
+          conceptIds: ["c_people", "c_target"],
+          anchorConceptId: "c_target",
+          title: "人数 enables 住宿",
+          description: "",
+          confidence: 0.9,
+          supportEdgeIds: [],
+          supportNodeIds: [],
+          status: "active",
+          novelty: "new",
+          updatedAt: "2026-03-08T00:00:00.000Z",
+        },
+      ] as any,
+    });
+
+    assert.equal(motifs[0]?.display_title, "携家出游会优先考虑儿童友好选项");
+    assert.equal((motifs[0] as any)?.pattern_type, "家庭出游优先儿童友好筛选");
+    assert.equal((motifs[0] as any)?.motif_type_title, "家庭出游优先儿童友好筛选");
+  } finally {
+    (config as any).openaiKey = originalKey;
+    (openai.chat.completions as any).create = originalCreate;
+  }
 });

@@ -116,15 +116,20 @@ export function applyTransferFeedback(params: {
     };
   });
 
+  const revisionTarget = state.activeInjections.find((x) => {
+    const byCandidate = candidateId && x.candidate_id === candidateId;
+    const byMotifType = effectiveMotifTypeId && x.motif_type_id === effectiveMotifTypeId;
+    return byCandidate || byMotifType;
+  });
   const disabledTarget = state.activeInjections.find((x) => {
     const byCandidate = candidateId && x.candidate_id === candidateId;
-    const byMotifType = motifTypeId && x.motif_type_id === motifTypeId;
+    const byMotifType = effectiveMotifTypeId && x.motif_type_id === effectiveMotifTypeId;
     return (byCandidate || byMotifType) && x.injection_state === "disabled";
   });
   const affectedInjections =
-    disabledTarget?.motif_type_id
+    (disabledTarget?.motif_type_id || revisionTarget?.motif_type_id)
       ? state.activeInjections
-          .filter((x) => x.motif_type_id === disabledTarget.motif_type_id)
+          .filter((x) => x.motif_type_id === (disabledTarget?.motif_type_id || revisionTarget?.motif_type_id))
           .map((x) => ({
             candidate_id: x.candidate_id,
             motif_type_id: x.motif_type_id,
@@ -135,21 +140,24 @@ export function applyTransferFeedback(params: {
           }))
       : [];
 
-  if (disabledTarget) {
+  const shouldRequestRevision = !!disabledTarget || params.signal === "manual_override";
+  const requestMotifTypeId = disabledTarget?.motif_type_id || revisionTarget?.motif_type_id || "";
+  const requestCandidateId = disabledTarget?.candidate_id || revisionTarget?.candidate_id;
+  if (shouldRequestRevision && requestMotifTypeId) {
     const existsPending = state.revisionRequests.some(
       (x) =>
         x.status === "pending_user_choice" &&
-        x.motif_type_id === disabledTarget.motif_type_id &&
-        (!disabledTarget.candidate_id || x.candidate_id === disabledTarget.candidate_id)
+        x.motif_type_id === requestMotifTypeId &&
+        (!requestCandidateId || x.candidate_id === requestCandidateId)
     );
     if (!existsPending) {
       state.revisionRequests = [
         ...state.revisionRequests,
         createRevisionRequest({
-          motifTypeId: disabledTarget.motif_type_id,
-          candidateId: disabledTarget.candidate_id,
+          motifTypeId: requestMotifTypeId,
+          candidateId: requestCandidateId,
           signalText: params.signalText,
-          reason: "transfer_failure_detected",
+          reason: params.signal === "manual_override" ? "manual_override_detected" : "transfer_failure_detected",
           at: now,
           affectedInjections,
         }),

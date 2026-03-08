@@ -536,14 +536,39 @@ async function main() {
       requestId: "req_partial",
       motifTypeId: motifLibrary[0].motif_type_id,
       choice: "overwrite",
+      revisedTitle: "本次只保留午休缓冲",
+      revisedDependency: "constraint",
+      revisedText: "只把慢节奏规则传播到午休相关安排。",
+      revisedVersionId: "mv_partial_2",
       targetCandidateIds: [candidateB.candidate_id],
     });
     const injA = partial.activeInjections.find((x) => x.candidate_id === candidateA.candidate_id);
     const injB = partial.activeInjections.find((x) => x.candidate_id === candidateB.candidate_id);
     assert.equal(injA?.injection_state, "injected");
-    assert.equal(injB?.injection_state, "disabled");
+    assert.equal(injB?.injection_state, "injected");
+    assert.equal(injB?.constraint_text, "只把慢节奏规则传播到午休相关安排。");
+    assert.equal(injB?.library_version_id, "mv_partial_2");
     const resolved = partial.revisionRequests.find((x) => x.request_id === "req_partial");
     assert.deepEqual(resolved?.resolved_candidate_ids, [candidateB.candidate_id]);
+  });
+
+  await run("manual override should immediately create a revision request without waiting for disable threshold", () => {
+    const adopted = transferState.activeInjections.find((x) => x.injection_state === "injected");
+    assert.ok(adopted, "missing injected rule for manual override");
+    const out = applyTransferFeedback({
+      locale,
+      currentState: transferState,
+      signal: "manual_override",
+      signalText: "manual_motif_override:title,relation",
+      motifTypeId: adopted!.motif_type_id,
+    });
+    transferState = out.state;
+    const pending = transferState.revisionRequests.find(
+      (item) => item.status === "pending_user_choice" && item.motif_type_id === adopted!.motif_type_id
+    );
+    assert.ok(pending, "manual override should enqueue revision review");
+    const stillInjected = transferState.activeInjections.find((item) => item.candidate_id === adopted!.candidate_id);
+    assert.equal(stillInjected?.injection_state, "injected");
   });
 
   await run("overwrite and new_version keep distinct motif-library semantics", () => {

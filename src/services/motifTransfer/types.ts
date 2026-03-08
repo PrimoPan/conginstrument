@@ -48,10 +48,12 @@ export type MotifTransferActiveInjection = {
   candidate_id: string;
   motif_type_id: string;
   motif_type_title: string;
+  dependency?: string;
   mode: TransferRecommendedMode;
   injection_state: TransferInjectionState;
   transfer_confidence: number;
   constraint_text: string;
+  library_version_id?: string;
   source_task_id?: string;
   source_conversation_id?: string;
   adopted_at: string;

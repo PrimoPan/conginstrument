@@ -52,11 +52,40 @@ export function applyTransferStateToMotifs(params: {
       } as ConceptMotif;
     }
     const injection = motifByType.get(motifTypeId)!;
+    const nextDependency = clean(injection.dependency, 40);
+    const currentDependency = clean(m.dependencyClass || m.relation, 40);
+    const dependencyMismatch = !!nextDependency && !!currentDependency && nextDependency !== currentDependency;
+    const revisedDescription = clean(injection.constraint_text, 320);
     return {
       ...m,
+      motif_type_title: clean(injection.motif_type_title, 180) || (m as any).motif_type_title,
+      motif_type_reusable_description:
+        revisedDescription || (m as any).motif_type_reusable_description,
+      pattern_type: clean((m as any).pattern_type, 180) || clean(injection.motif_type_title, 180) || (m as any).pattern_type,
+      description: revisedDescription || m.description,
       transfer_confidence: Number(injection.transfer_confidence || 0.7),
       injection_state: injection.injection_state,
       applied_from_task_id: injection.source_task_id,
+      status:
+        injection.injection_state === "disabled"
+          ? m.status === "cancelled"
+            ? m.status
+            : "uncertain"
+          : dependencyMismatch && m.status === "active"
+          ? "uncertain"
+          : m.status,
+      statusReason:
+        injection.injection_state === "disabled"
+          ? `transfer_disabled:${clean(injection.disabled_reason, 80) || "feedback"}`
+          : dependencyMismatch
+          ? `transferred_dependency_revision_pending:${nextDependency}`
+          : m.statusReason,
+      state_transition_reason:
+        injection.injection_state === "disabled"
+          ? "transferred_pattern_disabled"
+          : dependencyMismatch
+          ? "transferred_dependency_revision_pending"
+          : (m as any).state_transition_reason,
     } as ConceptMotif;
   });
 }
