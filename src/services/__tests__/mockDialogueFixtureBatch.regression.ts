@@ -154,7 +154,7 @@ async function loadFixtures(): Promise<DialogueFixture[]> {
     })
   );
   for (const fixture of out) {
-    assert.equal(normalizeConversationModel(fixture.model), "gpt-5.1", `${fixture.fileName} should use gpt-5.1`);
+    assert.equal(normalizeConversationModel(fixture.model), "gpt-5.2", `${fixture.fileName} should use gpt-5.2`);
     assert.equal(fixture.firstTask.turns.length, 10, `${fixture.fileName} firstTask should have 10 turns`);
     assert.equal(fixture.secondTask.turns.length, 10, `${fixture.fileName} secondTask should have 10 turns`);
   }

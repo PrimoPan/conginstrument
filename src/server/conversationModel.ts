@@ -1,10 +1,10 @@
-export const SUPPORTED_CONVERSATION_MODELS = ["gpt-5.1", "gpt-5.2", "gpt-4o"] as const;
+export const SUPPORTED_CONVERSATION_MODELS = ["gpt-5.2", "gpt-4o"] as const;
 
 export type ConversationModel = (typeof SUPPORTED_CONVERSATION_MODELS)[number];
 
 const MODEL_ALIASES: Record<string, ConversationModel> = {
-  "5.1": "gpt-5.1",
-  "gpt-5.1": "gpt-5.1",
+  "5.1": "gpt-5.2",
+  "gpt-5.1": "gpt-5.2",
   "5.2": "gpt-5.2",
   "gpt-5.2": "gpt-5.2",
   "4-o": "gpt-4o",
@@ -14,7 +14,7 @@ const MODEL_ALIASES: Record<string, ConversationModel> = {
 
 export function normalizeConversationModel(
   input: unknown,
-  fallback: ConversationModel = "gpt-5.1"
+  fallback: ConversationModel = "gpt-5.2"
 ): ConversationModel {
   const raw = String(input || "")
     .trim()
