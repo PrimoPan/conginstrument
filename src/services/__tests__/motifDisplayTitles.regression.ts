@@ -390,3 +390,90 @@ run("reconcileMotifsWithGraph should preserve stored display titles for unchange
   const active = motifs.find((motif) => motif.id === "m_pattern:pair_constraint_budget->goal");
   assert.equal(active?.display_title, "预算会卡住整体安排");
 });
+
+run("budget and remaining budget motifs should not collapse into the same consumer title", async () => {
+  const concepts: ConceptItem[] = [
+    makeConcept({
+      id: "c_budget",
+      title: "预算上限: 12000元",
+      semanticKey: "slot:budget",
+      family: "budget",
+      nodeId: "n_budget",
+      kind: "constraint",
+    }),
+    makeConcept({
+      id: "c_budget_remaining",
+      title: "剩余预算: 12000元",
+      semanticKey: "slot:budget_remaining",
+      family: "budget",
+      nodeId: "n_budget_remaining",
+      kind: "constraint",
+    }),
+    makeConcept({
+      id: "c_goal",
+      title: "意图：去台北旅游3天",
+      semanticKey: "slot:goal",
+      family: "goal",
+      nodeId: "n_goal",
+    }),
+  ];
+
+  const motifs = await enrichMotifDisplayTitles({
+    locale: "zh-CN",
+    concepts,
+    motifs: [
+      {
+        id: "m_budget",
+        motif_id: "m_budget",
+        motif_type: "constraint",
+        templateKey: "pair",
+        motifType: "pair",
+        relation: "constraint",
+        dependencyClass: "constraint",
+        roles: { sources: ["c_budget"], target: "c_goal" },
+        scope: "global",
+        aliases: [],
+        concept_bindings: ["c_budget", "c_goal"],
+        conceptIds: ["c_budget", "c_goal"],
+        anchorConceptId: "c_goal",
+        title: "预算上限: 12000元 限制 意图：去台北旅游3天",
+        description: "",
+        confidence: 0.92,
+        supportEdgeIds: [],
+        supportNodeIds: [],
+        status: "active",
+        novelty: "new",
+        updatedAt: "2026-03-08T00:00:00.000Z",
+      },
+      {
+        id: "m_budget_remaining",
+        motif_id: "m_budget_remaining",
+        motif_type: "constraint",
+        templateKey: "pair",
+        motifType: "pair",
+        relation: "constraint",
+        dependencyClass: "constraint",
+        roles: { sources: ["c_budget_remaining"], target: "c_goal" },
+        scope: "global",
+        aliases: [],
+        concept_bindings: ["c_budget_remaining", "c_goal"],
+        conceptIds: ["c_budget_remaining", "c_goal"],
+        anchorConceptId: "c_goal",
+        title: "剩余预算: 12000元 限制 意图：去台北旅游3天",
+        description: "",
+        confidence: 0.9,
+        supportEdgeIds: [],
+        supportNodeIds: [],
+        status: "active",
+        novelty: "new",
+        updatedAt: "2026-03-08T00:00:00.000Z",
+      },
+    ] as any,
+  });
+
+  const budget = motifs.find((motif) => motif.id === "m_budget");
+  const remaining = motifs.find((motif) => motif.id === "m_budget_remaining");
+  assert.equal(budget?.display_title, "预算上限12000元会限制去台北旅游3天");
+  assert.equal(remaining?.display_title, "剩余预算12000元会限制去台北旅游3天");
+  assert.notEqual(budget?.display_title, remaining?.display_title);
+});

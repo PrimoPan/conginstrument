@@ -61,9 +61,27 @@ function localizedRelation(locale: AppLocale | undefined, relation?: string): st
   return isEnglishLocale(locale) ? "supports" : "推动";
 }
 
+function preserveConceptQualifier(concept: ConceptItem | undefined): boolean {
+  const key = cleanText(concept?.semanticKey, 120).toLowerCase();
+  return (
+    key === "slot:budget" ||
+    key === "slot:budget_remaining" ||
+    key === "slot:budget_spent" ||
+    key === "slot:budget_pending"
+  );
+}
+
+function conceptSurfaceTitle(raw: string, preserveQualifier: boolean): string {
+  const title = cleanText(raw, 80);
+  if (!title) return "";
+  if (!preserveQualifier) return title.replace(/^[^:：]{1,12}[:：]\s*/, "").trim() || title;
+  return title.replace(/\s*[:：]\s*/g, "").trim() || title;
+}
+
 function conceptTitleFromId(id: string, conceptById: Map<string, ConceptItem>): string {
-  const raw = cleanText(resolveConceptByRef(id, conceptById)?.title, 80) || cleanText(id, 80);
-  return raw.replace(/^[^:：]{1,12}[:：]\s*/, "").trim() || raw;
+  const concept = resolveConceptByRef(id, conceptById);
+  const raw = cleanText(concept?.title, 80) || cleanText(id, 80);
+  return conceptSurfaceTitle(raw, preserveConceptQualifier(concept));
 }
 
 function motifRefs(motif: ConceptMotif, conceptById: Map<string, ConceptItem>) {
@@ -211,6 +229,57 @@ function readTextContent(raw: any): string {
   return "";
 }
 
+function normalizeTitleKey(text: string): string {
+  return cleanText(text, 120)
+    .toLowerCase()
+    .replace(/[\s\p{P}\p{S}]+/gu, "");
+}
+
+function disambiguateDuplicateDisplayTitles(params: {
+  motifs: ConceptMotif[];
+  concepts: ConceptItem[];
+  locale?: AppLocale;
+}): ConceptMotif[] {
+  const indexesByTitle = new Map<string, number[]>();
+  for (let i = 0; i < (params.motifs || []).length; i += 1) {
+    const titleKey = normalizeTitleKey(String(params.motifs[i]?.display_title || params.motifs[i]?.title || ""));
+    if (!titleKey) continue;
+    if (!indexesByTitle.has(titleKey)) indexesByTitle.set(titleKey, []);
+    indexesByTitle.get(titleKey)!.push(i);
+  }
+
+  return (params.motifs || []).map((motif, index) => {
+    const titleKey = normalizeTitleKey(String(motif?.display_title || motif?.title || ""));
+    const collisions = titleKey ? indexesByTitle.get(titleKey) || [] : [];
+    if (collisions.length < 2) return motif;
+    const fallback = fallbackMotifDisplayTitle({
+      motif: {
+        ...motif,
+        display_title: undefined,
+      },
+      concepts: params.concepts,
+      locale: params.locale,
+    });
+    if (normalizeTitleKey(fallback) && normalizeTitleKey(fallback) !== titleKey) {
+      return {
+        ...motif,
+        display_title: fallback,
+      };
+    }
+    const rawTitle = cleanText(motif.title, 80);
+    if (normalizeTitleKey(rawTitle) && normalizeTitleKey(rawTitle) !== titleKey) {
+      return {
+        ...motif,
+        display_title: rawTitle,
+      };
+    }
+    return {
+      ...motif,
+      display_title: collisions.length > 1 ? `${cleanText(motif.display_title || motif.title, 72)} #${collisions.indexOf(index) + 1}` : motif.display_title,
+    };
+  });
+}
+
 function extractJson(raw: string): any {
   const text = cleanText(raw, 10_000);
   if (!text) return null;
@@ -346,7 +415,13 @@ export async function enrichMotifDisplayTitles(params: {
     };
   });
 
-  if (!candidates.length) return next;
+  if (!candidates.length) {
+    return disambiguateDuplicateDisplayTitles({
+      motifs: next,
+      concepts: params.concepts,
+      locale: params.locale,
+    });
+  }
 
   const generated = await generateDisplayTitleBatch({
     motifs: candidates,
@@ -355,7 +430,7 @@ export async function enrichMotifDisplayTitles(params: {
     model: params.model,
   });
 
-  return next.map((motif) => {
+  const titled = next.map((motif) => {
     const displayTitle = pickMotifDisplayTitle({
       motif,
       concepts: params.concepts,
@@ -366,5 +441,10 @@ export async function enrichMotifDisplayTitles(params: {
       ...motif,
       display_title: displayTitle,
     };
+  });
+  return disambiguateDuplicateDisplayTitles({
+    motifs: titled,
+    concepts: params.concepts,
+    locale: params.locale,
   });
 }

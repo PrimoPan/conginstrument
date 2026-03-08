@@ -531,6 +531,8 @@ run("reasoning view should keep health fan-out between budget cap and remaining-
   assert.equal(hasSyntheticEdge(budgetNode, sleepNode), true);
   assert.equal(hasSyntheticEdge(cardiacNode, remainingNode), true);
   assert.equal(hasSyntheticEdge(sleepNode, remainingNode), true);
+  const syntheticIds = view.edges.filter((edge) => edge.synthetic === "parallel_branch").map((edge) => edge.id);
+  assert.equal(new Set(syntheticIds).size, syntheticIds.length);
 });
 
 run("reasoning view should produce complete ordered steps under cycle", () => {

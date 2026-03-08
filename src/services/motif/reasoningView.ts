@@ -65,6 +65,20 @@ function cleanText(input: any, max = 140): string {
     .slice(0, max);
 }
 
+function stableToken(input: any): string {
+  const text = cleanText(input, 400);
+  let hash = 2166136261;
+  for (let i = 0; i < text.length; i += 1) {
+    hash ^= text.charCodeAt(i);
+    hash = Math.imul(hash, 16777619);
+  }
+  return (hash >>> 0).toString(36);
+}
+
+function stableReasoningEdgeId(kind: string, from: string, to: string, type: MotifLinkType): string {
+  return `me_${kind}_${stableToken(`${kind}|${from}|${to}|${type}`)}`;
+}
+
 function clamp01(v: any, fallback = 0.7): number {
   const n = Number(v);
   if (!Number.isFinite(n)) return fallback;
@@ -275,7 +289,7 @@ function buildSyntheticParallelBranchEdges(params: {
           const key = `${source}=>${nodeId}::supports`;
           if (params.edgeByKey.has(key)) continue;
           additions.push({
-            id: `me_branch_${cleanText(source, 32)}_${cleanText(nodeId, 32)}_supports`,
+            id: stableReasoningEdgeId("branch", source, nodeId, "supports"),
             from: source,
             to: nodeId,
             type: "supports",
@@ -287,7 +301,7 @@ function buildSyntheticParallelBranchEdges(params: {
           const key = `${nodeId}=>${target}::supports`;
           if (params.edgeByKey.has(key)) continue;
           additions.push({
-            id: `me_branch_${cleanText(nodeId, 32)}_${cleanText(target, 32)}_supports`,
+            id: stableReasoningEdgeId("branch", nodeId, target, "supports"),
             from: nodeId,
             to: target,
             type: "supports",
