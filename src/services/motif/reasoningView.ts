@@ -226,16 +226,6 @@ function buildSyntheticParallelBranchEdges(params: {
     anchorGroups.get(anchor)!.push(motif);
   }
 
-  const realEdges = Array.from(params.edgeByKey.values()).filter((edge) => !edge.synthetic);
-  const incomingByNode = new Map<string, Set<string>>();
-  const outgoingByNode = new Map<string, Set<string>>();
-  for (const edge of realEdges) {
-    if (!incomingByNode.has(edge.to)) incomingByNode.set(edge.to, new Set<string>());
-    if (!outgoingByNode.has(edge.from)) outgoingByNode.set(edge.from, new Set<string>());
-    incomingByNode.get(edge.to)!.add(edge.from);
-    outgoingByNode.get(edge.from)!.add(edge.to);
-  }
-
   const additions: MotifReasoningEdge[] = [];
   for (const group of anchorGroups.values()) {
     const ordered = group.slice().sort((a, b) => {
@@ -252,28 +242,15 @@ function buildSyntheticParallelBranchEdges(params: {
       if (block.length < 2) return;
       const predecessor = ordered[blockStart - 1];
       const successor = ordered[endExclusive];
-      const blockNodeIds = new Set(
-        block.map((motif) => cleanText(params.motifIdToNodeId.get(motif.id), 120)).filter(Boolean)
-      );
       const incomingSources = new Set<string>();
       const outgoingTargets = new Set<string>();
       if (predecessor) {
         const predecessorNodeId = cleanText(params.motifIdToNodeId.get(predecessor.id), 120);
-        if (predecessorNodeId && !blockNodeIds.has(predecessorNodeId)) incomingSources.add(predecessorNodeId);
+        if (predecessorNodeId) incomingSources.add(predecessorNodeId);
       }
       if (successor) {
         const successorNodeId = cleanText(params.motifIdToNodeId.get(successor.id), 120);
-        if (successorNodeId && !blockNodeIds.has(successorNodeId)) outgoingTargets.add(successorNodeId);
-      }
-      for (const motif of block) {
-        const nodeId = cleanText(params.motifIdToNodeId.get(motif.id), 120);
-        if (!nodeId) continue;
-        for (const source of incomingByNode.get(nodeId) || []) {
-          if (!blockNodeIds.has(source)) incomingSources.add(source);
-        }
-        for (const target of outgoingByNode.get(nodeId) || []) {
-          if (!blockNodeIds.has(target)) outgoingTargets.add(target);
-        }
+        if (successorNodeId) outgoingTargets.add(successorNodeId);
       }
       for (const motif of block) {
         const nodeId = cleanText(params.motifIdToNodeId.get(motif.id), 120);
