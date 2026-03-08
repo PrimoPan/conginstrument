@@ -197,6 +197,19 @@ function motifParallelRiskClass(m: ConceptMotif): string | null {
   return null;
 }
 
+function sameAnchorDisplayBucket(m: ConceptMotif): number {
+  const dependency = dependencyRank(m.dependencyClass || m.relation);
+  if (dependency !== 0) return 3 + dependency;
+  if (m.motifType !== "pair") return 2;
+  const text = cleanText(
+    [m.motif_type_id, m.templateKey, m.motif_type_title, m.title, m.description].filter(Boolean).join(" "),
+    320
+  ).toLowerCase();
+  if (/budget|预算|花费|经费|余额|remaining/.test(text)) return 0;
+  if (motifParallelRiskClass(m)) return 1;
+  return 2;
+}
+
 function buildSyntheticParallelBranchEdges(params: {
   motifs: ConceptMotif[];
   motifIdToNodeId: Map<string, string>;
@@ -225,7 +238,11 @@ function buildSyntheticParallelBranchEdges(params: {
 
   const additions: MotifReasoningEdge[] = [];
   for (const group of anchorGroups.values()) {
-    const ordered = group.slice().sort(sameAnchorSort);
+    const ordered = group.slice().sort((a, b) => {
+      const bucketDiff = sameAnchorDisplayBucket(a) - sameAnchorDisplayBucket(b);
+      if (bucketDiff) return bucketDiff;
+      return sameAnchorSort(a, b);
+    });
     let start = -1;
     const flushBlock = (endExclusive: number) => {
       if (start < 0) return;
