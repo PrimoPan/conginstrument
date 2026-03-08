@@ -63,6 +63,7 @@ export async function generateTurn(params: {
   stateContextUserTurns?: string[];
   systemPrompt?: string;
   locale?: AppLocale;
+  model?: string;
   motifTransferState?: MotifTransferState | null;
 }): Promise<{ assistant_text: string; graph_patch: GraphPatch }> {
   const safeRecent = normalizeRecentTurns(params.recentTurns);
@@ -74,6 +75,7 @@ export async function generateTurn(params: {
     recentTurns: safeRecent,
     systemPrompt: params.systemPrompt,
     locale: params.locale,
+    model: params.model,
     motifTransferState: params.motifTransferState,
   });
 
@@ -103,6 +105,7 @@ export async function generateTurn(params: {
       assistantText: assistant_text,
       systemPrompt: params.systemPrompt,
       locale: params.locale,
+      model: params.model,
     });
   } catch (e: any) {
     graph_patch = { ops: [], notes: [`graph_patch_exception:${e?.message || "unknown"}`] };
@@ -120,6 +123,7 @@ export async function generateTurnStreaming(params: {
   stateContextUserTurns?: string[];
   systemPrompt?: string;
   locale?: AppLocale;
+  model?: string;
   onToken: (token: string) => void;
   signal?: AbortSignal;
   motifTransferState?: MotifTransferState | null;
@@ -133,6 +137,7 @@ export async function generateTurnStreaming(params: {
     recentTurns: safeRecent,
     systemPrompt: params.systemPrompt,
     locale: params.locale,
+    model: params.model,
     onToken: params.onToken,
     signal: params.signal,
     motifTransferState: params.motifTransferState,
@@ -174,6 +179,7 @@ export async function generateTurnStreaming(params: {
       assistantText: assistant_text,
       systemPrompt: params.systemPrompt,
       locale: params.locale,
+      model: params.model,
     });
   } catch (e: any) {
     graph_patch = { ops: [], notes: [`graph_patch_exception:${e?.message || "unknown"}`] };

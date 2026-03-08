@@ -325,6 +325,7 @@ export async function generateAssistantTextNonStreaming(params: {
   recentTurns: Array<{ role: "user" | "assistant"; content: string }>;
   systemPrompt?: string;
   locale?: AppLocale;
+  model?: string;
   motifTransferState?: MotifTransferState | null;
 }): Promise<string> {
   const safeRecent = normalizeRecentTurns(params.recentTurns);
@@ -380,7 +381,7 @@ export async function generateAssistantTextNonStreaming(params: {
       (signal) =>
         openai.chat.completions.create(
           {
-            model: config.model,
+            model: params.model || config.model,
             messages: [{ role: "system", content: systemOne }, ...safeRecent, { role: "user", content: params.userText }],
             max_tokens: 900,
             temperature: 0.6,
@@ -410,7 +411,7 @@ export async function generateAssistantTextNonStreaming(params: {
       (signal) =>
         openai.chat.completions.create(
           {
-            model: config.model,
+            model: params.model || config.model,
             messages: [{ role: "user", content: fallbackPrompt }],
             max_tokens: 700,
             temperature: 0.6,
@@ -443,6 +444,7 @@ export async function streamAssistantText(params: {
   recentTurns: Array<{ role: "user" | "assistant"; content: string }>;
   systemPrompt?: string;
   locale?: AppLocale;
+  model?: string;
   onToken: (token: string) => void;
   signal?: AbortSignal;
   motifTransferState?: MotifTransferState | null;
@@ -515,7 +517,7 @@ export async function streamAssistantText(params: {
   try {
     const upstream = await openai.chat.completions.create(
       {
-        model: config.model,
+        model: params.model || config.model,
         messages: [{ role: "system", content: systemOne }, ...safeRecent, { role: "user", content: params.userText }],
         stream: true,
         max_tokens: 900,

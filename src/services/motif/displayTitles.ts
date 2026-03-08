@@ -246,6 +246,7 @@ async function generateDisplayTitleBatch(params: {
   motifs: ConceptMotif[];
   concepts: ConceptItem[];
   locale?: AppLocale;
+  model?: string;
 }): Promise<Map<string, string>> {
   const conceptById = new Map((params.concepts || []).map((concept) => [concept.id, concept]));
   const payload = params.motifs.map((motif) => {
@@ -275,7 +276,7 @@ async function generateDisplayTitleBatch(params: {
       (signal) =>
         openai.chat.completions.create(
           {
-            model: config.model,
+            model: params.model || config.model,
             messages: [
               { role: "system", content: system },
               { role: "user", content: user },
@@ -316,6 +317,7 @@ export async function enrichMotifDisplayTitles(params: {
   previousMotifs?: ConceptMotif[] | any[];
   previousConcepts?: ConceptItem[] | any[];
   locale?: AppLocale;
+  model?: string;
 }): Promise<ConceptMotif[]> {
   const currentConceptById = new Map((params.concepts || []).map((concept) => [concept.id, concept]));
   const previousConceptById = new Map(((params.previousConcepts as any[]) || []).map((concept) => [concept.id, concept]));
@@ -350,6 +352,7 @@ export async function enrichMotifDisplayTitles(params: {
     motifs: candidates,
     concepts: params.concepts,
     locale: params.locale,
+    model: params.model,
   });
 
   return next.map((motif) => {

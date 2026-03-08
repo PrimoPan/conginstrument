@@ -334,6 +334,7 @@ async function buildSignals(params: {
   stateContextUserTurns?: string[];
   systemPrompt?: string;
   locale?: AppLocale;
+  model?: string;
 }): Promise<IntentSignals> {
   const recentTurns = params.recentTurns || [];
   const fallbackRecentUserTexts = recentTurns
@@ -375,7 +376,7 @@ async function buildSignals(params: {
   if (USE_FUNCTION_SLOT_EXTRACTION) {
     try {
       const slotResult = await extractIntentSignalsByFunctionCall({
-        model: GRAPH_MODEL,
+        model: params.model || GRAPH_MODEL,
         latestUserText: params.userText,
         recentTurns: params.recentTurns,
         systemPrompt: params.systemPrompt,
@@ -544,6 +545,7 @@ export async function generateGraphPatch(params: {
   assistantText: string;
   systemPrompt?: string;
   locale?: AppLocale;
+  model?: string;
 }): Promise<GraphPatch> {
   const signals = await buildSignals(params);
   const state = buildSlotStateMachine({

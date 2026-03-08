@@ -1,3 +1,5 @@
+import { normalizeConversationModel } from "./conversationModel.js";
+
 function parseCsv(raw: string): string[] {
   return Array.from(
     new Set(
@@ -15,7 +17,7 @@ export const config = {
   mongoDb: process.env.MONGO_DB || "conginstrument",
   openaiKey: process.env.OPENAI_API_KEY || "",
   openaiBaseUrl: process.env.OPENAI_BASE_URL || "",
-  model: process.env.MODEL || "gpt-4o",
+  model: normalizeConversationModel(process.env.MODEL || "gpt-5.2"),
   sessionTtlDays: Number(process.env.SESSION_TTL_DAYS || 7),
   timezone: process.env.TZ || process.env.TIMEZONE || "Asia/Shanghai",
   corsOrigins: parseCsv(process.env.CORS_ORIGINS || ""),

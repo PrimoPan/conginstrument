@@ -6,6 +6,7 @@ import { generateTurn, generateTurnStreaming } from "../services/llm.js";
 import { applyPatchWithGuards, normalizeGraphSnapshot } from "../core/graph.js";
 import type { CDG, ConceptNode, EdgeType } from "../core/graph.js";
 import { config } from "../server/config.js";
+import { normalizeConversationModel, type ConversationModel } from "../server/conversationModel.js";
 import { generateAssistantTextNonStreaming } from "../services/chatResponder.js";
 import { buildCognitiveModel } from "../services/cognitiveModel.js";
 import { buildConflictGatePayload } from "../services/motif/conflictGate.js";
@@ -323,6 +324,10 @@ function parseBoolFlag(v: any): boolean {
     return s === "1" || s === "true" || s === "yes" || s === "on";
   }
   return false;
+}
+
+function conversationModelFromDoc(conv: any): ConversationModel {
+  return normalizeConversationModel((conv as any)?.model, config.model);
 }
 
 type TaskLifecycleState = {
@@ -1371,6 +1376,7 @@ async function applyDisplayTitlesToModel(params: {
   previousMotifs?: any[];
   previousConcepts?: any[];
   locale: AppLocale;
+  conversationModel?: string;
 }) {
   const motifs = await enrichMotifDisplayTitles({
     motifs: Array.isArray(params.model.motifs) ? params.model.motifs : [],
@@ -1378,6 +1384,7 @@ async function applyDisplayTitlesToModel(params: {
     previousMotifs: Array.isArray(params.previousMotifs) ? params.previousMotifs : [],
     previousConcepts: Array.isArray(params.previousConcepts) ? params.previousConcepts : [],
     locale: params.locale,
+    model: params.conversationModel,
   });
   params.model.motifs = motifs;
   params.model.motifGraph = {
@@ -1415,6 +1422,7 @@ async function persistConversationModel(params: {
   manualGraphOverrides?: ManualGraphOverrides | null;
   queryTaskId?: string;
   since?: string;
+  conversationModel?: string;
 }): Promise<PersistedConversationSnapshot> {
   const motifsWithTransfer = applyTransferStateToMotifs({
     motifs: annotateMotifExtractionMeta({
@@ -1437,6 +1445,7 @@ async function persistConversationModel(params: {
     previousMotifs: params.previousMotifs,
     previousConcepts: params.previousConcepts,
     locale: params.locale,
+    conversationModel: params.conversationModel,
   });
   params.model.motifs = modelWithTransfer.motifs;
   params.model.motifGraph = modelWithTransfer.motifGraph;
@@ -1662,6 +1671,7 @@ convRouter.get("/", asyncRoute(async (req: AuthedRequest, res) => {
 convRouter.post("/", asyncRoute(async (req: AuthedRequest, res) => {
   const userId = req.userId!;
   const locale = normalizeLocale(req.body?.locale);
+  const conversationModel = normalizeConversationModel(req.body?.model, config.model);
   const planningBootstrap = parsePlanningBootstrap(req.body?.planningBootstrap);
   const planningBootstrapHints = readPlanningBootstrapHints(planningBootstrap);
   const nextTransferRecommendationsEnabled = transferRecommendationsEnabled(planningBootstrapHints);
@@ -1676,7 +1686,7 @@ convRouter.post("/", asyncRoute(async (req: AuthedRequest, res) => {
     title: requestedTitle,
     locale,
     systemPrompt,
-    model: config.model,
+    model: conversationModel,
     createdAt: now,
     updatedAt: now,
     graph: emptyGraph("temp"), // 先占位，写入后再用 _id 修正
@@ -1714,6 +1724,7 @@ convRouter.post("/", asyncRoute(async (req: AuthedRequest, res) => {
     {
       $set: {
         title: finalTitle,
+        model: conversationModel,
         graph: bootstrap.graph,
         concepts: [],
         motifs: [],
@@ -1762,6 +1773,7 @@ convRouter.post("/", asyncRoute(async (req: AuthedRequest, res) => {
     previousMotifs: (conv as any).motifs || [],
     previousConcepts: conv.concepts || [],
     locale,
+    conversationModel,
   });
   const persistentMotifLibrary = await listUserMotifLibrary(userId, locale);
   const planning = await safeBuildPlanningStateBundle({
@@ -1804,6 +1816,7 @@ convRouter.post("/", asyncRoute(async (req: AuthedRequest, res) => {
     conversationId,
     title: finalTitle,
     locale: normalizeLocale((conv as any).locale),
+    model: conversationModel,
     systemPrompt: conv.systemPrompt,
     ...modelPayload(model),
     travelPlanState,
@@ -1826,6 +1839,7 @@ convRouter.get("/:id", asyncRoute(async (req: AuthedRequest, res) => {
   const conv = await collections.conversations.findOne({ _id: oid, userId });
   if (!conv) return res.status(404).json({ error: "conversation not found" });
   const locale = normalizeLocale((conv as any).locale);
+  const conversationModel = conversationModelFromDoc(conv);
   const taskLifecycle = readTaskLifecycle((conv as any).taskLifecycle);
   const planningBootstrapHints = readPlanningBootstrapHints((conv as any).planningBootstrapHints);
   const nextTransferRecommendationsEnabled = transferRecommendationsEnabled(planningBootstrapHints);
@@ -1864,6 +1878,7 @@ convRouter.get("/:id", asyncRoute(async (req: AuthedRequest, res) => {
     conversationId: id,
     title: conv.title,
     locale,
+    model: conversationModel,
     systemPrompt: conv.systemPrompt,
     ...modelPayload(model),
     travelPlanState,
@@ -1885,6 +1900,7 @@ convRouter.post("/:id/task/resume", asyncRoute(async (req: AuthedRequest, res) =
   const conv = await collections.conversations.findOne({ _id: oid, userId });
   if (!conv) return res.status(404).json({ error: "conversation not found" });
   const locale = normalizeLocale((conv as any).locale);
+  const conversationModel = conversationModelFromDoc(conv);
   const nextLifecycle = reopenTaskLifecycle(readTaskLifecycle((conv as any).taskLifecycle));
   const now = new Date();
 
@@ -1946,6 +1962,7 @@ convRouter.post("/:id/task/resume", asyncRoute(async (req: AuthedRequest, res) =
     conversationId: id,
     title: refreshedConv.title,
     locale,
+    model: conversationModel,
     systemPrompt: refreshedConv.systemPrompt,
     ...modelPayload(model),
     travelPlanState,
@@ -1954,6 +1971,33 @@ convRouter.post("/:id/task/resume", asyncRoute(async (req: AuthedRequest, res) =
     portfolioDocumentState: planning.portfolioDocumentState,
     motifTransferState,
     taskLifecycle: nextLifecycle,
+  });
+}));
+
+convRouter.put("/:id/model", asyncRoute(async (req: AuthedRequest, res) => {
+  const userId = req.userId!;
+  const oid = parseObjectId(req.params.id);
+  if (!oid) return res.status(400).json({ error: "invalid conversation id" });
+
+  const conv = await collections.conversations.findOne({ _id: oid, userId });
+  if (!conv) return res.status(404).json({ error: "conversation not found" });
+
+  const model = normalizeConversationModel(req.body?.model, conversationModelFromDoc(conv));
+  const now = new Date();
+  await collections.conversations.updateOne(
+    { _id: oid, userId },
+    {
+      $set: {
+        model,
+        updatedAt: now,
+      },
+    }
+  );
+
+  res.json({
+    conversationId: String(oid),
+    model,
+    updatedAt: now.toISOString(),
   });
 }));
 
@@ -1967,6 +2011,7 @@ convRouter.put("/:id/graph", asyncRoute(async (req: AuthedRequest, res) => {
   const conv = await collections.conversations.findOne({ _id: oid, userId });
   if (!conv) return res.status(404).json({ error: "conversation not found" });
   const locale = normalizeLocale((conv as any).locale);
+  const conversationModel = conversationModelFromDoc(conv);
 
   const incomingGraph = req.body?.graph;
   if (!incomingGraph || typeof incomingGraph !== "object") {
@@ -2025,6 +2070,7 @@ convRouter.put("/:id/graph", asyncRoute(async (req: AuthedRequest, res) => {
     previousMotifs: (conv as any).motifs || [],
     previousConcepts: conv.concepts || [],
     locale,
+    conversationModel,
   });
   model.graph.version = prevGraph.version + (graphChanged(prevGraph, model.graph) ? 1 : 0);
 
@@ -2115,6 +2161,7 @@ convRouter.put("/:id/graph", asyncRoute(async (req: AuthedRequest, res) => {
           motifTransferState,
         }),
         locale,
+        model: conversationModel,
         motifTransferState,
       });
     } catch (e: any) {
@@ -2127,6 +2174,7 @@ convRouter.put("/:id/graph", asyncRoute(async (req: AuthedRequest, res) => {
   res.json({
     conversationId: id,
     locale,
+    model: conversationModel,
     ...modelPayload(model),
     travelPlanState,
     taskDetection: planning.taskDetection,
@@ -2150,6 +2198,7 @@ convRouter.put("/:id/concepts", asyncRoute(async (req: AuthedRequest, res) => {
   const conv = await collections.conversations.findOne({ _id: oid, userId });
   if (!conv) return res.status(404).json({ error: "conversation not found" });
   const locale = normalizeLocale((conv as any).locale);
+  const conversationModel = conversationModelFromDoc(conv);
 
   if (!Array.isArray(req.body?.concepts)) {
     return res.status(400).json({ error: "concepts array required" });
@@ -2184,6 +2233,7 @@ convRouter.put("/:id/concepts", asyncRoute(async (req: AuthedRequest, res) => {
     previousMotifs: (conv as any).motifs || [],
     previousConcepts: conv.concepts || [],
     locale,
+    conversationModel,
   });
   model.graph.version = prevGraph.version + (graphChanged(prevGraph, model.graph) ? 1 : 0);
   const travelPlanState = await computeTravelPlanState({
@@ -2236,6 +2286,7 @@ convRouter.put("/:id/concepts", asyncRoute(async (req: AuthedRequest, res) => {
   res.json({
     conversationId: id,
     locale,
+    model: conversationModel,
     ...modelPayload(model),
     travelPlanState,
     taskDetection: planning.taskDetection,
@@ -2413,6 +2464,7 @@ convRouter.post("/:id/turn", asyncRoute(async (req: AuthedRequest, res) => {
   if (!conv) return res.status(404).json({ error: "conversation not found" });
 
   const locale = normalizeLocale((conv as any).locale);
+  const conversationModel = conversationModelFromDoc(conv);
   let motifTransferState = readMotifTransferState((conv as any).motifTransferState);
   let taskLifecycle = readTaskLifecycle((conv as any).taskLifecycle);
   const retrievalHints = readPlanningBootstrapHints((conv as any).planningBootstrapHints);
@@ -2522,11 +2574,13 @@ convRouter.post("/:id/turn", asyncRoute(async (req: AuthedRequest, res) => {
       manualGraphOverrides: turnBase.manualGraphOverrides,
       queryTaskId: turnBase.predictedTaskId,
       since: turnBase.taskSince,
+      conversationModel,
     });
 
     return res.json({
       assistantText: conflictGate.message,
       graphPatch: blockedPatch,
+      model: conversationModel,
       ...modelPayload(preModel),
       travelPlanState: persisted.travelPlanState,
       taskDetection: persisted.taskDetection,
@@ -2551,6 +2605,7 @@ convRouter.post("/:id/turn", asyncRoute(async (req: AuthedRequest, res) => {
       manualReferences,
     }),
     locale,
+    model: conversationModel,
     motifTransferState,
   });
 
@@ -2653,11 +2708,13 @@ convRouter.post("/:id/turn", asyncRoute(async (req: AuthedRequest, res) => {
     manualGraphOverrides: turnBase.manualGraphOverrides,
     queryTaskId: turnBase.predictedTaskId,
     since: turnBase.taskSince,
+    conversationModel,
   });
 
   res.json({
     assistantText: out.assistant_text,
     graphPatch: merged.appliedPatch,
+    model: conversationModel,
     ...modelPayload(model),
     travelPlanState: persisted.travelPlanState,
     taskDetection: persisted.taskDetection,
@@ -2686,6 +2743,7 @@ convRouter.post("/:id/turn/stream", asyncRoute(async (req: AuthedRequest, res) =
   if (!conv) return res.status(404).json({ error: "conversation not found" });
 
   const locale = normalizeLocale((conv as any).locale);
+  const conversationModel = conversationModelFromDoc(conv);
   let motifTransferState = readMotifTransferState((conv as any).motifTransferState);
   let taskLifecycle = readTaskLifecycle((conv as any).taskLifecycle);
   const retrievalHints = readPlanningBootstrapHints((conv as any).planningBootstrapHints);
@@ -2796,6 +2854,7 @@ convRouter.post("/:id/turn/stream", asyncRoute(async (req: AuthedRequest, res) =
       manualGraphOverrides: turnBase.manualGraphOverrides,
       queryTaskId: turnBase.predictedTaskId,
       since: turnBase.taskSince,
+      conversationModel,
     });
 
     res.status(200);
@@ -2809,6 +2868,7 @@ convRouter.post("/:id/turn/stream", asyncRoute(async (req: AuthedRequest, res) =
     sseSend(res, "done", {
       assistantText: conflictGate.message,
       graphPatch: blockedPatch,
+      model: conversationModel,
       ...modelPayload(preModel),
       travelPlanState: persisted.travelPlanState,
       taskDetection: persisted.taskDetection,
@@ -2863,6 +2923,7 @@ convRouter.post("/:id/turn/stream", asyncRoute(async (req: AuthedRequest, res) =
         manualReferences,
       }),
       locale,
+      model: conversationModel,
       signal: ac.signal,
       motifTransferState,
       onToken: (token) => {
@@ -2982,11 +3043,13 @@ convRouter.post("/:id/turn/stream", asyncRoute(async (req: AuthedRequest, res) =
       manualGraphOverrides: turnBase.manualGraphOverrides,
       queryTaskId: turnBase.predictedTaskId,
       since: turnBase.taskSince,
+      conversationModel,
     });
 
     sseSend(res, "done", {
       assistantText: out.assistant_text,
       graphPatch: merged.appliedPatch,
+      model: conversationModel,
       ...modelPayload(model),
       travelPlanState: persisted.travelPlanState,
       taskDetection: persisted.taskDetection,
@@ -3014,6 +3077,7 @@ convRouter.post("/:id/turn/stream", asyncRoute(async (req: AuthedRequest, res) =
             manualReferences,
           }),
           locale,
+          model: conversationModel,
           motifTransferState,
         });
 
@@ -3117,11 +3181,13 @@ convRouter.post("/:id/turn/stream", asyncRoute(async (req: AuthedRequest, res) =
           manualGraphOverrides: turnBase.manualGraphOverrides,
           queryTaskId: turnBase.predictedTaskId,
           since: turnBase.taskSince,
+          conversationModel,
         });
 
         sseSend(res, "done", {
           assistantText: out2.assistant_text,
           graphPatch: merged2.appliedPatch,
+          model: conversationModel,
           ...modelPayload(model2),
           travelPlanState: persisted.travelPlanState,
           taskDetection: persisted.taskDetection,
