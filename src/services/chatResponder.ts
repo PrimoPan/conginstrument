@@ -1,4 +1,5 @@
 // src/services/chatResponder.ts
+import { getMaxListeners, setMaxListeners } from "node:events";
 import { openai } from "./llmClient.js";
 import { config } from "../server/config.js";
 import type { CDG } from "../core/graph.js";
@@ -32,11 +33,24 @@ function t(locale: AppLocale | undefined, zh: string, en: string): string {
   return isEnglishLocale(locale) ? en : zh;
 }
 
+function liftAbortSignalListenerLimit(signal?: AbortSignal) {
+  if (!signal) return;
+  try {
+    const current = getMaxListeners(signal as any);
+    if (current > 0 && current < 40) {
+      setMaxListeners(40, signal as any);
+    }
+  } catch {
+    // Ignore environments where AbortSignal is not an EventTarget for node:events helpers.
+  }
+}
+
 function sleep(ms: number, signal?: AbortSignal) {
   return new Promise<void>((resolve, reject) => {
     if (signal?.aborted) return reject(new Error("aborted"));
     const timer = setTimeout(() => resolve(), ms);
     if (signal) {
+      liftAbortSignalListenerLimit(signal);
       signal.addEventListener(
         "abort",
         () => {
@@ -58,6 +72,7 @@ function composeAbortSignal(signals: Array<AbortSignal | undefined>) {
 
   for (const signal of signals) {
     if (!signal) continue;
+    liftAbortSignalListenerLimit(signal);
     if (signal.aborted) {
       abortWith((signal as any).reason);
       continue;
