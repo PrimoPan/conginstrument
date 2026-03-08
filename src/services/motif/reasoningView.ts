@@ -215,9 +215,9 @@ function buildSyntheticParallelBranchEdges(params: {
   motifs: ConceptMotif[];
   motifIdToNodeId: Map<string, string>;
   edgeByKey: Map<string, MotifReasoningEdge>;
-}): MotifReasoningEdge[] {
+}): { additions: MotifReasoningEdge[]; suppressKeys: string[] } {
   const motifs = (params.motifs || []).filter((m) => !!cleanText(m.anchorConceptId, 120));
-  if (!motifs.length) return [];
+  if (!motifs.length) return { additions: [], suppressKeys: [] };
 
   const anchorGroups = new Map<string, ConceptMotif[]>();
   for (const motif of motifs) {
@@ -228,6 +228,7 @@ function buildSyntheticParallelBranchEdges(params: {
   }
 
   const additions: MotifReasoningEdge[] = [];
+  const suppressKeys = new Set<string>();
   for (const group of anchorGroups.values()) {
     const ordered = group.slice().sort((a, b) => {
       const bucketDiff = sameAnchorDisplayBucket(a) - sameAnchorDisplayBucket(b);
@@ -245,13 +246,27 @@ function buildSyntheticParallelBranchEdges(params: {
       const successor = ordered[endExclusive];
       const incomingSources = new Set<string>();
       const outgoingTargets = new Set<string>();
+      const blockNodeIds = new Set(
+        block.map((motif) => cleanText(params.motifIdToNodeId.get(motif.id), 120)).filter(Boolean)
+      );
       if (predecessor) {
         const predecessorNodeId = cleanText(params.motifIdToNodeId.get(predecessor.id), 120);
         if (predecessorNodeId) incomingSources.add(predecessorNodeId);
+        for (const blockNodeId of blockNodeIds) {
+          suppressKeys.add(`${blockNodeId}=>${predecessorNodeId}::supports`);
+        }
       }
       if (successor) {
         const successorNodeId = cleanText(params.motifIdToNodeId.get(successor.id), 120);
         if (successorNodeId) outgoingTargets.add(successorNodeId);
+        for (const blockNodeId of blockNodeIds) {
+          suppressKeys.add(`${successorNodeId}=>${blockNodeId}::supports`);
+        }
+      }
+      for (const fromId of blockNodeIds) {
+        for (const toId of blockNodeIds) {
+          if (fromId !== toId) suppressKeys.add(`${fromId}=>${toId}::supports`);
+        }
       }
       for (const motif of block) {
         const nodeId = cleanText(params.motifIdToNodeId.get(motif.id), 120);
@@ -299,7 +314,7 @@ function buildSyntheticParallelBranchEdges(params: {
     const key = `${edge.from}=>${edge.to}::${edge.type}`;
     if (!dedup.has(key)) dedup.set(key, edge);
   }
-  return Array.from(dedup.values());
+  return { additions: Array.from(dedup.values()), suppressKeys: Array.from(suppressKeys) };
 }
 
 function roleLabel(role: MotifReasoningStepRole, locale?: AppLocale): string {
@@ -610,17 +625,23 @@ export function buildMotifReasoningView(params: {
       });
     }
   }
-  for (const edge of buildSyntheticParallelBranchEdges({ motifs, motifIdToNodeId, edgeByKey })) {
-    const key = `${edge.from}=>${edge.to}::${edge.type}`;
-    if (!edgeByKey.has(key)) edgeByKey.set(key, edge);
+  const structuralEdges: MotifReasoningEdge[] = Array.from(edgeByKey.values());
+  const syntheticBranch = buildSyntheticParallelBranchEdges({ motifs, motifIdToNodeId, edgeByKey });
+  const displayEdgeByKey = new Map(edgeByKey);
+  for (const suppressKey of syntheticBranch.suppressKeys) {
+    displayEdgeByKey.delete(suppressKey);
   }
-  const edges: MotifReasoningEdge[] = Array.from(edgeByKey.values()).sort(
+  for (const edge of syntheticBranch.additions) {
+    const key = `${edge.from}=>${edge.to}::${edge.type}`;
+    if (!displayEdgeByKey.has(key)) displayEdgeByKey.set(key, edge);
+  }
+  const edges: MotifReasoningEdge[] = Array.from(displayEdgeByKey.values()).sort(
     (a, b) => b.confidence - a.confidence || a.id.localeCompare(b.id)
   );
 
   const steps = buildReasoningSteps({
     nodes,
-    edges,
+    edges: structuralEdges,
     locale: params.locale,
   });
 
