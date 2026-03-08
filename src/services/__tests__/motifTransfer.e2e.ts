@@ -16,7 +16,7 @@ import {
 } from "../motifTransfer/revision.js";
 import { buildTransferredConstraintPrompt, applyTransferStateToMotifs } from "../motifTransfer/application.js";
 import type { MotifLibraryEntryPayload, MotifTransferState } from "../motifTransfer/types.js";
-import { applyRevisionChoiceToVersions } from "../motifTransfer/storage.js";
+import { abstractionFromMotif, applyRevisionChoiceToVersions } from "../motifTransfer/storage.js";
 
 function run(name: string, fn: () => void | Promise<void>) {
   return Promise.resolve()
@@ -301,6 +301,44 @@ async function main() {
     feedbackEvents: [],
     revisionRequests: [],
   };
+
+  await run("motif storage abstraction levels follow display_title, pattern_type, reusable description", () => {
+    const levels = abstractionFromMotif(
+      {
+        id: "m_storage",
+        motif_id: "m_storage",
+        motif_type: "constraint",
+        motifType: "pair",
+        templateKey: "pair",
+        relation: "constraint",
+        dependencyClass: "constraint",
+        roles: { sources: ["c_budget"], target: "c_goal" },
+        scope: "global",
+        aliases: [],
+        concept_bindings: ["c_budget", "c_goal"],
+        conceptIds: ["c_budget", "c_goal"],
+        anchorConceptId: "c_goal",
+        title: "预算上限12000元限制巴黎7天行程",
+        display_title: "预算上限12000元会限制巴黎7天行程",
+        pattern_type: "先按现实约束收紧范围",
+        motif_type_title: "先按现实约束收紧范围",
+        motif_type_reusable_description: "当预算或时间边界收紧时，先缩小整趟行程范围。",
+        description: "",
+        confidence: 0.9,
+        supportEdgeIds: [],
+        supportNodeIds: [],
+        status: "active",
+        novelty: "new",
+        updatedAt: new Date().toISOString(),
+      } as any,
+      locale
+    );
+    assert.deepEqual(levels, {
+      L1: "预算上限12000元会限制巴黎7天行程",
+      L2: "先按现实约束收紧范围",
+      L3: "当预算或时间边界收紧时，先缩小整趟行程范围。",
+    });
+  });
 
   await run("Task1 存储后 Task2 首轮召回 1-4 条高相关建议并按匹配度排序", () => {
     const recs = buildTransferRecommendations({

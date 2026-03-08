@@ -324,7 +324,7 @@ run("pickMotifPatternTitle should reject code-like generated pattern names", () 
     },
   });
 
-  assert.equal(patternTitle, "预算先过滤住宿");
+  assert.equal(patternTitle, "先按现实约束过滤选项");
 });
 
 run("pickMotifPatternTitle should reject instance-specific generated pattern names", () => {
@@ -374,7 +374,7 @@ run("pickMotifPatternTitle should reject instance-specific generated pattern nam
     },
   });
 
-  assert.equal(patternTitle, "预算先过滤目标");
+  assert.equal(patternTitle, "先按现实约束收紧范围");
 });
 
 run("fallback title should prefer resolvable conceptIds over broken role source refs", () => {

@@ -3,6 +3,7 @@ import { config } from "../../server/config.js";
 import { isEnglishLocale, type AppLocale } from "../../i18n/locale.js";
 import type { ConceptItem } from "../concepts.js";
 import type { ConceptMotif } from "./conceptMotifs.js";
+import { abstractMotifPatternTitle, genericMotifPatternTitle } from "./naming.js";
 
 const DISPLAY_TITLE_TIMEOUT_MS = Math.max(4_000, Number(process.env.CI_MOTIF_TITLE_TIMEOUT_MS || 12_000));
 const MOTIF_NAMING_TOOL = "rewrite_motif_titles";
@@ -374,37 +375,10 @@ function fallbackMotifPatternTitle(params: {
     motif: params.motif,
     conceptById,
   });
-  const driverText = schema.drivers
-    .map((family) => localizedConceptFamily(params.locale, family))
-    .join(isEnglishLocale(params.locale) ? " + " : "与");
-  const targetText = schema.target
-    .map((family) => localizedConceptFamily(params.locale, family))
-    .join(isEnglishLocale(params.locale) ? " + " : "与");
   const relation = cleanText(params.motif.dependencyClass || params.motif.relation, 40);
-  if (driverText && targetText) {
-    if (relation === "constraint") {
-      return isEnglishLocale(params.locale)
-        ? `${driverText} filters ${targetText} first`
-        : `${driverText}先过滤${targetText}`;
-    }
-    if (relation === "determine") {
-      return isEnglishLocale(params.locale)
-        ? `${driverText} locks ${targetText}`
-        : `${driverText}锁定${targetText}`;
-    }
-    if (relation === "conflicts_with") {
-      return isEnglishLocale(params.locale)
-        ? `${driverText} conflicts with ${targetText}`
-        : `${driverText}与${targetText}冲突`;
-    }
-    return isEnglishLocale(params.locale)
-      ? `${driverText} supports ${targetText}`
-      : `${driverText}支撑${targetText}`;
-  }
   const stored =
     cleanText((params.motif as any).motif_type_title, 80) ||
-    cleanText((params.motif as any).pattern_type, 80) ||
-    cleanText(params.motif.title, 80);
+    cleanText((params.motif as any).pattern_type, 80);
   if (
     stored &&
     !hasCodeLikePatternTitle(stored) &&
@@ -417,7 +391,18 @@ function fallbackMotifPatternTitle(params: {
   ) {
     return stored;
   }
-  return isEnglishLocale(params.locale) ? "Reusable decision rule" : "可复用决策规则";
+  if (schema.drivers.length || schema.target.length) {
+    return abstractMotifPatternTitle({
+      locale: params.locale,
+      relation,
+      drivers: schema.drivers,
+      target: schema.target,
+    });
+  }
+  return genericMotifPatternTitle({
+    locale: params.locale,
+    relation,
+  });
 }
 
 export function pickMotifPatternTitle(params: {

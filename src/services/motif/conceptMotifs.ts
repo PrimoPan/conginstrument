@@ -1,6 +1,7 @@
 import type { CDG, EdgeType } from "../../core/graph.js";
 import type { ConceptItem } from "../concepts.js";
 import { isEnglishLocale, type AppLocale } from "../../i18n/locale.js";
+import { abstractMotifPatternTitle } from "./naming.js";
 import { validateBoundaryReasoningEdge } from "./relationValidator.js";
 
 export type ConceptMotifType = "pair" | "triad";
@@ -696,10 +697,12 @@ function motifTypeRoleSchema(m: ConceptMotif, conceptById: Map<string, ConceptIt
 function motifTypeTitle(m: ConceptMotif, conceptById: Map<string, ConceptItem>, locale?: AppLocale): string {
   const dep = motifDependencyClass(m);
   const schema = motifTypeRoleSchema(m, conceptById);
-  const drivers = schema.drivers.map((x) => familyLabel(x as any, locale)).join(" + ");
-  const target = schema.target.map((x) => familyLabel(x as any, locale)).join(" + ");
-  if (drivers && target) return cleanText(`${drivers} ${relationLabel(dep, locale)} ${target}`, 160);
-  return cleanText(m.title, 160) || cleanText(m.templateKey, 160) || "MotifType";
+  return abstractMotifPatternTitle({
+    locale,
+    relation: dep,
+    drivers: schema.drivers,
+    target: schema.target,
+  });
 }
 
 function motifTypeReusableDescription(

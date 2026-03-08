@@ -500,8 +500,8 @@ run("reasoning view nodes should keep pattern title separate from instance title
         dependencyClass: "constraint",
       }),
       display_title: "预算上限12000元会限制去台北旅游3天",
-      pattern_type: "预算先过滤目标",
-      motif_type_title: "预算先过滤目标",
+      pattern_type: "先按现实约束收紧范围",
+      motif_type_title: "先按现实约束收紧范围",
     },
   ];
 
@@ -512,8 +512,8 @@ run("reasoning view nodes should keep pattern title separate from instance title
     locale: "zh-CN",
   });
   assert.equal(view.nodes.length, 1);
-  assert.equal(view.nodes[0]?.title, "预算先过滤目标");
-  assert.equal((view.nodes[0] as any)?.patternType, "预算先过滤目标");
+  assert.equal(view.nodes[0]?.title, "先按现实约束收紧范围");
+  assert.equal((view.nodes[0] as any)?.patternType, "先按现实约束收紧范围");
   assert.equal((view.nodes[0] as any)?.instanceTitle, "预算上限12000元会限制去台北旅游3天");
 });
 

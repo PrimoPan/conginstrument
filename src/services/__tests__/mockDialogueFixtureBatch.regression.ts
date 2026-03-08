@@ -23,7 +23,11 @@ type FixtureTask = {
 type DialogueFixture = {
   id: string;
   title: string;
-  category: "domestic_international" | "domestic_domestic" | "international_international";
+  category:
+    | "domestic_international"
+    | "domestic_domestic"
+    | "international_domestic"
+    | "international_international";
   locale: AppLocale;
   model: string;
   expectedSharedMotifMin?: number;
@@ -142,7 +146,7 @@ async function loadFixtures(): Promise<DialogueFixture[]> {
   const names = (await fs.readdir(ROOT_DIR))
     .filter((name) => FIXTURE_PATTERN.test(name))
     .sort();
-  assert.ok(names.length >= 6, `expected at least 6 fixture files in root, got ${names.length}`);
+  assert.equal(names.length, 16, `expected exactly 16 fixture files in root, got ${names.length}`);
   const out = await Promise.all(
     names.map(async (name) => {
       const raw = await fs.readFile(path.join(ROOT_DIR, name), "utf8");
@@ -158,6 +162,16 @@ async function loadFixtures(): Promise<DialogueFixture[]> {
     assert.equal(fixture.firstTask.turns.length, 10, `${fixture.fileName} firstTask should have 10 turns`);
     assert.equal(fixture.secondTask.turns.length, 10, `${fixture.fileName} secondTask should have 10 turns`);
   }
+  const counts = out.reduce<Record<string, number>>((acc, fixture) => {
+    acc[fixture.category] = Number(acc[fixture.category] || 0) + 1;
+    return acc;
+  }, {});
+  assert.deepEqual(counts, {
+    domestic_domestic: 4,
+    domestic_international: 4,
+    international_domestic: 4,
+    international_international: 4,
+  });
   return out;
 }
 
@@ -339,6 +353,10 @@ async function main() {
       {
         generatedAt: new Date().toISOString(),
         reportCount: reports.length,
+        categoryCounts: reports.reduce<Record<string, number>>((acc, report) => {
+          acc[report.category] = Number(acc[report.category] || 0) + 1;
+          return acc;
+        }, {}),
         reports,
       },
       null,

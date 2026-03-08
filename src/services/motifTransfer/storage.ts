@@ -2,6 +2,7 @@ import { ObjectId } from "mongodb";
 import { collections } from "../../db/mongo.js";
 import { DEFAULT_LOCALE, type AppLocale } from "../../i18n/locale.js";
 import type { ConceptMotif } from "../motif/conceptMotifs.js";
+import { genericMotifPatternTitle } from "../motif/naming.js";
 import type {
   MotifLibraryEntryPayload,
   MotifLibraryRevisionFieldDiff,
@@ -35,6 +36,25 @@ function nowIso() {
 
 function normalizeMotifLocale(locale?: AppLocale): AppLocale {
   return locale || DEFAULT_LOCALE;
+}
+
+function motifPatternTitle(motif: ConceptMotif, locale?: AppLocale): string {
+  return (
+    clean((motif as any)?.pattern_type, 180) ||
+    clean((motif as any)?.motif_type_title, 180) ||
+    genericMotifPatternTitle({
+      locale,
+      relation: clean((motif as any)?.dependencyClass || motif.relation, 40),
+    })
+  );
+}
+
+function motifDisplayTitle(motif: ConceptMotif): string {
+  return clean((motif as any)?.display_title, 180);
+}
+
+function motifReusableDescription(motif: ConceptMotif): string {
+  return clean((motif as any)?.motif_type_reusable_description || motif.rationale || motif.description, 220);
 }
 
 function toPayload(doc: any): MotifLibraryEntryPayload {
@@ -90,10 +110,10 @@ function toPayload(doc: any): MotifLibraryEntryPayload {
   };
 }
 
-function abstractionFromMotif(motif: ConceptMotif): { L1?: string; L2?: string; L3?: string } {
-  const l1 = clean(motif.title, 180);
-  const l2 = clean((motif as any)?.motif_type_title || motif.title, 180);
-  const l3 = clean((motif as any)?.motif_type_reusable_description || motif.rationale, 220);
+export function abstractionFromMotif(motif: ConceptMotif, locale?: AppLocale): { L1?: string; L2?: string; L3?: string } {
+  const l1 = motifDisplayTitle(motif);
+  const l2 = motifPatternTitle(motif, locale);
+  const l3 = motifReusableDescription(motif);
   return {
     L1: l1 || undefined,
     L2: l2 || undefined,
@@ -296,7 +316,7 @@ export async function confirmMotifLibraryEntries(params: {
     const chosenLevels = Array.isArray(sel.abstraction_levels) && sel.abstraction_levels.length
       ? sel.abstraction_levels.filter((x) => x === "L1" || x === "L2" || x === "L3")
       : (["L1", "L2"] as Array<"L1" | "L2" | "L3">);
-    const autoLevels = abstractionFromMotif(motif);
+    const autoLevels = abstractionFromMotif(motif, locale);
     const levels = {
       L1: clean(sel.abstraction_text?.L1, 180) || autoLevels.L1,
       L2: clean(sel.abstraction_text?.L2, 180) || autoLevels.L2,
@@ -309,13 +329,13 @@ export async function confirmMotifLibraryEntries(params: {
     });
     const prevVersion = Array.isArray(existing?.versions) ? existing!.versions[existing!.versions.length - 1] : null;
     const nextVersionNo = Number(prevVersion?.version || 0) + 1;
+    const canonicalTitle = motifPatternTitle(motif, locale);
     const version: MotifLibraryVersionPayload = {
       version_id: buildVersionId(motifTypeId, nextVersionNo),
       version: nextVersionNo,
-      title: clean((motif as any)?.motif_type_title || motif.title, 180),
+      title: canonicalTitle,
       dependency: clean((motif as any)?.dependencyClass || motif.relation, 40) || "enable",
-      reusable_description:
-        clean((motif as any)?.motif_type_reusable_description, 260) || clean(motif.rationale, 240) || clean(motif.description, 240),
+      reusable_description: motifReusableDescription(motif) || canonicalTitle,
       abstraction_levels: levels,
       status:
         clean(motif.status, 24) === "uncertain" ||
@@ -338,7 +358,7 @@ export async function confirmMotifLibraryEntries(params: {
         userId: params.userId,
         locale,
         motif_type_id: motifTypeId,
-        motif_type_title: clean((motif as any)?.motif_type_title || motif.title, 180),
+        motif_type_title: canonicalTitle,
         dependency: clean((motif as any)?.dependencyClass || motif.relation, 40) || "enable",
         abstraction_levels: chosenLevels,
         status: version.status,
@@ -364,7 +384,7 @@ export async function confirmMotifLibraryEntries(params: {
         { _id: existing._id, userId: params.userId, locale },
         {
           $set: {
-            motif_type_title: clean((motif as any)?.motif_type_title || motif.title, 180),
+            motif_type_title: canonicalTitle,
             dependency: clean((motif as any)?.dependencyClass || motif.relation, 40) || "enable",
             abstraction_levels: chosenLevels,
             status: version.status,
