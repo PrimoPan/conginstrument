@@ -1277,6 +1277,112 @@ async function loadRecentTurnsForPlainChat(params: {
   });
 }
 
+type PlainChatCarryoverContext = {
+  destination?: string;
+  keepConsistentText?: string;
+  sourceConversationTitle?: string;
+  previousTurn?: {
+    userText: string;
+    assistantText: string;
+  } | null;
+};
+
+async function loadPlainChatCarryoverContext(params: {
+  userId: ObjectId;
+  conversationId: string;
+  planningBootstrapHints?: PlanningBootstrapHints | null;
+}) {
+  const hints = params.planningBootstrapHints || null;
+  if (!hints) return null;
+
+  const destination = cleanInput(hints.destination, 80) || undefined;
+  const keepConsistentText = cleanInput(hints.keepConsistentText, 400) || undefined;
+  const sourceConversationId = cleanInput(hints.sourceConversationId, 80);
+  let sourceConversationTitle = "";
+  let previousTurn: PlainChatCarryoverContext["previousTurn"] = null;
+
+  if (sourceConversationId && sourceConversationId !== params.conversationId) {
+    const sourceOid = parseObjectId(sourceConversationId);
+    if (sourceOid) {
+      const sourceConversation = await collections.conversations.findOne(
+        { _id: sourceOid, userId: params.userId },
+        { projection: { title: 1 } }
+      );
+      sourceConversationTitle = cleanInput(sourceConversation?.title, 120);
+      const docs = await collections.turns
+        .find({ conversationId: sourceOid, userId: params.userId })
+        .sort({ createdAt: -1 })
+        .limit(1)
+        .toArray();
+      const latest = docs[0];
+      const userText = cleanInput(latest?.userText, 260);
+      const assistantText = cleanInput(latest?.assistantText, 360);
+      if (userText || assistantText) {
+        previousTurn = {
+          userText,
+          assistantText,
+        };
+      }
+    }
+  }
+
+  if (!destination && !keepConsistentText && !previousTurn) return null;
+
+  return {
+    destination,
+    keepConsistentText,
+    sourceConversationTitle: sourceConversationTitle || undefined,
+    previousTurn,
+  } satisfies PlainChatCarryoverContext;
+}
+
+function withPlainChatCarryoverPrompt(params: {
+  locale: AppLocale;
+  baseSystemPrompt: string;
+  carryover?: PlainChatCarryoverContext | null;
+}) {
+  const carryover = params.carryover || null;
+  if (!carryover) return params.baseSystemPrompt;
+
+  const parts = [params.baseSystemPrompt];
+  if (carryover.destination) {
+    parts.push(
+      isEnglishLocale(params.locale)
+        ? `Current trip topic: ${carryover.destination}. Treat this as the destination for the new trip conversation.`
+        : `当前这轮旅行对话的目的地是：${carryover.destination}。请把它作为本次新旅行的当前主题。`
+    );
+  }
+  if (carryover.keepConsistentText) {
+    parts.push(
+      isEnglishLocale(params.locale)
+        ? `User asked to keep these points consistent in the new trip: ${carryover.keepConsistentText}`
+        : `用户希望这次继续保持这些点：${carryover.keepConsistentText}`
+    );
+  }
+  if (carryover.previousTurn && (carryover.previousTurn.userText || carryover.previousTurn.assistantText)) {
+    parts.push(
+      isEnglishLocale(params.locale)
+        ? [
+            `Lightweight carry-over from the previous session${carryover.sourceConversationTitle ? ` (${carryover.sourceConversationTitle})` : ""}:`,
+            `This is only a soft reference from the last turn of the prior session. If it conflicts with the user's new request, follow the new request.`,
+            carryover.previousTurn.userText ? `Previous user: ${carryover.previousTurn.userText}` : "",
+            carryover.previousTurn.assistantText ? `Previous assistant: ${carryover.previousTurn.assistantText}` : "",
+          ]
+            .filter(Boolean)
+            .join("\n")
+        : [
+            `上一轮会话${carryover.sourceConversationTitle ? `（${carryover.sourceConversationTitle}）` : ""}的轻量参考：`,
+            `下面只是一条来自上一轮最后一轮问答的软参考；如果和用户这次的新要求冲突，优先遵循这次的新要求。`,
+            carryover.previousTurn.userText ? `上一轮用户：${carryover.previousTurn.userText}` : "",
+            carryover.previousTurn.assistantText ? `上一轮助手：${carryover.previousTurn.assistantText}` : "",
+          ]
+            .filter(Boolean)
+            .join("\n")
+    );
+  }
+  return parts.filter(Boolean).join("\n\n").trim();
+}
+
 function buildPureChatModel(locale: AppLocale, conversationId: string, conv?: any) {
   const graph = conv?.graph && typeof conv.graph === "object" ? conv.graph : emptyGraph(conversationId);
   const model = buildCognitiveModel({
@@ -2085,7 +2191,7 @@ convRouter.post("/", asyncRoute(async (req: AuthedRequest, res) => {
           validationStatus: "unasked",
           motifTransferState: motifTransferStateForArm(experimentArm, null),
           motifClarificationState: motifClarificationStateForArm(experimentArm, null),
-          planningBootstrapHints: null,
+          planningBootstrapHints,
           travelPlanState: null,
           taskDetection: null,
           cognitiveState: null,
@@ -2995,10 +3101,22 @@ convRouter.post("/:id/turn", asyncRoute(async (req: AuthedRequest, res) => {
   const conversationModel = conversationModelFromDoc(conv);
   if (isPureChatArm(experimentArm)) {
     const recentTurns = await loadRecentTurnsForPlainChat({ conversationId: oid, userId, limit: 18 });
+    const carryover =
+      recentTurns.length === 0
+        ? await loadPlainChatCarryoverContext({
+            userId,
+            conversationId: String(oid),
+            planningBootstrapHints: readPlanningBootstrapHints((conv as any).planningBootstrapHints),
+          })
+        : null;
     const assistantText = await generatePlainAssistantTextNonStreaming({
       userText,
       recentTurns,
-      systemPrompt: conv.systemPrompt,
+      systemPrompt: withPlainChatCarryoverPrompt({
+        locale,
+        baseSystemPrompt: conv.systemPrompt,
+        carryover,
+      }),
       locale,
       model: conversationModel,
     });
@@ -3374,6 +3492,14 @@ convRouter.post("/:id/turn/stream", asyncRoute(async (req: AuthedRequest, res) =
   const conversationModel = conversationModelFromDoc(conv);
   if (isPureChatArm(experimentArm)) {
     const recentTurns = await loadRecentTurnsForPlainChat({ conversationId: oid, userId, limit: 18 });
+    const carryover =
+      recentTurns.length === 0
+        ? await loadPlainChatCarryoverContext({
+            userId,
+            conversationId: String(oid),
+            planningBootstrapHints: readPlanningBootstrapHints((conv as any).planningBootstrapHints),
+          })
+        : null;
     const graph = conv?.graph && typeof conv.graph === "object" ? conv.graph : emptyGraph(String(oid));
     const graphPatch = emptyGraphPatch();
 
@@ -3405,7 +3531,11 @@ convRouter.post("/:id/turn/stream", asyncRoute(async (req: AuthedRequest, res) =
       assistantText = await streamPlainAssistantText({
         userText,
         recentTurns,
-        systemPrompt: conv.systemPrompt,
+        systemPrompt: withPlainChatCarryoverPrompt({
+          locale,
+          baseSystemPrompt: conv.systemPrompt,
+          carryover,
+        }),
         locale,
         model: conversationModel,
         signal: ac.signal,
@@ -3422,7 +3552,11 @@ convRouter.post("/:id/turn/stream", asyncRoute(async (req: AuthedRequest, res) =
           assistantText = await generatePlainAssistantTextNonStreaming({
             userText,
             recentTurns,
-            systemPrompt: conv.systemPrompt,
+            systemPrompt: withPlainChatCarryoverPrompt({
+              locale,
+              baseSystemPrompt: conv.systemPrompt,
+              carryover,
+            }),
             locale,
             model: conversationModel,
           });
