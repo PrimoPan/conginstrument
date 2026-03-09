@@ -10,12 +10,17 @@ import { normalizeConversationModel, type ConversationModel } from "../server/co
 import {
   DEFAULT_EXPERIMENT_ARM,
   emptyMotifReasoningView,
+  isPureChatControlArm,
   isMotifEnabledForArm,
   normalizeExperimentArm,
   sanitizeMotifPayloadForArm,
   type ExperimentArm,
 } from "../server/experimentArm.js";
-import { generateAssistantTextNonStreaming } from "../services/chatResponder.js";
+import {
+  generateAssistantTextNonStreaming,
+  generatePlainAssistantTextNonStreaming,
+  streamPlainAssistantText,
+} from "../services/chatResponder.js";
 import { buildCognitiveModel } from "../services/cognitiveModel.js";
 import { buildConflictGatePayload } from "../services/motif/conflictGate.js";
 import {
@@ -94,12 +99,22 @@ function allowMotifFeatures(experimentArm: ExperimentArm): boolean {
   return isMotifEnabledForArm(experimentArm);
 }
 
+function isPureChatArm(experimentArm: ExperimentArm): boolean {
+  return isPureChatControlArm(experimentArm);
+}
+
 function defaultSystemPrompt(locale: AppLocale, experimentArm: ExperimentArm = DEFAULT_EXPERIMENT_ARM) {
   if (isEnglishLocale(locale)) {
+    if (isPureChatArm(experimentArm)) {
+      return `You are CogInstrument's control assistant. Reply as a normal helpful assistant in plain chat. Do not mention graphs, motifs, task state, planning state, or experiment grouping.`;
+    }
     if (!allowMotifFeatures(experimentArm)) {
       return `You are CogInstrument's assistant. Help the user complete the current trip-planning task and ask focused clarification questions about goals, constraints, preferences, and logistics. Keep the conversation grounded in the current task only.`;
     }
     return `You are CogInstrument's assistant. Help the user complete the current task and ask focused clarification questions about goals, constraints, and preferences. Each conversation is isolated by default; only use cross-task motifs when the user has explicitly adopted them.`;
+  }
+  if (isPureChatArm(experimentArm)) {
+    return `你是CogInstrument的对照组助手。请按普通LLM对话方式自然回答，不要提及图谱、motif、任务状态、规划状态或实验分组。`;
   }
   if (!allowMotifFeatures(experimentArm)) {
     return `你是CogInstrument的助手，目标是帮助用户完成当前旅行规划任务，并通过提问澄清用户的目标、约束、偏好和执行细节。请始终聚焦当前任务本身。`;
@@ -109,6 +124,10 @@ function defaultSystemPrompt(locale: AppLocale, experimentArm: ExperimentArm = D
 
 function emptyGraph(conversationId: string): CDG {
   return { id: conversationId, version: 0, nodes: [], edges: [] };
+}
+
+function emptyGraphPatch() {
+  return { ops: [] as any[] };
 }
 
 function parseObjectId(id: string): ObjectId | null {
@@ -1237,6 +1256,49 @@ async function loadRecentUserTextsForState(params: {
     .filter(Boolean);
 }
 
+async function loadRecentTurnsForPlainChat(params: {
+  conversationId: ObjectId;
+  userId: ObjectId;
+  limit?: number;
+}) {
+  const docs = await loadRecentTurnsForPlan({
+    conversationId: params.conversationId,
+    userId: params.userId,
+    limit: params.limit || 18,
+    sortDirection: 1,
+  });
+  return docs.flatMap((t) => {
+    const items: Array<{ role: "user" | "assistant"; content: string }> = [];
+    const userText = String(t.userText || "").trim();
+    const assistantText = String(t.assistantText || "").trim();
+    if (userText) items.push({ role: "user", content: userText });
+    if (assistantText) items.push({ role: "assistant", content: assistantText });
+    return items;
+  });
+}
+
+function buildPureChatModel(locale: AppLocale, conversationId: string, conv?: any) {
+  const graph = conv?.graph && typeof conv.graph === "object" ? conv.graph : emptyGraph(conversationId);
+  const model = buildCognitiveModel({
+    graph,
+    prevConcepts: [],
+    baseConcepts: [],
+    baseMotifs: [],
+    baseMotifLinks: [],
+    baseContexts: [],
+    locale,
+  });
+  model.graph = graph;
+  model.concepts = [];
+  model.motifs = [];
+  model.motifLinks = [];
+  model.motifGraph = { motifs: [], motifLinks: [] };
+  model.motifReasoningView = emptyMotifReasoningView();
+  model.contexts = [];
+  model.validationStatus = "unasked";
+  return model;
+}
+
 function latestArchivedTaskClosedAt(plan: TravelPlanState | null | undefined): string | undefined {
   const history = Array.isArray(plan?.task_history) ? plan?.task_history || [] : [];
   const last = history[history.length - 1];
@@ -2006,6 +2068,53 @@ convRouter.post("/", asyncRoute(async (req: AuthedRequest, res) => {
   } as any);
 
   const conversationId = String(inserted.insertedId);
+  if (isPureChatArm(experimentArm)) {
+    const graph = emptyGraph(conversationId);
+    await collections.conversations.updateOne(
+      { _id: inserted.insertedId, userId },
+      {
+        $set: {
+          title: requestedTitle,
+          model: conversationModel,
+          graph,
+          concepts: [],
+          motifs: [],
+          motifLinks: [],
+          motifReasoningView: emptyMotifReasoningView(),
+          contexts: [],
+          validationStatus: "unasked",
+          motifTransferState: motifTransferStateForArm(experimentArm, null),
+          motifClarificationState: motifClarificationStateForArm(experimentArm, null),
+          planningBootstrapHints: null,
+          travelPlanState: null,
+          taskDetection: null,
+          cognitiveState: null,
+          portfolioDocumentState: null,
+          taskLifecycle: null,
+          updatedAt: now,
+        },
+      }
+    );
+
+    const safeModel = sanitizeModelForExperimentArm(buildPureChatModel(locale, conversationId, { graph }), experimentArm);
+    return res.json({
+      conversationId,
+      title: requestedTitle,
+      locale,
+      experiment_arm: experimentArm,
+      model: conversationModel,
+      systemPrompt,
+      ...modelPayload(safeModel, experimentArm),
+      travelPlanState: null,
+      taskDetection: null,
+      cognitiveState: null,
+      portfolioDocumentState: null,
+      motifTransferState: null,
+      taskLifecycle: null,
+      transferRecommendationsEnabled: false,
+    });
+  }
+
   const bootstrap = await buildBootstrapGraphAndPlan({
     userId,
     locale,
@@ -2183,6 +2292,26 @@ convRouter.get("/:id", asyncRoute(async (req: AuthedRequest, res) => {
   const taskLifecycle = readTaskLifecycle((conv as any).taskLifecycle);
   const planningBootstrapHints = readPlanningBootstrapHints((conv as any).planningBootstrapHints);
   const nextTransferRecommendationsEnabled = transferRecommendationsEnabled(planningBootstrapHints, experimentArm);
+
+  if (isPureChatArm(experimentArm)) {
+    const safeModel = sanitizeModelForExperimentArm(buildPureChatModel(locale, id, conv), experimentArm);
+    return res.json({
+      conversationId: id,
+      title: conv.title,
+      locale,
+      experiment_arm: experimentArm,
+      model: conversationModel,
+      systemPrompt: conv.systemPrompt,
+      ...modelPayload(safeModel, experimentArm),
+      travelPlanState: null,
+      taskDetection: null,
+      cognitiveState: null,
+      portfolioDocumentState: null,
+      motifTransferState: null,
+      taskLifecycle: null,
+      transferRecommendationsEnabled: false,
+    });
+  }
 
   const model = buildCognitiveModel({
     graph: conv.graph,
@@ -2863,8 +2992,66 @@ convRouter.post("/:id/turn", asyncRoute(async (req: AuthedRequest, res) => {
 
   const locale = normalizeLocale((conv as any).locale);
   const experimentArm = conversationExperimentArm(conv);
-  const motifEnabled = allowMotifFeatures(experimentArm);
   const conversationModel = conversationModelFromDoc(conv);
+  if (isPureChatArm(experimentArm)) {
+    const recentTurns = await loadRecentTurnsForPlainChat({ conversationId: oid, userId, limit: 18 });
+    const assistantText = await generatePlainAssistantTextNonStreaming({
+      userText,
+      recentTurns,
+      systemPrompt: conv.systemPrompt,
+      locale,
+      model: conversationModel,
+    });
+    const now = new Date();
+    const graph = conv?.graph && typeof conv.graph === "object" ? conv.graph : emptyGraph(String(oid));
+    const graphPatch = emptyGraphPatch();
+    await collections.turns.insertOne({
+      conversationId: oid,
+      userId,
+      createdAt: now,
+      userText,
+      assistantText,
+      graphPatch,
+      graphVersion: Number(graph.version || 0),
+    } as any);
+    await collections.conversations.updateOne(
+      { _id: oid, userId },
+      {
+        $set: {
+          updatedAt: now,
+          graph,
+          concepts: [],
+          motifs: [],
+          motifLinks: [],
+          motifReasoningView: emptyMotifReasoningView(),
+          contexts: [],
+          travelPlanState: null,
+          taskDetection: null,
+          cognitiveState: null,
+          portfolioDocumentState: null,
+          motifTransferState: null,
+          motifClarificationState: null,
+          taskLifecycle: null,
+        },
+      }
+    );
+    const safeModel = sanitizeModelForExperimentArm(buildPureChatModel(locale, String(oid), { graph }), experimentArm);
+    return res.json({
+      assistantText,
+      graphPatch,
+      experiment_arm: experimentArm,
+      model: conversationModel,
+      ...modelPayload(safeModel, experimentArm),
+      travelPlanState: null,
+      taskDetection: null,
+      cognitiveState: null,
+      portfolioDocumentState: null,
+      motifTransferState: null,
+      taskLifecycle: null,
+      transferRecommendationsEnabled: false,
+    });
+  }
+  const motifEnabled = allowMotifFeatures(experimentArm);
   let motifTransferState = motifTransferStateForArm(experimentArm, (conv as any).motifTransferState);
   let motifClarificationState = motifClarificationStateForArm(experimentArm, (conv as any).motifClarificationState);
   let taskLifecycle = readTaskLifecycle((conv as any).taskLifecycle);
@@ -3184,8 +3371,132 @@ convRouter.post("/:id/turn/stream", asyncRoute(async (req: AuthedRequest, res) =
 
   const locale = normalizeLocale((conv as any).locale);
   const experimentArm = conversationExperimentArm(conv);
-  const motifEnabled = allowMotifFeatures(experimentArm);
   const conversationModel = conversationModelFromDoc(conv);
+  if (isPureChatArm(experimentArm)) {
+    const recentTurns = await loadRecentTurnsForPlainChat({ conversationId: oid, userId, limit: 18 });
+    const graph = conv?.graph && typeof conv.graph === "object" ? conv.graph : emptyGraph(String(oid));
+    const graphPatch = emptyGraphPatch();
+
+    res.status(200);
+    res.setHeader("Content-Type", "text/event-stream; charset=utf-8");
+    res.setHeader("Cache-Control", "no-cache, no-transform");
+    res.setHeader("Connection", "keep-alive");
+    res.setHeader("X-Accel-Buffering", "no");
+    (res as any).flushHeaders?.();
+
+    sseSend(res, "start", { conversationId: id, graphVersion: Number(graph.version || 0) });
+
+    const pingTimer = setInterval(() => {
+      sseSend(res, "ping", { t: Date.now() });
+    }, 15000);
+
+    const ac = new AbortController();
+    let closed = false;
+    req.on("close", () => {
+      closed = true;
+      clearInterval(pingTimer);
+      ac.abort();
+    });
+
+    let assistantText = "";
+    let sentAnyToken = false;
+
+    try {
+      assistantText = await streamPlainAssistantText({
+        userText,
+        recentTurns,
+        systemPrompt: conv.systemPrompt,
+        locale,
+        model: conversationModel,
+        signal: ac.signal,
+        onToken: (token) => {
+          if (closed) return;
+          if (typeof token !== "string" || token.length === 0) return;
+          sentAnyToken = true;
+          sseSend(res, "token", { token });
+        },
+      });
+    } catch (e: any) {
+      if (!sentAnyToken && !closed) {
+        try {
+          assistantText = await generatePlainAssistantTextNonStreaming({
+            userText,
+            recentTurns,
+            systemPrompt: conv.systemPrompt,
+            locale,
+            model: conversationModel,
+          });
+          if (assistantText) {
+            sentAnyToken = true;
+            sseSend(res, "token", { token: assistantText });
+          }
+        } catch (fallbackError: any) {
+          sseSend(res, "error", { message: fallbackError?.message || e?.message || "stream failed" });
+          clearInterval(pingTimer);
+          res.end();
+          return;
+        }
+      } else if (!closed) {
+        sseSend(res, "error", { message: e?.message || "stream failed" });
+        clearInterval(pingTimer);
+        res.end();
+        return;
+      }
+    }
+
+    if (closed) return;
+
+    const now = new Date();
+    await collections.turns.insertOne({
+      conversationId: oid,
+      userId,
+      createdAt: now,
+      userText,
+      assistantText,
+      graphPatch,
+      graphVersion: Number(graph.version || 0),
+    } as any);
+    await collections.conversations.updateOne(
+      { _id: oid, userId },
+      {
+        $set: {
+          updatedAt: now,
+          graph,
+          concepts: [],
+          motifs: [],
+          motifLinks: [],
+          motifReasoningView: emptyMotifReasoningView(),
+          contexts: [],
+          travelPlanState: null,
+          taskDetection: null,
+          cognitiveState: null,
+          portfolioDocumentState: null,
+          motifTransferState: null,
+          motifClarificationState: null,
+          taskLifecycle: null,
+        },
+      }
+    );
+    const safeModel = sanitizeModelForExperimentArm(buildPureChatModel(locale, String(oid), { graph }), experimentArm);
+    sseSend(res, "done", {
+      assistantText,
+      graphPatch,
+      experiment_arm: experimentArm,
+      model: conversationModel,
+      ...modelPayload(safeModel, experimentArm),
+      travelPlanState: null,
+      taskDetection: null,
+      cognitiveState: null,
+      portfolioDocumentState: null,
+      motifTransferState: null,
+      taskLifecycle: null,
+      transferRecommendationsEnabled: false,
+    });
+
+    clearInterval(pingTimer);
+    return res.end();
+  }
+  const motifEnabled = allowMotifFeatures(experimentArm);
   let motifTransferState = motifTransferStateForArm(experimentArm, (conv as any).motifTransferState);
   let motifClarificationState = motifClarificationStateForArm(experimentArm, (conv as any).motifClarificationState);
   let taskLifecycle = readTaskLifecycle((conv as any).taskLifecycle);

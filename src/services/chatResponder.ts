@@ -194,6 +194,38 @@ Domain preference (when relevant):
   )}\n${String(extraSystemPrompt).trim()}`.trim();
 }
 
+function buildPlainChatOnlySystemPrompt(locale: AppLocale | undefined, extraSystemPrompt?: string) {
+  const zh = `
+你是一个直接、自然、可靠的中文助手。
+围绕用户当前输入正常对话并给出有帮助的回答。
+
+硬规则：
+1) 只根据当前对话内容回答，不要引入图谱、概念抽取、motif、认知状态、实验分组或任务状态。
+2) 不要假装在做可视化建图、规划状态维护或跨任务迁移。
+3) 没有必要时不要过度结构化，不要把方法论框架强行套到普通问答里。
+4) 语气简洁直接，优先回答用户当前问题。
+`.trim();
+
+  const en = `
+You are a direct, reliable assistant.
+Respond naturally to the user's current message and be helpful.
+
+Hard rules:
+1) Answer only from the current conversation and do not mention graphs, concept extraction, motifs, cognitive state, experiment arms, or task state.
+2) Do not pretend to maintain visualization state, planning state, or cross-task transfer.
+3) Do not over-structure ordinary chat unless the user asks for it.
+4) Keep the tone concise and answer the user's current question first.
+`.trim();
+
+  const base = isEnglishLocale(locale) ? en : zh;
+  if (!extraSystemPrompt) return base;
+  return `${base}\n\n${t(
+    locale,
+    "补充设定：",
+    "Additional instruction:"
+  )}\n${String(extraSystemPrompt).trim()}`.trim();
+}
+
 function graphSummaryForChat(params: {
   graph: CDG;
   model: ReturnType<typeof buildCognitiveModel>;
@@ -453,6 +485,78 @@ export async function generateAssistantTextNonStreaming(params: {
   );
 }
 
+export async function generatePlainAssistantTextNonStreaming(params: {
+  userText: string;
+  recentTurns: Array<{ role: "user" | "assistant"; content: string }>;
+  systemPrompt?: string;
+  locale?: AppLocale;
+  model?: string;
+}): Promise<string> {
+  const safeRecent = normalizeRecentTurns(params.recentTurns);
+  const systemOne = buildPlainChatOnlySystemPrompt(params.locale, params.systemPrompt);
+
+  try {
+    const resp = await createChatCompletionWithTimeout(
+      (signal) =>
+        openai.chat.completions.create(
+          {
+            model: params.model || config.model,
+            messages: [{ role: "system", content: systemOne }, ...safeRecent, { role: "user", content: params.userText }],
+            max_tokens: 900,
+            temperature: 0.7,
+          },
+          { signal }
+        ),
+      CHAT_TIMEOUT_MS
+    );
+
+    const msg = resp.choices?.[0]?.message;
+    const raw = readTextContent(msg?.content);
+    const text = stripMarkdownToText(raw).trim();
+
+    dlog("plain-chat choices=", resp?.choices?.length, "finish=", resp?.choices?.[0]?.finish_reason, "len=", text.length);
+
+    if (text) return text;
+  } catch (err: any) {
+    dlog("plain-chat primary failed:", err?.message || err);
+  }
+
+  const fallbackPrompt = isEnglishLocale(params.locale)
+    ? `Respond helpfully and directly to the user's message.\nUser: ${params.userText}`
+    : `请直接、自然地回答用户这句话，不要引入额外框架。\n用户：${params.userText}`;
+
+  try {
+    const resp2 = await createChatCompletionWithTimeout(
+      (signal) =>
+        openai.chat.completions.create(
+          {
+            model: params.model || config.model,
+            messages: [{ role: "user", content: fallbackPrompt }],
+            max_tokens: 700,
+            temperature: 0.7,
+          },
+          { signal }
+        ),
+      CHAT_TIMEOUT_MS
+    );
+
+    const raw2 = readTextContent(resp2.choices?.[0]?.message?.content);
+    const text2 = stripMarkdownToText(raw2).trim();
+
+    dlog("plain-chat fallback finish=", resp2?.choices?.[0]?.finish_reason, "len=", text2.length);
+
+    if (text2) return text2;
+  } catch (err: any) {
+    dlog("plain-chat fallback failed:", err?.message || err);
+  }
+
+  return t(
+    params.locale,
+    "我在。把你现在想解决的事情直接发给我，我就按普通对话方式继续。",
+    "I am here. Send me what you want to solve, and I will continue in plain chat."
+  );
+}
+
 export async function streamAssistantText(params: {
   graph: CDG;
   userText: string;
@@ -574,6 +678,81 @@ export async function streamAssistantText(params: {
   }
 
   const fallback = await generateAssistantTextNonStreaming(params);
+  await pseudoStreamText({ text: fallback, onToken: params.onToken, signal: params.signal });
+  return fallback;
+}
+
+export async function streamPlainAssistantText(params: {
+  userText: string;
+  recentTurns: Array<{ role: "user" | "assistant"; content: string }>;
+  systemPrompt?: string;
+  locale?: AppLocale;
+  model?: string;
+  onToken: (token: string) => void;
+  signal?: AbortSignal;
+}): Promise<string> {
+  if (STREAM_MODE === "pseudo") {
+    const full = await generatePlainAssistantTextNonStreaming(params);
+    await pseudoStreamText({ text: full, onToken: params.onToken, signal: params.signal });
+    return full;
+  }
+
+  const safeRecent = normalizeRecentTurns(params.recentTurns);
+  const systemOne = buildPlainChatOnlySystemPrompt(params.locale, params.systemPrompt);
+  let full = "";
+  let gotAny = false;
+  const streamController = new AbortController();
+  const combined = composeAbortSignal([params.signal, streamController.signal]);
+  const firstTokenTimer = setTimeout(() => {
+    combined.abort(timeoutError("stream_first_token_timeout", STREAM_FIRST_TOKEN_TIMEOUT_MS));
+  }, STREAM_FIRST_TOKEN_TIMEOUT_MS);
+  const totalTimer = setTimeout(() => {
+    combined.abort(timeoutError("stream_total_timeout", STREAM_TOTAL_TIMEOUT_MS));
+  }, STREAM_TOTAL_TIMEOUT_MS);
+
+  try {
+    const upstream = await openai.chat.completions.create(
+      {
+        model: params.model || config.model,
+        messages: [{ role: "system", content: systemOne }, ...safeRecent, { role: "user", content: params.userText }],
+        stream: true,
+        max_tokens: 900,
+        temperature: 0.7,
+      },
+      { signal: combined.signal }
+    );
+
+    for await (const chunk of upstream as any) {
+      const token = chunk?.choices?.[0]?.delta?.content;
+      if (typeof token === "string" && token.length > 0) {
+        if (!gotAny) clearTimeout(firstTokenTimer);
+        gotAny = true;
+        full += token;
+        params.onToken(token);
+      }
+    }
+
+    const cleaned = stripMarkdownToText(full).trim();
+    if (gotAny && cleaned) {
+      const missing = cleaned.startsWith(full) ? cleaned.slice(full.length) : "";
+      if (missing) params.onToken(missing);
+      return cleaned;
+    }
+  } catch (err) {
+    const cleaned = stripMarkdownToText(full).trim();
+    if (gotAny && cleaned) {
+      const missing = cleaned.startsWith(full) ? cleaned.slice(full.length) : "";
+      if (missing) params.onToken(missing);
+      return cleaned;
+    }
+    throw err;
+  } finally {
+    clearTimeout(firstTokenTimer);
+    clearTimeout(totalTimer);
+    combined.cleanup();
+  }
+
+  const fallback = await generatePlainAssistantTextNonStreaming(params);
   await pseudoStreamText({ text: fallback, onToken: params.onToken, signal: params.signal });
   return fallback;
 }

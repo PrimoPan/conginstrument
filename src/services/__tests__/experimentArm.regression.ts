@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import {
   DEFAULT_EXPERIMENT_ARM,
   emptyMotifReasoningView,
+  isPureChatControlArm,
   isMotifEnabledForArm,
   normalizeExperimentArm,
   sanitizeMotifPayloadForArm,
@@ -28,8 +29,12 @@ run("normalizeExperimentArm accepts compare aliases", () => {
   assert.equal(normalizeExperimentArm("compare"), "compare_concept_only");
   assert.equal(normalizeExperimentArm("compare_concept_only"), "compare_concept_only");
   assert.equal(normalizeExperimentArm("concept_only"), "compare_concept_only");
+  assert.equal(normalizeExperimentArm("control"), "compare_concept_only");
+  assert.equal(normalizeExperimentArm("llm_only"), "compare_concept_only");
   assert.equal(isMotifEnabledForArm("main"), true);
   assert.equal(isMotifEnabledForArm("compare_concept_only"), false);
+  assert.equal(isPureChatControlArm("main"), false);
+  assert.equal(isPureChatControlArm("compare_concept_only"), true);
 });
 
 run("sanitizeMotifPayloadForArm strips motif state for compare arm without mutating concept data", () => {
