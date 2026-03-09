@@ -731,6 +731,28 @@ function motifOverrideFingerprint(motif: any) {
   });
 }
 
+function mergeGraphSaveBaseMotifs(params: {
+  stored?: any[];
+  incoming?: any[];
+}): any[] {
+  const stored = Array.isArray(params.stored) ? params.stored : [];
+  const incoming = Array.isArray(params.incoming) ? params.incoming : [];
+  if (!incoming.length) return stored;
+
+  const merged = new Map<string, any>();
+  for (const motif of stored) {
+    const id = cleanInput((motif as any)?.id, 180) || cleanInput((motif as any)?.motif_id, 180);
+    if (!id) continue;
+    merged.set(id, motif);
+  }
+  for (const motif of incoming) {
+    const id = cleanInput((motif as any)?.id, 180) || cleanInput((motif as any)?.motif_id, 180);
+    if (!id) continue;
+    merged.set(id, motif);
+  }
+  return Array.from(merged.values());
+}
+
 function detectTransferredMotifOverrides(params: {
   previousMotifs: any[];
   nextMotifs: any[];
@@ -2642,11 +2664,14 @@ convRouter.put("/:id/graph", asyncRoute(async (req: AuthedRequest, res) => {
     prevConcepts: conv.concepts || [],
     baseConcepts: Array.isArray(req.body?.concepts) ? req.body.concepts : conv.concepts || [],
     baseMotifs: allowMotifFeatures(experimentArm)
-      ? Array.isArray(req.body?.motifs)
-        ? req.body.motifs
-        : Array.isArray(req.body?.motif_graph?.motifs)
-        ? req.body.motif_graph.motifs
-        : (conv as any).motifs || []
+      ? mergeGraphSaveBaseMotifs({
+          stored: (conv as any).motifs || [],
+          incoming: Array.isArray(req.body?.motifs)
+            ? req.body.motifs
+            : Array.isArray(req.body?.motif_graph?.motifs)
+            ? req.body.motif_graph.motifs
+            : [],
+        })
       : [],
     baseMotifLinks: allowMotifFeatures(experimentArm)
       ? Array.isArray(req.body?.motifLinks)

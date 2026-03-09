@@ -1,6 +1,6 @@
 import type { CDG } from "../core/graph.js";
 import type { ConceptItem } from "./concepts.js";
-import type { ConceptMotif, MotifLifecycleStatus } from "./motif/conceptMotifs.js";
+import { isConceptDeletedDeprecatedMotif, type ConceptMotif, type MotifLifecycleStatus } from "./motif/conceptMotifs.js";
 
 export type ContextStatus = "active" | "uncertain" | "conflicted" | "disabled";
 
@@ -69,10 +69,15 @@ function canonicalMotifStatus(s: MotifLifecycleStatus): "active" | "uncertain" |
   return "cancelled";
 }
 
+function contextRelevantMotifs(motifs: ConceptMotif[]): ConceptMotif[] {
+  return (motifs || []).filter((m) => m.status !== "cancelled" && !isConceptDeletedDeprecatedMotif(m));
+}
+
 function contextStatusFromMotifs(motifs: ConceptMotif[], paused: boolean): ContextStatus {
   if (paused) return "disabled";
-  if (!motifs.length) return "active";
-  const statuses = motifs.map((m) => canonicalMotifStatus(m.status));
+  const relevant = contextRelevantMotifs(motifs);
+  if (!relevant.length) return "active";
+  const statuses = relevant.map((m) => canonicalMotifStatus(m.status));
   if (statuses.some((s) => s === "deprecated")) return "conflicted";
   if (statuses.some((s) => s === "uncertain")) return "uncertain";
   const activeCount = statuses.filter((s) => s === "active").length;
@@ -82,9 +87,9 @@ function contextStatusFromMotifs(motifs: ConceptMotif[], paused: boolean): Conte
 }
 
 function contextConfidence(motifs: ConceptMotif[]): number {
-  if (!motifs.length) return 0.68;
-  const scored = motifs
-    .filter((m) => m.status !== "cancelled")
+  const relevant = contextRelevantMotifs(motifs);
+  if (!relevant.length) return 0.68;
+  const scored = relevant
     .map((m) => clamp01(m.confidence, 0.72) * (m.status === "active" ? 1 : m.status === "uncertain" ? 0.82 : 0.62));
   if (!scored.length) return 0.62;
   return clamp01(scored.reduce((a, b) => a + b, 0) / scored.length, 0.7);
@@ -92,7 +97,7 @@ function contextConfidence(motifs: ConceptMotif[]): number {
 
 function buildOpenQuestions(motifs: ConceptMotif[], max = 4): string[] {
   const questions: string[] = [];
-  for (const m of motifs) {
+  for (const m of contextRelevantMotifs(motifs)) {
     if (m.status === "uncertain") {
       questions.push(`请确认：${cleanText(m.title, 68)}`);
     } else if (m.status === "deprecated") {
@@ -169,7 +174,7 @@ function destinationContexts(params: {
   const destinations = (params.concepts || []).filter((c) => c.family === "destination").slice(0, 8);
 
   for (const d of destinations) {
-    const motifPool = (params.motifs || []).filter((m) => (m.conceptIds || []).includes(d.id) && m.status !== "cancelled");
+    const motifPool = contextRelevantMotifs(params.motifs || []).filter((m) => (m.conceptIds || []).includes(d.id));
     const motifPoolSorted = motifPool
       .slice()
       .sort((a, b) => motifStatusRank(b.status) - motifStatusRank(a.status) || b.confidence - a.confidence || a.id.localeCompare(b.id));
@@ -219,8 +224,7 @@ function globalContext(params: {
 }): ContextItem {
   const now = new Date().toISOString();
   const concepts = params.concepts || [];
-  const motifs = (params.motifs || [])
-    .filter((m) => m.status !== "cancelled")
+  const motifs = contextRelevantMotifs(params.motifs || [])
     .slice()
     .sort((a, b) => motifStatusRank(b.status) - motifStatusRank(a.status) || b.confidence - a.confidence || a.id.localeCompare(b.id));
 

@@ -136,7 +136,7 @@ run("motif graph produced before concept projection payload", () => {
   assert.ok(model.conceptGraph && Array.isArray(model.conceptGraph.nodes));
 });
 
-run("buildCognitiveModel should drop deleted-node concepts and linked motifs on graph save", () => {
+run("buildCognitiveModel should deprecate concept-deleted motifs and detach their links on graph save", () => {
   const initial = buildCognitiveModel({
     graph: {
       id: "g_deleted_budget",
@@ -156,22 +156,52 @@ run("buildCognitiveModel should drop deleted-node concepts and linked motifs on 
           id: "n_budget",
           type: "factual_assertion",
           layer: "requirement",
-          key: "slot:budget_spent",
-          statement: "已花预算：1元",
+          key: "slot:budget",
+          statement: "预算上限：10000元",
           status: "confirmed",
           confidence: 0.86,
           importance: 0.84,
         },
+        {
+          id: "n_duration",
+          type: "factual_assertion",
+          layer: "requirement",
+          key: "slot:duration_total",
+          statement: "总时长：5天",
+          status: "confirmed",
+          confidence: 0.88,
+          importance: 0.82,
+        },
       ],
-      edges: [],
+      edges: [
+        { id: "e_budget_goal", from: "n_budget", to: "n_goal", type: "enable", confidence: 0.84 },
+        { id: "e_duration_goal", from: "n_duration", to: "n_goal", type: "constraint", confidence: 0.86 },
+      ],
     } as any,
     locale: "zh-CN",
   });
 
   const goalConcept = initial.concepts.find((concept) => concept.nodeIds.includes("n_goal"));
   const deletedConcept = initial.concepts.find((concept) => concept.nodeIds.includes("n_budget"));
+  const durationConcept = initial.concepts.find((concept) => concept.nodeIds.includes("n_duration"));
   assert.ok(goalConcept, "expected goal concept in initial model");
   assert.ok(deletedConcept, "expected budget concept in initial model");
+  assert.ok(durationConcept, "expected duration concept in initial model");
+
+  const deletedMotif = initial.motifs.find(
+    (motif) =>
+      motif.motifType === "pair" &&
+      motif.anchorConceptId === goalConcept!.id &&
+      motif.conceptIds.includes(deletedConcept!.id)
+  );
+  const keptMotif = initial.motifs.find(
+    (motif) =>
+      motif.motifType === "pair" &&
+      motif.anchorConceptId === goalConcept!.id &&
+      motif.conceptIds.includes(durationConcept!.id)
+  );
+  assert.ok(deletedMotif, "expected deleted concept motif in initial model");
+  assert.ok(keptMotif, "expected surviving motif in initial model");
 
   const next = buildCognitiveModel({
     graph: {
@@ -188,45 +218,119 @@ run("buildCognitiveModel should drop deleted-node concepts and linked motifs on 
           confidence: 0.9,
           importance: 0.9,
         },
+        {
+          id: "n_duration",
+          type: "factual_assertion",
+          layer: "requirement",
+          key: "slot:duration_total",
+          statement: "总时长：5天",
+          status: "confirmed",
+          confidence: 0.88,
+          importance: 0.82,
+        },
       ],
-      edges: [],
+      edges: [{ id: "e_duration_goal", from: "n_duration", to: "n_goal", type: "constraint", confidence: 0.86 }],
     } as any,
     prevConcepts: initial.concepts,
     baseConcepts: initial.concepts,
-    baseMotifs: [
+    baseMotifs: initial.motifs,
+    baseMotifLinks: [
       {
-        id: "m_budget_goal",
-        motif_id: "m_budget_goal",
-        motif_type: "enable",
-        motifType: "pair",
-        templateKey: "manual:enable",
-        relation: "enable",
-        dependencyClass: "enable",
-        conceptIds: [deletedConcept!.id, goalConcept!.id],
-        anchorConceptId: goalConcept!.id,
-        title: "预算会影响去京都",
-        description: "manual carry-over motif",
+        id: "ml_deleted_budget",
+        fromMotifId: deletedMotif!.id,
+        toMotifId: keptMotif!.id,
+        type: "supports",
         confidence: 0.82,
-        supportEdgeIds: [],
-        supportNodeIds: ["n_budget", "n_goal"],
-        status: "active",
-        novelty: "new",
+        source: "user",
         updatedAt: "2026-03-09T00:00:00.000Z",
-        aliases: ["m_budget_goal"],
-        concept_bindings: [deletedConcept!.id, goalConcept!.id],
-        scope: "global",
-        roles: { sources: [deletedConcept!.id], target: goalConcept!.id },
-        resolved: true,
-        resolvedBy: "user",
-        resolvedAt: "2026-03-09T00:00:00.000Z",
       },
     ],
     locale: "zh-CN",
   });
 
   assert.equal(next.concepts.some((concept) => concept.id === deletedConcept!.id), false);
-  assert.equal(next.motifs.some((motif) => motif.id === "m_budget_goal"), false);
-  assert.equal(next.motifs.some((motif) => (motif.conceptIds || []).includes(deletedConcept!.id)), false);
+  const deprecated = next.motifs.find((motif) => motif.id === deletedMotif!.id);
+  assert.ok(deprecated, "expected deleted-concept motif to remain as deprecated history");
+  assert.equal(deprecated?.status, "deprecated");
+  assert.equal(String(deprecated?.statusReason || "").startsWith("concept_deleted:"), true);
+  assert.equal(next.motifLinks.some((link) => link.fromMotifId === deletedMotif!.id || link.toMotifId === deletedMotif!.id), false);
+});
+
+run("concept edits should propagate uncertainty to dependent motifs", () => {
+  const initial = buildCognitiveModel({
+    graph: {
+      id: "g_concept_edit_uncertain",
+      version: 1,
+      nodes: [
+        {
+          id: "n_goal",
+          type: "belief",
+          layer: "intent",
+          key: "slot:goal",
+          statement: "意图：去京都玩",
+          status: "confirmed",
+          confidence: 0.92,
+          importance: 0.9,
+        },
+        {
+          id: "n_budget",
+          type: "constraint",
+          layer: "requirement",
+          key: "slot:budget",
+          statement: "预算上限：10000元",
+          status: "confirmed",
+          confidence: 0.9,
+          importance: 0.84,
+        },
+      ],
+      edges: [{ id: "e_budget_goal", from: "n_budget", to: "n_goal", type: "constraint", confidence: 0.86 }],
+    } as any,
+    locale: "zh-CN",
+  });
+
+  const baseline = initial.motifs.find((motif) => motif.motifType === "pair");
+  assert.ok(baseline, "expected baseline motif");
+  assert.equal(baseline?.status, "active");
+
+  const next = buildCognitiveModel({
+    graph: {
+      id: "g_concept_edit_uncertain",
+      version: 2,
+      nodes: [
+        {
+          id: "n_goal",
+          type: "belief",
+          layer: "intent",
+          key: "slot:goal",
+          statement: "意图：去京都玩",
+          status: "confirmed",
+          confidence: 0.92,
+          importance: 0.9,
+        },
+        {
+          id: "n_budget",
+          type: "constraint",
+          layer: "requirement",
+          key: "slot:budget",
+          statement: "预算上限：6000元",
+          status: "confirmed",
+          confidence: 0.9,
+          importance: 0.84,
+        },
+      ],
+      edges: [{ id: "e_budget_goal", from: "n_budget", to: "n_goal", type: "constraint", confidence: 0.86 }],
+    } as any,
+    prevConcepts: initial.concepts,
+    baseConcepts: initial.concepts,
+    baseMotifs: initial.motifs,
+    baseMotifLinks: initial.motifLinks,
+    locale: "zh-CN",
+  });
+
+  const propagated = next.motifs.find((motif) => motif.id === baseline!.id);
+  assert.ok(propagated, "expected propagated motif after concept edit");
+  assert.equal(propagated?.status, "uncertain");
+  assert.equal(String(propagated?.statusReason || "").includes("concept_changed:"), true);
 });
 
 run("motif topology link normalization and alias redirection", () => {

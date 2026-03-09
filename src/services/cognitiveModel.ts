@@ -182,6 +182,7 @@ export function runMotifGenerationChain(params: {
   const motifsPass1 = reconcileMotifsWithGraph({
     graph: graphWithConceptStatePass1,
     concepts: nextConceptsDraftPass1,
+    prevConcepts: params.prevConcepts,
     baseMotifs: params.baseMotifs,
     locale: params.locale,
   });
@@ -210,6 +211,7 @@ export function runMotifGenerationChain(params: {
     ? reconcileMotifsWithGraph({
         graph: graphWithConceptState,
         concepts: nextConceptsDraft,
+        prevConcepts: params.prevConcepts,
         baseMotifs: params.baseMotifs,
         locale: params.locale,
       })

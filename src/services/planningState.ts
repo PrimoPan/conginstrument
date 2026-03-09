@@ -356,6 +356,8 @@ function mapClarificationQuestions(params: {
   for (const m of params.motifs || []) {
     const status = clean(m?.status, 24).toLowerCase();
     if (status !== "uncertain" && status !== "deprecated") continue;
+    const reason = clean(m?.statusReason, 160).toLowerCase();
+    if (reason.startsWith("concept_deleted:")) continue;
     const title = clean(m?.title, 120) || clean(m?.motif_type_title, 120) || clean(m?.id, 80);
     if (!title) continue;
     out.push(

@@ -223,9 +223,33 @@ function normalizeMotifLifecycleStatus(raw: any, fallback: MotifLifecycleStatus 
   return fallback;
 }
 
+function conceptChangeFingerprint(c: ConceptItem | undefined): string {
+  if (!c) return "";
+  return [
+    cleanText(c.semanticKey, 180).toLowerCase(),
+    cleanText(c.title, 120).toLowerCase(),
+    cleanText(c.description, 220).toLowerCase(),
+    cleanText(c.family, 40).toLowerCase(),
+    cleanText(c.kind, 40).toLowerCase(),
+    cleanText(c.polarity, 24).toLowerCase(),
+    cleanText(c.scope, 64).toLowerCase(),
+    clamp01(c.score, 0.7).toFixed(2),
+    c.paused ? "paused" : "active",
+    c.locked ? "locked" : "unlocked",
+    uniq((c.nodeIds || []).slice().sort(), 24).join("|"),
+  ].join("::");
+}
+
 function isInactiveMotifStatus(raw: any): boolean {
   const s = normalizeMotifLifecycleStatus(raw, "active");
   return s === "cancelled" || s === "disabled";
+}
+
+export function isConceptDeletedDeprecatedMotif(
+  motif: Pick<ConceptMotif, "status" | "statusReason">
+): boolean {
+  if (normalizeMotifLifecycleStatus(motif.status, "active") !== "deprecated") return false;
+  return cleanText(motif.statusReason, 180).toLowerCase().startsWith("concept_deleted:");
 }
 
 function t(locale: AppLocale | undefined, zh: string, en: string): string {
@@ -419,6 +443,14 @@ function motifReuseInfo(m: ConceptMotif, conceptById: Map<string, ConceptItem>):
 }
 
 function applyMotifReuseClassification(motif: ConceptMotif, conceptById: Map<string, ConceptItem>): ConceptMotif {
+  if (isConceptDeletedDeprecatedMotif(motif)) {
+    return {
+      ...motif,
+      reuseClass: motif.reuseClass || "context_specific",
+      reuseReason: motif.reuseReason || "concept_deleted",
+      motif_instance_status: "deprecated",
+    };
+  }
   const info = motifReuseInfo(motif, conceptById);
   const normalizedUserStatus = normalizeMotifLifecycleStatus(motif.status, "active");
   if (motif.resolvedBy === "user" && motif.resolved && isUserEditableStatus(normalizedUserStatus)) {
@@ -501,6 +533,40 @@ function familyLabel(family: ConceptItem["family"], locale?: AppLocale): string 
 
 function conceptScore(c: ConceptItem): number {
   return clamp01(c.score, 0.72);
+}
+
+function normalizeConceptsForMotifDelta(raw: any): ConceptItem[] {
+  if (!Array.isArray(raw)) return [];
+  const out: ConceptItem[] = [];
+  for (const item of raw) {
+    if (!item || typeof item !== "object") continue;
+    const id = cleanText((item as any)?.id, 120);
+    if (!id) continue;
+    out.push({
+      id,
+      kind: cleanText((item as any)?.kind, 32) as ConceptItem["kind"],
+      validationStatus: cleanText((item as any)?.validationStatus || (item as any)?.validation_status, 24) as ConceptItem["validationStatus"],
+      extractionStage: cleanText((item as any)?.extractionStage || (item as any)?.extraction_stage, 24) as ConceptItem["extractionStage"],
+      polarity: cleanText((item as any)?.polarity, 24) === "negative" ? "negative" : "positive",
+      scope: cleanText((item as any)?.scope, 64) || "global",
+      family: cleanText((item as any)?.family, 40) as ConceptItem["family"],
+      semanticKey: cleanText((item as any)?.semanticKey, 180),
+      title: cleanText((item as any)?.title, 120),
+      description: cleanText((item as any)?.description, 220),
+      score: clamp01((item as any)?.score, 0.7),
+      nodeIds: uniq(
+        (Array.isArray((item as any)?.nodeIds) ? (item as any).nodeIds : []).map((nodeId: any) => cleanText(nodeId, 100)),
+        24
+      ),
+      primaryNodeId: cleanText((item as any)?.primaryNodeId, 100) || undefined,
+      evidenceTerms: [],
+      sourceMsgIds: [],
+      locked: !!(item as any)?.locked,
+      paused: !!(item as any)?.paused,
+      updatedAt: cleanText((item as any)?.updatedAt, 48) || new Date().toISOString(),
+    });
+  }
+  return out;
 }
 
 function conceptSemanticKey(c: ConceptItem | undefined): string {
@@ -1748,6 +1814,52 @@ function inferBaseStatus(m: ConceptMotif, prev: ConceptMotif | undefined, concep
     event: "evidence_up",
     fallbackReason: "evidence_stable",
   });
+}
+
+function changedConceptIdsForMotif(params: {
+  motif: Pick<ConceptMotif, "conceptIds">;
+  conceptById: Map<string, ConceptItem>;
+  prevConceptById: Map<string, ConceptItem>;
+}): string[] {
+  const out: string[] = [];
+  for (const conceptId of uniq((params.motif.conceptIds || []).slice(), 12)) {
+    const current = params.conceptById.get(conceptId);
+    const prev = params.prevConceptById.get(conceptId);
+    if (!current || !prev) continue;
+    if (conceptChangeFingerprint(current) === conceptChangeFingerprint(prev)) continue;
+    out.push(conceptId);
+  }
+  return out;
+}
+
+function applyConceptChangePropagation(params: {
+  current: ConceptMotif;
+  prev?: ConceptMotif;
+  conceptById: Map<string, ConceptItem>;
+  prevConceptById: Map<string, ConceptItem>;
+}): ConceptMotif {
+  const { current, prev } = params;
+  if (!prev) return current;
+  const status = normalizeMotifLifecycleStatus(current.status, "active");
+  if (status === "disabled" || status === "cancelled") return current;
+
+  const changedConceptIds = changedConceptIdsForMotif({
+    motif: current,
+    conceptById: params.conceptById,
+    prevConceptById: params.prevConceptById,
+  });
+  if (!changedConceptIds.length) return current;
+
+  const reason = `concept_changed:${changedConceptIds.join(",")}`;
+  return {
+    ...current,
+    status: status === "deprecated" ? "deprecated" : "uncertain",
+    statusReason: appendReason(current.statusReason, reason),
+    state_transition_reason: appendReason(current.state_transition_reason, reason),
+    resolved: false,
+    resolvedBy: undefined,
+    resolvedAt: undefined,
+  };
 }
 
 function isUserEditableStatus(status: MotifLifecycleStatus | undefined): status is "active" | "disabled" {
@@ -3596,6 +3708,7 @@ export function enforceCausalEdgeCoverage(params: {
 export function reconcileMotifsWithGraph(params: {
   graph: CDG;
   concepts: ConceptItem[];
+  prevConcepts?: any;
   baseMotifs?: any;
   locale?: AppLocale;
 }): ConceptMotif[] {
@@ -3610,6 +3723,9 @@ export function reconcileMotifsWithGraph(params: {
   const base = normalizeMotifs(params.baseMotifs);
   const baseById = new Map(base.map((m) => [m.id, m]));
   const conceptById = new Map((params.concepts || []).map((c) => [c.id, c]));
+  const prevConceptById = new Map(
+    normalizeConceptsForMotifDelta(params.prevConcepts).map((c) => [c.id, c] as const)
+  );
 
   const mergedDerived = derived.map((m) => {
     const prev = baseById.get(m.id);
@@ -3635,13 +3751,19 @@ export function reconcileMotifsWithGraph(params: {
       prev,
       conceptById,
     });
+    const withConceptPropagation = applyConceptChangePropagation({
+      current: withUserOverlay,
+      prev,
+      conceptById,
+      prevConceptById,
+    });
     const changed =
       !!prev &&
-      (Math.abs((prev.confidence || 0) - (withUserOverlay.confidence || 0)) >= 0.04 ||
-        isSupportChanged(prev, withUserOverlay) ||
-        motifEditableSignature(prev) !== motifEditableSignature(withUserOverlay));
+      (Math.abs((prev.confidence || 0) - (withConceptPropagation.confidence || 0)) >= 0.04 ||
+        isSupportChanged(prev, withConceptPropagation) ||
+        motifEditableSignature(prev) !== motifEditableSignature(withConceptPropagation));
     return {
-      ...withUserOverlay,
+      ...withConceptPropagation,
       novelty: prev ? (changed ? "updated" : "unchanged") : "new",
     };
   });
@@ -3671,9 +3793,27 @@ export function reconcileMotifsWithGraph(params: {
 
   const derivedIds = new Set(softPrunedCollapsed.map((m) => m.id));
   const manualPersistedFromHistory: ConceptMotif[] = [];
+  const deprecatedFromHistory: ConceptMotif[] = [];
   const cancelledFromHistory: ConceptMotif[] = [];
   for (const old of base) {
     if (derivedIds.has(old.id)) continue;
+    const missingConceptIds = uniq(
+      ((old.conceptIds || old.concept_bindings || []) as string[]).filter((id) => id && !conceptById.has(cleanText(id, 100))),
+      12
+    );
+    if (missingConceptIds.length) {
+      deprecatedFromHistory.push({
+        ...old,
+        status: "deprecated",
+        statusReason: `concept_deleted:${missingConceptIds.join(",")}`,
+        resolved: false,
+        resolvedAt: undefined,
+        resolvedBy: undefined,
+        novelty: "updated",
+        updatedAt: now,
+      });
+      continue;
+    }
     const shouldPersist = shouldPersistUserManualMotif({ motif: old, conceptById });
     if (!shouldPersist) {
       cancelledFromHistory.push({
@@ -3717,7 +3857,7 @@ export function reconcileMotifsWithGraph(params: {
     });
   }
 
-  const all = [...softPrunedCollapsed, ...manualPersistedFromHistory, ...cancelledFromHistory]
+  const all = [...softPrunedCollapsed, ...manualPersistedFromHistory, ...deprecatedFromHistory, ...cancelledFromHistory]
     .map((m) => withCausalSemantics(m, conceptById, params.locale))
     .map((m) => applyMotifReuseClassification(m, conceptById))
     .map((m) => appendStatusHistory(m, baseById.get(m.id)));

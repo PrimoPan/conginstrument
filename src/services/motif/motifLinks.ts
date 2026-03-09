@@ -1,4 +1,4 @@
-import type { ConceptMotif } from "./conceptMotifs.js";
+import { isConceptDeletedDeprecatedMotif, type ConceptMotif } from "./conceptMotifs.js";
 import { normalizeMotifLinkType } from "../../core/graph/schemaAdapters.js";
 
 export type MotifLinkType = "precedes" | "supports" | "conflicts_with" | "refines";
@@ -480,7 +480,9 @@ export function reconcileMotifLinks(params: {
   baseLinks?: any;
 }): MotifLink[] {
   const now = new Date().toISOString();
-  const effectiveMotifs = (params.motifs || []).filter((m) => (m.reuseClass || "reusable") === "reusable");
+  const effectiveMotifs = (params.motifs || []).filter(
+    (m) => (m.reuseClass || "reusable") === "reusable" && !isConceptDeletedDeprecatedMotif(m)
+  );
   const aliasToCanonical = new Map<string, string>();
   for (const m of effectiveMotifs || []) {
     const canonicalId = cleanMotifId(m.id);
