@@ -2635,6 +2635,7 @@ function shouldExposeMotifInOutput(motif: ConceptMotif): boolean {
   const status = normalizeMotifLifecycleStatus(motif.status, "active");
   if (!isInactiveMotifStatus(status)) return true;
   const reason = cleanText(motif.statusReason, 220).toLowerCase();
+  if (reason.includes("not_supported_by_current_graph")) return false;
   if (!reason) return motif.resolvedBy === "user";
   if (motif.resolvedBy === "user") return true;
   if (reason.startsWith("user_")) return true;

@@ -995,6 +995,7 @@ export function normalizeConceptsForGraph(input: any, graph: CDG): ConceptItem[]
       [...rawNodeIds.filter((id) => nodesById.has(id)), ...semanticNodeIds],
       basePrimaryNodeId || undefined
     );
+    if (!mergedNodeIds.length) continue;
     const finalPrimaryNode =
       (basePrimaryNodeId && nodesById.get(basePrimaryNodeId)) ||
       (mergedNodeIds[0] && nodesById.get(mergedNodeIds[0])) ||

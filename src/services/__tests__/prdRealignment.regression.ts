@@ -136,6 +136,99 @@ run("motif graph produced before concept projection payload", () => {
   assert.ok(model.conceptGraph && Array.isArray(model.conceptGraph.nodes));
 });
 
+run("buildCognitiveModel should drop deleted-node concepts and linked motifs on graph save", () => {
+  const initial = buildCognitiveModel({
+    graph: {
+      id: "g_deleted_budget",
+      version: 1,
+      nodes: [
+        {
+          id: "n_goal",
+          type: "belief",
+          layer: "intent",
+          key: "slot:goal",
+          statement: "去京都玩",
+          status: "confirmed",
+          confidence: 0.9,
+          importance: 0.9,
+        },
+        {
+          id: "n_budget",
+          type: "factual_assertion",
+          layer: "requirement",
+          key: "slot:budget_spent",
+          statement: "已花预算：1元",
+          status: "confirmed",
+          confidence: 0.86,
+          importance: 0.84,
+        },
+      ],
+      edges: [],
+    } as any,
+    locale: "zh-CN",
+  });
+
+  const goalConcept = initial.concepts.find((concept) => concept.nodeIds.includes("n_goal"));
+  const deletedConcept = initial.concepts.find((concept) => concept.nodeIds.includes("n_budget"));
+  assert.ok(goalConcept, "expected goal concept in initial model");
+  assert.ok(deletedConcept, "expected budget concept in initial model");
+
+  const next = buildCognitiveModel({
+    graph: {
+      id: "g_deleted_budget",
+      version: 2,
+      nodes: [
+        {
+          id: "n_goal",
+          type: "belief",
+          layer: "intent",
+          key: "slot:goal",
+          statement: "去京都玩",
+          status: "confirmed",
+          confidence: 0.9,
+          importance: 0.9,
+        },
+      ],
+      edges: [],
+    } as any,
+    prevConcepts: initial.concepts,
+    baseConcepts: initial.concepts,
+    baseMotifs: [
+      {
+        id: "m_budget_goal",
+        motif_id: "m_budget_goal",
+        motif_type: "enable",
+        motifType: "pair",
+        templateKey: "manual:enable",
+        relation: "enable",
+        dependencyClass: "enable",
+        conceptIds: [deletedConcept!.id, goalConcept!.id],
+        anchorConceptId: goalConcept!.id,
+        title: "预算会影响去京都",
+        description: "manual carry-over motif",
+        confidence: 0.82,
+        supportEdgeIds: [],
+        supportNodeIds: ["n_budget", "n_goal"],
+        status: "active",
+        novelty: "new",
+        updatedAt: "2026-03-09T00:00:00.000Z",
+        aliases: ["m_budget_goal"],
+        concept_bindings: [deletedConcept!.id, goalConcept!.id],
+        scope: "global",
+        roles: { sources: [deletedConcept!.id], target: goalConcept!.id },
+        resolved: true,
+        resolvedBy: "user",
+        resolvedAt: "2026-03-09T00:00:00.000Z",
+      },
+    ],
+    locale: "zh-CN",
+  });
+
+  assert.equal(next.concepts.some((concept) => concept.id === deletedConcept!.id), false);
+  assert.equal(next.motifs.some((motif) => motif.id === "m_budget_goal"), false);
+  assert.equal(next.motifs.some((motif) => (motif.conceptIds || []).includes(deletedConcept!.id)), false);
+});
+
 run("motif topology link normalization and alias redirection", () => {
   const motifs = [
     {
