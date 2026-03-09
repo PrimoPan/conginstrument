@@ -129,6 +129,12 @@ function normalizeRecentTurns(
     .map((m) => ({ role: m.role, content: m.content.slice(0, maxEach) }));
 }
 
+function normalizePlainChatRecentTurns(recentTurns: Array<{ role: "user" | "assistant"; content: string }>) {
+  return normalizeRecentTurns(recentTurns, config.plainChatMaxCharsPerMessage).slice(
+    -config.plainChatHistoryMessageLimit
+  );
+}
+
 /** Compatible parsing for different gateway wrappers around message.content */
 function readTextContent(content: any): string {
   if (typeof content === "string") return content;
@@ -492,7 +498,7 @@ export async function generatePlainAssistantTextNonStreaming(params: {
   locale?: AppLocale;
   model?: string;
 }): Promise<string> {
-  const safeRecent = normalizeRecentTurns(params.recentTurns);
+  const safeRecent = normalizePlainChatRecentTurns(params.recentTurns);
   const systemOne = buildPlainChatOnlySystemPrompt(params.locale, params.systemPrompt);
 
   try {
@@ -502,7 +508,7 @@ export async function generatePlainAssistantTextNonStreaming(params: {
           {
             model: params.model || config.model,
             messages: [{ role: "system", content: systemOne }, ...safeRecent, { role: "user", content: params.userText }],
-            max_tokens: 900,
+            max_tokens: config.plainChatMaxTokens,
             temperature: 0.7,
           },
           { signal }
@@ -532,7 +538,7 @@ export async function generatePlainAssistantTextNonStreaming(params: {
           {
             model: params.model || config.model,
             messages: [{ role: "user", content: fallbackPrompt }],
-            max_tokens: 700,
+            max_tokens: config.plainChatFallbackMaxTokens,
             temperature: 0.7,
           },
           { signal }
@@ -697,7 +703,7 @@ export async function streamPlainAssistantText(params: {
     return full;
   }
 
-  const safeRecent = normalizeRecentTurns(params.recentTurns);
+  const safeRecent = normalizePlainChatRecentTurns(params.recentTurns);
   const systemOne = buildPlainChatOnlySystemPrompt(params.locale, params.systemPrompt);
   let full = "";
   let gotAny = false;
@@ -716,7 +722,7 @@ export async function streamPlainAssistantText(params: {
         model: params.model || config.model,
         messages: [{ role: "system", content: systemOne }, ...safeRecent, { role: "user", content: params.userText }],
         stream: true,
-        max_tokens: 900,
+        max_tokens: config.plainChatMaxTokens,
         temperature: 0.7,
       },
       { signal: combined.signal }

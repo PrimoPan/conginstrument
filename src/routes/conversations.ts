@@ -3125,7 +3125,11 @@ convRouter.post("/:id/turn", asyncRoute(async (req: AuthedRequest, res) => {
   const experimentArm = conversationExperimentArm(conv);
   const conversationModel = conversationModelFromDoc(conv);
   if (isPureChatArm(experimentArm)) {
-    const recentTurns = await loadRecentTurnsForPlainChat({ conversationId: oid, userId, limit: 18 });
+    const recentTurns = await loadRecentTurnsForPlainChat({
+      conversationId: oid,
+      userId,
+      limit: config.plainChatHistoryTurnLimit,
+    });
     const carryover =
       recentTurns.length === 0
         ? await loadPlainChatCarryoverContext({
@@ -3516,7 +3520,11 @@ convRouter.post("/:id/turn/stream", asyncRoute(async (req: AuthedRequest, res) =
   const experimentArm = conversationExperimentArm(conv);
   const conversationModel = conversationModelFromDoc(conv);
   if (isPureChatArm(experimentArm)) {
-    const recentTurns = await loadRecentTurnsForPlainChat({ conversationId: oid, userId, limit: 18 });
+    const recentTurns = await loadRecentTurnsForPlainChat({
+      conversationId: oid,
+      userId,
+      limit: config.plainChatHistoryTurnLimit,
+    });
     const carryover =
       recentTurns.length === 0
         ? await loadPlainChatCarryoverContext({
