@@ -10,6 +10,7 @@
     "test:motif-compression": "tsx src/services/__tests__/motifCompression.regression.ts",
     "test:motif-clarification": "tsx src/services/__tests__/motifClarification.regression.ts",
     "test:motif-pipeline": "tsx src/services/__tests__/motifPipeline.regression.ts",
+    "test:experiment-arm": "tsx src/services/__tests__/experimentArm.regression.ts",
     "test:motif-transfer-e2e": "tsx src/services/__tests__/motifTransfer.e2e.ts",
     "test:planning-alignment": "tsx src/services/__tests__/planningAlignment.regression.ts",
     "test:multi-task-stability": "tsx src/services/__tests__/multiTaskStability.regression.ts",

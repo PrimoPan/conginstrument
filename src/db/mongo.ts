@@ -1,6 +1,7 @@
 import { MongoClient, Db, Collection, ObjectId } from "mongodb";
 import { config } from "../server/config.js";
 import { DEFAULT_LOCALE, type AppLocale } from "../i18n/locale.js";
+import { DEFAULT_EXPERIMENT_ARM, type ExperimentArm } from "../server/experimentArm.js";
 
 export type UserDoc = {
   _id?: ObjectId;
@@ -22,6 +23,7 @@ export type ConversationDoc = {
   userId: ObjectId;
   title: string;
   locale?: AppLocale;
+  experiment_arm?: ExperimentArm;
   systemPrompt: string;
   model: string;
   createdAt: Date;
@@ -122,6 +124,10 @@ export async function connectMongo() {
     { locale: { $exists: false } as any },
     { $set: { locale: DEFAULT_LOCALE } as any }
   );
+  await collections.conversations.updateMany(
+    { experiment_arm: { $exists: false } as any },
+    { $set: { experiment_arm: DEFAULT_EXPERIMENT_ARM } as any }
+  );
   await collections.motifLibrary.updateMany(
     { locale: { $exists: false } as any },
     { $set: { locale: DEFAULT_LOCALE } as any }
@@ -134,6 +140,7 @@ export async function connectMongo() {
   await collections.sessions.createIndex({ expiresAt: 1 }, { expireAfterSeconds: 0 });
 
   await collections.conversations.createIndex({ userId: 1, updatedAt: -1 });
+  await collections.conversations.createIndex({ userId: 1, experiment_arm: 1, updatedAt: -1 });
   await collections.conversations.createIndex({ userId: 1, locale: 1, updatedAt: -1 });
   await collections.turns.createIndex({ conversationId: 1, createdAt: 1 });
   await collections.turns.createIndex({ conversationId: 1, userId: 1, taskId: 1, createdAt: 1 });
