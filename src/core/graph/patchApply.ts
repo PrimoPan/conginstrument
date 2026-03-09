@@ -21,6 +21,7 @@ import {
   pruneInvalidStructuredNodes,
   pruneNoisyDurationOutliers,
 } from "./common.js";
+import { attachGraphPresentationMeta } from "./presentation.js";
 import { rebalanceIntentTopology } from "./topology.js";
 import { normalizeConceptType } from "./schemaAdapters.js";
 
@@ -184,12 +185,12 @@ export function normalizeGraphSnapshot(input: any, base?: { id?: string; version
     edges.push(normalized);
   }
 
-  return {
+  return attachGraphPresentationMeta({
     id: cleanText(base?.id || input?.id || ""),
     version: Number(base?.version || input?.version || 0),
     nodes,
     edges,
-  };
+  });
 }
 
 /**
@@ -389,12 +390,12 @@ export function applyPatchWithGuards(graph: CDG, patch: GraphPatch) {
       ? 1
       : 0;
 
-  const newGraph: CDG = {
+  const newGraph = attachGraphPresentationMeta({
     ...graph,
     version: graph.version + versionInc,
     nodes: Array.from(nodesById.values()),
     edges: Array.from(edgesById.values()),
-  };
+  });
 
   return {
     newGraph,

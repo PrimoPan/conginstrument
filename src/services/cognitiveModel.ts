@@ -1,4 +1,5 @@
 import type { CDG } from "../core/graph.js";
+import { attachGraphPresentationMeta } from "../core/graph/presentation.js";
 import { conceptTypeMigration, normalizeValidationStatus, type ConceptValidationStatus } from "../core/graph/schemaAdapters.js";
 import {
   applyConceptStateToGraph,
@@ -107,10 +108,10 @@ function normalizeGraphConceptSchema(graph: CDG): CDG {
       revisionHistory: revisionHistory.slice(0, 20),
     };
   });
-  return {
+  return attachGraphPresentationMeta({
     ...graph,
     nodes,
-  };
+  });
 }
 
 function deriveInteractionValidationStatus(concepts: ConceptItem[]): ConceptValidationStatus {

@@ -6,6 +6,7 @@
     "dev:api": "tsx src/services/server.ts",
     "start:api": "NODE_ENV=production tsx src/services/server.ts",
     "test:graph-regression": "tsx src/services/graphUpdater/__tests__/intentSignals.regression.ts",
+    "test:graph-presentation": "tsx src/services/__tests__/graphPresentation.regression.ts",
     "test:prd-realignment": "tsx src/services/__tests__/prdRealignment.regression.ts",
     "test:motif-compression": "tsx src/services/__tests__/motifCompression.regression.ts",
     "test:motif-clarification": "tsx src/services/__tests__/motifClarification.regression.ts",

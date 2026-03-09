@@ -29,6 +29,67 @@ export type RevisionRecord = {
   by?: "user" | "assistant" | "system";
 };
 
+export type GraphSlotFamily =
+  | "none"
+  | "goal"
+  | "destination"
+  | "duration_total"
+  | "duration_city"
+  | "duration_meeting"
+  | "meeting_critical"
+  | "people"
+  | "budget"
+  | "lodging"
+  | "scenic_preference"
+  | "activity_preference"
+  | "health"
+  | "language"
+  | "generic_constraint"
+  | "sub_location"
+  | "conflict"
+  | "other";
+
+export type GraphSemanticLane =
+  | "goal"
+  | "health"
+  | "meeting_critical"
+  | "language"
+  | "people"
+  | "destination"
+  | "duration"
+  | "budget"
+  | "lodging"
+  | "preference_slot"
+  | "constraint_high"
+  | "constraint"
+  | "preference"
+  | "belief"
+  | "factual_assertion"
+  | "other";
+
+export type GraphToneKey = "risk" | "goal" | "preference" | "requirement" | "belief" | "default";
+
+export type GraphPresentationMeta = {
+  slot_family?: GraphSlotFamily;
+  semantic_lane?: GraphSemanticLane;
+  semantic_level?: number;
+  priority_score?: number;
+  is_primary_slot?: boolean;
+  tone_key?: GraphToneKey;
+};
+
+export type GraphNodeValue = Record<string, any> & {
+  ui?: {
+    x?: number;
+    y?: number;
+  };
+  conceptState?: Record<string, any> & {
+    validation_status?: string;
+    paused?: boolean;
+  };
+  presentation?: GraphPresentationMeta;
+};
+
 export type ConceptNode = {
   id: string;
   type: ConceptType;
@@ -42,7 +103,7 @@ export type ConceptNode = {
   importance?: number;
   tags?: string[];
   key?: string;
-  value?: any;
+  value?: GraphNodeValue;
   evidenceIds?: string[];
   sourceMsgIds?: string[];
   motifType?: MotifType;
