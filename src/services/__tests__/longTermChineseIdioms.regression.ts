@@ -114,6 +114,41 @@ async function main() {
     "study idiom fallback"
   );
 
+  let chatbotLikeScenario = defaultLongTermScenarioState({
+    conversationId: `${conversationId}_chatbot_like`,
+    locale: "zh-CN",
+    nowIso: nowIso(10),
+  });
+
+  chatbotLikeScenario = rebuildLongTermScenarioState({
+    previous: chatbotLikeScenario,
+    conversationId: `${conversationId}_chatbot_like`,
+    locale: "zh-CN",
+    activeSegment: "fitness",
+    updatedAt: nowIso(11),
+    recentTurns: [
+      {
+        userText: "我想做个健身计划，但时间被切得很碎，工作日程也不稳定。",
+        assistantText: "",
+      },
+      {
+        userText: "最好有空就练十来分钟，不然我很容易往后拖。",
+        assistantText: "",
+      },
+    ],
+  });
+
+  includesAll(
+    chatbotLikeScenario.segments.fitness.constraints,
+    ["time becomes more limited", "schedule is unstable", "motivation is unstable"],
+    "chatbot-like fitness constraints"
+  );
+  includesAll(
+    chatbotLikeScenario.segments.fitness.adherence_strategy,
+    ["start with short, low-friction sessions", "keep sessions flexible"],
+    "chatbot-like fitness adherence"
+  );
+
   console.log("longTermChineseIdioms.regression: ok");
 }
 

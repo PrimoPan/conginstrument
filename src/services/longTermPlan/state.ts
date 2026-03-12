@@ -362,14 +362,14 @@ function detectConstraints(text: string): string[] {
   const out: string[] = [];
   const src = String(text || "");
   if (
-    /时间(变得)?更?少|时间不够|没时间|抽不出|只能挤出|碎片时间|时间被切碎|时间偏紧|时间更紧|排得更满|多了一门课|多一门课|只有[^，。；\n]{0,12}(小时|分钟)|每周只有[^，。；\n]{0,12}(小时|次)|只剩[^，。；\n]{0,12}(空档|空当)|less time|limited time|busy|only have|only around|one or two hours|1-2 hours|more limited/i.test(
+    /时间(变得)?更?少|时间不够|没时间|抽不出|只能挤出|碎片时间|时间被切碎|时间被切得很碎|时间偏紧|时间更紧|排得更满|多了一门课|多一门课|只有[^，。；\n]{0,12}(小时|分钟)|每周只有[^，。；\n]{0,12}(小时|次)|只剩[^，。；\n]{0,12}(空档|空当)|less time|limited time|busy|only have|only around|one or two hours|1-2 hours|more limited/i.test(
       src
     )
   ) {
     out.push("time becomes more limited");
   }
   if (
-    /拖延|没动力|动力不足|提不起劲|不想开始|总想拖到明天|很难坚持|容易放弃|三天打鱼两天晒网|犯懒|懒得开始|摆烂|总想往后拖|拖着不开始|一想到开始就犯懒|procrastinat|lack motivation|do not feel motivated|don't feel motivated|postpone|put it off|delay/i.test(
+    /拖延|没动力|动力不足|提不起劲|不想开始|总想拖到明天|很难坚持|容易放弃|三天打鱼两天晒网|犯懒|懒得开始|摆烂|总想往后拖|往后拖|拖着不开始|一想到开始就犯懒|procrastinat|lack motivation|do not feel motivated|don't feel motivated|postpone|put it off|delay/i.test(
       src
     )
   ) {
