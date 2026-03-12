@@ -269,6 +269,25 @@ function normalizeTaskState(raw: any, fallback: LongTermTaskState): LongTermTask
   };
 }
 
+export function longTermTaskHasProgress(task: Partial<LongTermTaskState> | null | undefined): boolean {
+  if (!task || typeof task !== "object") return false;
+  if (clean(task.goal_summary, 280)) return true;
+  if (clean(task.weekly_time_or_frequency, 180)) return true;
+  if (uniqStrings(task.methods_or_activities || [], 1).length) return true;
+  if (uniqStrings(task.diet_sleep_adjustments || [], 1).length) return true;
+  if (uniqStrings(task.adherence_strategy || [], 1).length) return true;
+  if (uniqStrings(task.constraints || [], 1).length) return true;
+  if (uniqStrings(task.fallback_plan || [], 1).length) return true;
+  if (cleanMultiline(task.export_ready_text, 4000)) return true;
+  return false;
+}
+
+export function canAdvanceLongTermScenario(scenario: LongTermScenarioState | null | undefined): boolean {
+  if (!scenario || scenario.bundle_status === "completed") return false;
+  const activeTask = scenario.segments?.[scenario.active_segment];
+  return longTermTaskHasProgress(activeTask);
+}
+
 function collectUserTexts(turns: Array<{ userText?: string }>): string[] {
   return (turns || []).map((turn) => clean(turn?.userText, 400)).filter(Boolean);
 }
@@ -343,30 +362,38 @@ function detectConstraints(text: string): string[] {
   const out: string[] = [];
   const src = String(text || "");
   if (
-    /时间(变得)?更?少|时间不够|没时间|抽不出|只能挤出|碎片时间|时间被切碎|时间偏紧|时间更紧|排得更满|多了一门课|多一门课|只有[^，。；\n]{0,12}(小时|分钟)|每周只有[^，。；\n]{0,12}(小时|次)|less time|limited time|busy|only have|only around|one or two hours|1-2 hours|more limited/i.test(
+    /时间(变得)?更?少|时间不够|没时间|抽不出|只能挤出|碎片时间|时间被切碎|时间偏紧|时间更紧|排得更满|多了一门课|多一门课|只有[^，。；\n]{0,12}(小时|分钟)|每周只有[^，。；\n]{0,12}(小时|次)|只剩[^，。；\n]{0,12}(空档|空当)|less time|limited time|busy|only have|only around|one or two hours|1-2 hours|more limited/i.test(
       src
     )
   ) {
     out.push("time becomes more limited");
   }
   if (
-    /拖延|没动力|动力不足|提不起劲|不想开始|总想拖到明天|很难坚持|容易放弃|procrastinat|lack motivation|do not feel motivated|don't feel motivated|postpone|put it off|delay/i.test(
+    /拖延|没动力|动力不足|提不起劲|不想开始|总想拖到明天|很难坚持|容易放弃|三天打鱼两天晒网|犯懒|懒得开始|摆烂|总想往后拖|拖着不开始|一想到开始就犯懒|procrastinat|lack motivation|do not feel motivated|don't feel motivated|postpone|put it off|delay/i.test(
       src
     )
   ) {
     out.push("motivation is unstable");
   }
-  if (/工作日程|排期|加班|日程不稳定|作息不固定|时间不固定|很难固定|schedule|unpredictable|unstable/i.test(src)) {
+  if (
+    /工作日程|排期|排班|排班飘忽|日程飘忽|临时开会|临时加会|临时被叫去开会|加班|日程不稳定|作息不固定|时间不固定|很难固定|schedule|unpredictable|unstable/i.test(
+      src
+    )
+  ) {
     out.push("schedule is unstable");
   }
   if (
-    /压力|stress|轻松一点|轻一点|不想太有压力|别太硬核|别像上课|不想太卷|不想太认真|轻松|享受|有趣|enjoyable|overwhelmed|manageable|low pressure|another course|feel light|not too serious/i.test(
+    /轻松一点|轻一点|不想太有压力|压力别太大|别太硬核|别像上课|别搞得像第二份工作|不想太卷|不想太认真|轻松|享受|有趣|enjoyable|overwhelmed|manageable|low pressure|another course|feel light|not too serious|second job/i.test(
       src
     )
   ) {
     out.push("keep the process low pressure");
   }
-  if (/疲惫|很累|没精力|精力有限|下班后很累|脑子转不动|tired|fatigue|精力|energy|drain/i.test(src)) {
+  if (
+    /疲惫|很累|没精力|精力有限|下班后很累|下班后只想躺|脑子转不动|没电了|整个人没电|被榨干|被抽干|累瘫|tired|fatigue|精力|energy|drain/i.test(
+      src
+    )
+  ) {
     out.push("energy is limited");
   }
   return uniqStrings(out, 6);
@@ -375,13 +402,13 @@ function detectConstraints(text: string): string[] {
 function detectAdherence(text: string): string[] {
   const out: string[] = [];
   const src = String(text || "");
-  if (/短时|十分钟|十五分钟|二十分钟|10分钟|15分钟|20分钟|short|10-minute|15-minute|micro/i.test(src)) {
+  if (/短时|十来分钟|十几分钟|十多分钟|十分钟|十五分钟|二十分钟|10分钟|15分钟|20分钟|short|10-minute|15-minute|micro/i.test(src)) {
     out.push("start with short, low-friction sessions");
   }
-  if (/灵活|弹性|看状态|flexible|optional/i.test(src)) out.push("keep sessions flexible");
+  if (/灵活|弹性|看状态|有空就|有空再|插空|见缝插针|flexible|optional/i.test(src)) out.push("keep sessions flexible");
   if (/每周最低|最低目标|周目标|minimum|weekly goal/i.test(src)) out.push("track a weekly minimum goal");
   if (/fallback|busy week|忙周|忙的时候|兜底/i.test(src)) out.push("prepare a fallback version for busy weeks");
-  if (/between|间隙|空档|碎片时间|通勤|study sessions|meetings/i.test(src)) out.push("fit sessions into small time slots");
+  if (/between|间隙|空档|空当|碎片时间|通勤|插空|见缝插针|study sessions|meetings/i.test(src)) out.push("fit sessions into small time slots");
   if (/绑定|顺手|习惯后面|起床后|下班后|after work|routine/i.test(src)) out.push("tie the habit to existing routines");
   return uniqStrings(out, 6);
 }
@@ -390,16 +417,16 @@ function detectFallback(text: string, segment: LongTermSegmentKey): string[] {
   const out: string[] = [];
   const src = String(text || "");
   if (segment === "fitness") {
-    if (/15|20|10/.test(src) || /short|micro|brief|快速|短时|十分钟运动|15分钟运动|20分钟运动/.test(src)) {
+    if (/15|20|10/.test(src) || /short|micro|brief|快速|短时|十来分钟|十几分钟|十多分钟|十分钟运动|15分钟运动|20分钟运动/.test(src)) {
       out.push("do a 10-20 minute workout when time is tight");
     }
     if (/快走十分钟|拉伸十分钟|做一组徒手|快走|拉伸/.test(src)) {
       out.push("do a short walk or stretch when energy is low");
     }
-  } else if (/15|20|10/.test(src) || /short|micro|brief|短时|10分钟学习|15分钟学习|20分钟学习/.test(src)) {
+  } else if (/15|20|10/.test(src) || /short|micro|brief|短时|十来分钟|十几分钟|十多分钟|10分钟学习|15分钟学习|20分钟学习/.test(src)) {
     out.push("do a 10-20 minute study session when energy is low");
   }
-  if (/watch|video|article|读一篇|看一个|记一条|短视频|短文/.test(src)) {
+  if (/watch|video|article|读一篇|看一个|记一条|短视频|短文|听一段|听个播客|听点播客|听播客|播客也算|播客/.test(src)) {
     out.push("use a tiny starter task to reduce resistance");
   }
   return uniqStrings(out, 4);

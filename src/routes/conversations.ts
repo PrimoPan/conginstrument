@@ -57,6 +57,7 @@ import { normalizeLocale, isEnglishLocale, type AppLocale } from "../i18n/locale
 import {
   advanceLongTermScenario,
   buildLongTermPseudoPlanningTask,
+  canAdvanceLongTermScenario,
   defaultLongTermScenarioState,
   longTermTaskActionLabel,
   readLongTermScenarioState,
@@ -4058,6 +4059,14 @@ convRouter.post("/:id/long-term/advance", asyncRoute(async (req: AuthedRequest, 
     locale,
     nowIso: now.toISOString(),
   });
+  if (!canAdvanceLongTermScenario(previousScenario)) {
+    return res.status(400).json({
+      error:
+        previousScenario.active_segment === "fitness"
+          ? "complete some Task 3 planning before advancing to Task 4"
+          : "complete some Task 4 planning before finishing the long-term plan",
+    });
+  }
   const longTermScenarioState = advanceLongTermScenario({
     previous: previousScenario,
     conversationId: id,

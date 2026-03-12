@@ -6,6 +6,7 @@ import { fileURLToPath } from "node:url";
 import type { AppLocale } from "../../i18n/locale.js";
 import {
   advanceLongTermScenario,
+  canAdvanceLongTermScenario,
   defaultLongTermScenarioState,
   rebuildLongTermScenarioState,
   type LongTermScenarioState,
@@ -102,6 +103,7 @@ async function main() {
       locale: fixture.locale,
       nowIso: isoFor(0),
     });
+    assert.equal(canAdvanceLongTermScenario(scenario), false, `${fixture.id} should not advance before Task 3 has content`);
 
     scenario = runSegment({
       scenario,
@@ -114,6 +116,7 @@ async function main() {
     assert.equal(scenario.active_segment, "fitness", `${fixture.id} should stay in fitness before advancing`);
     assert.equal(scenario.bundle_status, "active");
     assert.equal(scenario.segments.fitness.status, "active");
+    assert.equal(canAdvanceLongTermScenario(scenario), true, `${fixture.id} fitness should become advanceable after progress`);
     assert.ok(scenario.segments.fitness.export_ready_text.length > 20, `${fixture.id} fitness export text should be populated`);
     includesAll(scenario.segments.fitness.constraints, fixture.expected.fitnessConstraints, `${fixture.id} fitness constraints`);
     const fitnessTaskId = scenario.segments.fitness.task_id;
@@ -129,6 +132,7 @@ async function main() {
     assert.equal(scenario.active_segment, "study", `${fixture.id} should advance to study`);
     assert.equal(scenario.segments.fitness.status, "completed");
     assert.equal(scenario.segments.study.status, "active");
+    assert.equal(canAdvanceLongTermScenario(scenario), false, `${fixture.id} should not complete before Task 4 has content`);
     assert.equal(scenario.transfer_source_task_id, fitnessTaskId);
     assert.equal(scenario.transfer_source_conversation_id, fixture.id);
 
@@ -148,6 +152,7 @@ async function main() {
     assert.ok(scenario.segments.study.export_ready_text.length > 20, `${fixture.id} study export text should be populated`);
     includesAll(scenario.segments.study.constraints, fixture.expected.studyConstraints, `${fixture.id} study constraints`);
     includesAll(scenario.segments.study.methods_or_activities, fixture.expected.studyMethods, `${fixture.id} study methods`);
+    assert.equal(canAdvanceLongTermScenario(scenario), true, `${fixture.id} study should become completable after progress`);
     assert.ok(
       scenario.combined_export_ready_text.includes("Task 3") && scenario.combined_export_ready_text.includes("Task 4"),
       `${fixture.id} combined export text should include both task labels`
@@ -162,6 +167,7 @@ async function main() {
 
     assert.equal(scenario.bundle_status, "completed", `${fixture.id} should complete the bundle`);
     assert.equal(scenario.segments.study.status, "completed");
+    assert.equal(canAdvanceLongTermScenario(scenario), false, `${fixture.id} completed bundle should not advance again`);
   }
 
   console.log("longTermScenario.regression: ok");
