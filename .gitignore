@@ -7,6 +7,7 @@ node_modules/
 # build
 dist/
 *.log
+local_long_term_mock_regression_report.latest.json
 
 # editor
 .vscode/
@@ -14,4 +15,3 @@ dist/
 
 # OS
 .DS_Store
-

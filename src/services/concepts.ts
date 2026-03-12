@@ -154,8 +154,8 @@ function slotFamily(key: string): ConceptFamily {
   if (key.startsWith("slot:constraint:limiting:")) return "limiting_factor";
   if (key.startsWith("slot:constraint:")) return "generic_constraint";
   if (key.startsWith("slot:sub_location:")) return "sub_location";
-  if (key === "slot:goal") return "goal";
-  if (key === "slot:duration" || key === "slot:duration_total") return "duration_total";
+  if (key === "slot:goal" || key.startsWith("slot:goal:")) return "goal";
+  if (key === "slot:duration" || key === "slot:duration_total" || key.startsWith("slot:duration_total:")) return "duration_total";
   if (
     key === "slot:budget" ||
     key === "slot:budget_spent" ||
@@ -167,9 +167,40 @@ function slotFamily(key: string): ConceptFamily {
   if (key === "slot:people") return "people";
   if (key === "slot:lodging") return "lodging";
   if (key === "slot:health" || key === "slot:language") return "limiting_factor";
-  if (key === "slot:scenic_preference") return "scenic_preference";
-  if (key === "slot:activity_preference") return "activity_preference";
+  if (key === "slot:scenic_preference" || key.startsWith("slot:scenic_preference:")) return "scenic_preference";
+  if (key === "slot:activity_preference" || key.startsWith("slot:activity_preference:")) return "activity_preference";
   return "other";
+}
+
+function semanticKeyFromLongTermNode(node: ConceptNode): string {
+  const rawKey = cleanText((node as any).key, 180).toLowerCase();
+  if (!rawKey.startsWith("lt:")) return "";
+
+  const goal = rawKey.match(/^lt:goal:(fitness|study)$/);
+  if (goal?.[1]) return `slot:goal:${goal[1]}`;
+
+  const cadence = rawKey.match(/^lt:(fitness|study):cadence$/);
+  if (cadence?.[1]) return `slot:duration_total:${cadence[1]}`;
+
+  const constraint = rawKey.match(/^lt:(fitness|study):constraint:(.+)$/);
+  if (constraint?.[2]) return `slot:constraint:limiting:${constraint[1]}:${slug(constraint[2]) || "constraint"}`;
+
+  const adjustment = rawKey.match(/^lt:(fitness|study):adjustment:(.+)$/);
+  if (adjustment?.[2]) return `slot:constraint:limiting:${adjustment[1]}:adjustment_${slug(adjustment[2]) || "adjustment"}`;
+
+  const method = rawKey.match(/^lt:(fitness|study):method:(.+)$/);
+  if (method?.[2]) return `slot:activity_preference:${method[1]}:${slug(method[2]) || "method"}`;
+
+  const strategy = rawKey.match(/^lt:(fitness|study):strategy:(.+)$/);
+  if (strategy?.[2]) return `slot:activity_preference:${strategy[1]}:strategy_${slug(strategy[2]) || "strategy"}`;
+
+  const fallback = rawKey.match(/^lt:(fitness|study):fallback:(.+)$/);
+  if (fallback?.[2]) return `slot:activity_preference:${fallback[1]}:fallback_${slug(fallback[2]) || "fallback"}`;
+
+  const transfer = rawKey.match(/^lt:study:transfer:(.+)$/);
+  if (transfer?.[1]) return `slot:activity_preference:study:transfer_${slug(transfer[1]) || "transfer"}`;
+
+  return "";
 }
 
 function normalizeDestination(raw: string): string {
@@ -226,7 +257,7 @@ function semanticFreeformSignature(raw: string): string {
 function parseSemanticKeyFromStatement(node: ConceptNode): string {
   const s = cleanText(node.statement || "", 180);
   if (!s) return "";
-  if ((node as any).layer === "intent" || /^intent[:：]/i.test(s) || /^意图[:：]/.test(s)) return "slot:goal";
+  if (!cleanText((node as any).key, 180).toLowerCase().startsWith("lt:") && ((node as any).layer === "intent" || /^intent[:：]/i.test(s) || /^意图[:：]/.test(s))) return "slot:goal";
 
   let m = s.match(/^(?:目的地|destination)[:：]\s*(.+)$/i);
   if (m?.[1]) return `slot:destination:${slug(normalizeDestination(m[1])) || "unknown"}`;
@@ -308,7 +339,13 @@ function canonicalSlotKey(key: string): string {
 
   if (k === "slot:duration") return "slot:duration_total";
   if (k === "slot:goal") return "slot:goal";
+  if (k.startsWith("slot:goal:")) {
+    return `slot:goal:${slug(k.slice("slot:goal:".length)) || "goal"}`;
+  }
   if (k === "slot:duration_total") return "slot:duration_total";
+  if (k.startsWith("slot:duration_total:")) {
+    return `slot:duration_total:${slug(k.slice("slot:duration_total:".length)) || "duration"}`;
+  }
   if (k === "slot:budget") return "slot:budget";
   if (k === "slot:budget_spent") return "slot:budget_spent";
   if (k === "slot:budget_remaining") return "slot:budget_remaining";
@@ -318,7 +355,13 @@ function canonicalSlotKey(key: string): string {
   if (k === "slot:health") return "slot:constraint:limiting:health:health";
   if (k === "slot:language") return "slot:constraint:limiting:language:language";
   if (k === "slot:scenic_preference") return "slot:scenic_preference";
+  if (k.startsWith("slot:scenic_preference:")) {
+    return `slot:scenic_preference:${slug(k.slice("slot:scenic_preference:".length)) || "preference"}`;
+  }
   if (k === "slot:activity_preference") return "slot:activity_preference";
+  if (k.startsWith("slot:activity_preference:")) {
+    return `slot:activity_preference:${slug(k.slice("slot:activity_preference:".length)) || "preference"}`;
+  }
 
   return k;
 }
@@ -326,6 +369,8 @@ function canonicalSlotKey(key: string): string {
 export function semanticKeyForNode(n: ConceptNode): string {
   const key = canonicalSlotKey(cleanText((n as any).key, 180));
   if (key) return key;
+  const longTermKey = canonicalSlotKey(semanticKeyFromLongTermNode(n));
+  if (longTermKey) return longTermKey;
   const parsed = canonicalSlotKey(parseSemanticKeyFromStatement(n));
   if (parsed) return parsed;
 

@@ -578,17 +578,17 @@ function canonicalConceptFamily(c: ConceptItem | undefined): string {
   if (key === "slot:budget" || key === "slot:budget_spent" || key === "slot:budget_remaining" || key === "slot:budget_pending") {
     return "budget";
   }
-  if (key === "slot:duration_total" || key === "slot:duration") return "duration_total";
+  if (key === "slot:duration_total" || key === "slot:duration" || key.startsWith("slot:duration_total:")) return "duration_total";
   if (key.startsWith("slot:duration_city:")) return "duration_city";
   if (key.startsWith("slot:destination:")) return "destination";
   if (key.startsWith("slot:constraint:limiting:")) return "limiting_factor";
   if (key.startsWith("slot:meeting_critical:")) return "meeting_critical";
   if (key.startsWith("slot:sub_location:")) return "sub_location";
-  if (key === "slot:activity_preference") return "activity_preference";
-  if (key === "slot:scenic_preference") return "scenic_preference";
+  if (key === "slot:activity_preference" || key.startsWith("slot:activity_preference:")) return "activity_preference";
+  if (key === "slot:scenic_preference" || key.startsWith("slot:scenic_preference:")) return "scenic_preference";
   if (key === "slot:lodging") return "lodging";
   if (key === "slot:people") return "people";
-  if (key === "slot:goal") return "goal";
+  if (key === "slot:goal" || key.startsWith("slot:goal:")) return "goal";
   return cleanText(c?.family, 40) || "other";
 }
 
@@ -669,12 +669,12 @@ function sourceSignatureToken(c: ConceptItem | undefined): string {
     return detail ? `slot:constraint:limiting:${kind}:${detail}` : `slot:constraint:limiting:${kind}`;
   }
   if (key.startsWith("slot:sub_location:")) return "slot:sub_location";
-  if (key === "slot:goal") return "slot:goal";
-  if (key === "slot:duration_total" || key === "slot:duration") return "slot:duration_total";
+  if (key === "slot:goal" || key.startsWith("slot:goal:")) return "slot:goal";
+  if (key === "slot:duration_total" || key === "slot:duration" || key.startsWith("slot:duration_total:")) return "slot:duration_total";
   if (key === "slot:people") return "slot:people";
   if (key === "slot:lodging") return "slot:lodging";
-  if (key === "slot:activity_preference") return "slot:activity_preference";
-  if (key === "slot:scenic_preference") return "slot:scenic_preference";
+  if (key === "slot:activity_preference" || key.startsWith("slot:activity_preference:")) return "slot:activity_preference";
+  if (key === "slot:scenic_preference" || key.startsWith("slot:scenic_preference:")) return "slot:scenic_preference";
   return canonicalConceptFamily(c);
 }
 
