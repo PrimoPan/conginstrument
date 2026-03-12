@@ -2,6 +2,7 @@ import { MongoClient, Db, Collection, ObjectId } from "mongodb";
 import { config } from "../server/config.js";
 import { DEFAULT_LOCALE, type AppLocale } from "../i18n/locale.js";
 import { DEFAULT_EXPERIMENT_ARM, type ExperimentArm } from "../server/experimentArm.js";
+import type { PlanningCondition, PlanningDomain } from "../services/longTermPlan/state.js";
 
 export type UserDoc = {
   _id?: ObjectId;
@@ -24,6 +25,8 @@ export type ConversationDoc = {
   title: string;
   locale?: AppLocale;
   experiment_arm?: ExperimentArm;
+  domain?: PlanningDomain;
+  condition?: PlanningCondition;
   systemPrompt: string;
   model: string;
   createdAt: Date;
@@ -34,6 +37,7 @@ export type ConversationDoc = {
   motifLinks?: any[];
   contexts?: any[];
   travelPlanState?: any;
+  longTermScenarioState?: any;
   taskLifecycle?: {
     status: "active" | "closed";
     endedAt?: string;
@@ -128,6 +132,31 @@ export async function connectMongo() {
     { experiment_arm: { $exists: false } as any },
     { $set: { experiment_arm: DEFAULT_EXPERIMENT_ARM } as any }
   );
+  await collections.conversations.updateMany(
+    { domain: { $exists: false } as any },
+    { $set: { domain: "travel" } as any }
+  );
+  await collections.conversations.updateMany(
+    { condition: { $exists: false } as any },
+    [
+      {
+        $set: {
+          condition: {
+            $cond: [{ $eq: ["$experiment_arm", "compare_concept_only"] }, "chatbot", "visual"],
+          },
+        },
+      },
+    ] as any
+  ).catch(async () => {
+    await collections.conversations.updateMany(
+      { condition: { $exists: false } as any, experiment_arm: "compare_concept_only" as any },
+      { $set: { condition: "chatbot" } as any }
+    );
+    await collections.conversations.updateMany(
+      { condition: { $exists: false } as any },
+      { $set: { condition: "visual" } as any }
+    );
+  });
   await collections.motifLibrary.updateMany(
     { locale: { $exists: false } as any },
     { $set: { locale: DEFAULT_LOCALE } as any }
@@ -142,6 +171,7 @@ export async function connectMongo() {
   await collections.conversations.createIndex({ userId: 1, updatedAt: -1 });
   await collections.conversations.createIndex({ userId: 1, experiment_arm: 1, updatedAt: -1 });
   await collections.conversations.createIndex({ userId: 1, locale: 1, updatedAt: -1 });
+  await collections.conversations.createIndex({ userId: 1, experiment_arm: 1, domain: 1, updatedAt: -1 });
   await collections.turns.createIndex({ conversationId: 1, createdAt: 1 });
   await collections.turns.createIndex({ conversationId: 1, userId: 1, taskId: 1, createdAt: 1 });
   await collections.motifLibrary.createIndex({ userId: 1, locale: 1, motif_type_id: 1 }, { unique: true });

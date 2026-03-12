@@ -1,0 +1,216 @@
+import assert from "node:assert/strict";
+import { promises as fs } from "node:fs";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+
+import type { AppLocale } from "../../i18n/locale.js";
+import {
+  advanceLongTermScenario,
+  defaultLongTermScenarioState,
+  rebuildLongTermScenarioState,
+  type LongTermScenarioState,
+} from "../longTermPlan/state.js";
+import { buildLongTermVisualConversationModel } from "../longTermPlan/visualModel.js";
+
+type FixtureTurn = {
+  userText: string;
+  assistantText: string;
+};
+
+type Fixture = {
+  id: string;
+  locale: AppLocale;
+  persona: {
+    name: string;
+    age: number;
+    occupation: string;
+    profile: string;
+  };
+  fitness: { turns: FixtureTurn[] };
+  study: { turns: FixtureTurn[] };
+  expected: {
+    fitnessConstraints: string[];
+    studyConstraints: string[];
+    studyMethods: string[];
+  };
+};
+
+const REPO_ROOT = fileURLToPath(new URL("../../../", import.meta.url));
+const FIXTURE_DIR = path.join(REPO_ROOT, "user-study", "scenario-b");
+const FIXTURE_NAMES = [
+  "zh_li_wei.bundled.json",
+  "zh_mei_lin.bundled.json",
+  "zh_daniel_chen.bundled.json",
+];
+
+function clean(input: unknown, max = 240) {
+  return String(input ?? "")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, max);
+}
+
+function isoFor(step: number) {
+  return new Date(Date.UTC(2026, 2, 2, 0, step, 0)).toISOString();
+}
+
+async function loadFixtures(): Promise<Fixture[]> {
+  return Promise.all(
+    FIXTURE_NAMES.map(async (name) => {
+      const raw = await fs.readFile(path.join(FIXTURE_DIR, name), "utf8");
+      return JSON.parse(raw) as Fixture;
+    })
+  );
+}
+
+function includesAll(haystack: string[], needles: string[], label: string) {
+  for (const needle of needles) {
+    assert.ok(haystack.includes(needle), `${label} should include "${needle}", got [${haystack.join(", ")}]`);
+  }
+}
+
+function runSegment(params: {
+  scenario: LongTermScenarioState;
+  conversationId: string;
+  locale: AppLocale;
+  segment: "fitness" | "study";
+  turns: FixtureTurn[];
+}) {
+  const recentTurns: FixtureTurn[] = [];
+  let scenario = params.scenario;
+  let previousGraph = null as any;
+  for (const [index, turn] of params.turns.entries()) {
+    recentTurns.push(turn);
+    scenario = rebuildLongTermScenarioState({
+      previous: scenario,
+      conversationId: params.conversationId,
+      locale: params.locale,
+      activeSegment: params.segment,
+      recentTurns,
+      updatedAt: isoFor(index + (params.segment === "study" ? 100 : 0)),
+    });
+    previousGraph = buildLongTermVisualConversationModel({
+      scenario,
+      locale: params.locale,
+      previousGraph,
+      prevConcepts: [],
+      baseConcepts: [],
+      prevMotifs: [],
+      baseMotifLinks: [],
+      baseContexts: [],
+    }).graph;
+  }
+  return { scenario, previousGraph };
+}
+
+async function main() {
+  const fixtures = await loadFixtures();
+  assert.equal(fixtures.length, 3);
+
+  for (const fixture of fixtures) {
+    let scenario = defaultLongTermScenarioState({
+      conversationId: fixture.id,
+      locale: fixture.locale,
+      nowIso: isoFor(0),
+    });
+
+    const fitnessResult = runSegment({
+      scenario,
+      conversationId: fixture.id,
+      locale: fixture.locale,
+      segment: "fitness",
+      turns: fixture.fitness.turns,
+    });
+    scenario = fitnessResult.scenario;
+    includesAll(
+      scenario.segments.fitness.constraints,
+      fixture.expected.fitnessConstraints,
+      `${fixture.id} fitness constraints`
+    );
+    const fitnessModel = buildLongTermVisualConversationModel({
+      scenario,
+      locale: fixture.locale,
+      previousGraph: fitnessResult.previousGraph,
+      prevConcepts: [],
+      baseConcepts: [],
+      prevMotifs: [],
+      baseMotifLinks: [],
+      baseContexts: [],
+    });
+    assert.ok(fitnessModel.graph.nodes.length >= 5, `${fixture.id} fitness graph should have multiple nodes`);
+    assert.ok(fitnessModel.concepts.length > 0, `${fixture.id} fitness concepts should not be empty`);
+    assert.ok(fitnessModel.motifs.length > 0, `${fixture.id} fitness motifs should not be empty`);
+    assert.ok(
+      fitnessModel.graph.nodes.some((node) => clean(node.statement).includes("当前约束")),
+      `${fixture.id} fitness graph should include localized constraint statements`
+    );
+    assert.ok(
+      (fitnessModel.graph.nodes || []).every((node) => !/^slot:destination/.test(clean((node as any).key))),
+      `${fixture.id} fitness graph should not leak travel destination keys`
+    );
+    assert.ok(
+      fitnessModel.graph.edges.some((edge) => edge.type === "constraint"),
+      `${fixture.id} fitness graph should contain constraint edges`
+    );
+    assert.ok(
+      fitnessModel.graph.edges.some((edge) => edge.type === "enable"),
+      `${fixture.id} fitness graph should contain enable edges`
+    );
+
+    scenario = advanceLongTermScenario({
+      previous: scenario,
+      conversationId: fixture.id,
+      locale: fixture.locale,
+      nowIso: isoFor(99),
+    });
+
+    const studyResult = runSegment({
+      scenario,
+      conversationId: fixture.id,
+      locale: fixture.locale,
+      segment: "study",
+      turns: fixture.study.turns,
+    });
+    scenario = studyResult.scenario;
+    includesAll(
+      scenario.segments.study.constraints,
+      fixture.expected.studyConstraints,
+      `${fixture.id} study constraints`
+    );
+    includesAll(
+      scenario.segments.study.methods_or_activities,
+      fixture.expected.studyMethods,
+      `${fixture.id} study methods`
+    );
+
+    const studyModel = buildLongTermVisualConversationModel({
+      scenario,
+      locale: fixture.locale,
+      previousGraph: studyResult.previousGraph,
+      prevConcepts: fitnessModel.concepts,
+      baseConcepts: fitnessModel.concepts,
+      prevMotifs: fitnessModel.motifs,
+      baseMotifLinks: fitnessModel.motifLinks,
+      baseContexts: fitnessModel.contexts,
+    });
+    assert.ok(
+      studyModel.graph.nodes.some((node) => clean((node as any).key).startsWith("lt:study:transfer:")),
+      `${fixture.id} study graph should include transfer-aware nodes`
+    );
+    assert.ok(
+      studyModel.graph.nodes.some((node) => clean(node.statement).includes("沿用自健身阶段")),
+      `${fixture.id} study graph should include Chinese transfer statements`
+    );
+    assert.ok(
+      studyModel.graph.nodes.every((node) => !/^slot:(destination|budget|lodging|duration)/.test(clean((node as any).key))),
+      `${fixture.id} study graph should remain isolated from travel slot keys`
+    );
+  }
+
+  console.log("longTermChineseVisual.regression: ok");
+}
+
+main().catch((error) => {
+  console.error(error);
+  process.exitCode = 1;
+});

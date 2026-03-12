@@ -1,0 +1,98 @@
+{
+  "id": "zh_mei_lin",
+  "locale": "zh-CN",
+  "persona": {
+    "name": "Mei Lin",
+    "age": 28,
+    "occupation": "市场营销专员",
+    "profile": "兴趣驱动，重视体验是否轻松有趣，不喜欢太硬核的训练或学习。"
+  },
+  "fitness": {
+    "turns": [
+      {
+        "userText": "我想做一个健身计划，但我对那种很机械的训练容易腻。我更想通过运动让自己状态好一点、身材别太松。",
+        "assistantText": "明白，你更需要有趣、可持续的计划，而不是死板的训练表。"
+      },
+      {
+        "userText": "每周我大概能安排三次左右，每次二十到三十分钟，最好别太长。",
+        "assistantText": "可以，我们就以每周三次、每次20到30分钟为基础。"
+      },
+      {
+        "userText": "运动方式我喜欢跳操、舞蹈类，另外瑜伽也可以，偶尔散步。",
+        "assistantText": "跳操、瑜伽和散步会让计划更有趣。"
+      },
+      {
+        "userText": "作息方面我想少熬夜一点，如果睡太晚第二天就完全不想动。",
+        "assistantText": "那作息调整也应该放进计划里。"
+      },
+      {
+        "userText": "新的情况是我有时真的缺乏动力，尤其下班后很容易想躺着刷手机。",
+        "assistantText": "这说明我们要优先降低开始运动的门槛。"
+      },
+      {
+        "userText": "而且我不希望过程太有压力，别太硬核，轻松一点我才会想继续。",
+        "assistantText": "好的，轻松、低压力会成为这个计划的核心约束。"
+      },
+      {
+        "userText": "所以我想保留很灵活的规则，比如只做十分钟跳操也算完成，或者做一段瑜伽拉伸。",
+        "assistantText": "灵活规则和短时版本非常适合你。"
+      },
+      {
+        "userText": "我的解释是：我最看重有趣和轻松，所以选跳操和瑜伽；为了避免拖延，我把开始门槛降到十分钟；精力一般的时候，就用拉伸或者散步做兜底。",
+        "assistantText": "很好，你已经清楚表达了自己的偏好和取舍。"
+      }
+    ]
+  },
+  "study": {
+    "turns": [
+      {
+        "userText": "学习计划这边，我想试着学一点 UX 设计，主要是兴趣导向，也想对工作里的网站体验更敏感。",
+        "assistantText": "好，我们把学习计划定在探索 UX 设计和提升工作敏感度上。"
+      },
+      {
+        "userText": "每周可以学三到四小时，但我希望拆开来，不要像连续上课。",
+        "assistantText": "拆分时段会更轻松，也更适合兴趣驱动。"
+      },
+      {
+        "userText": "方式上我比较喜欢短视频、案例拆解，还有随手做点小改版，不太想一开始就上很系统的长课程。",
+        "assistantText": "这说明轻量内容和小实践更符合你。"
+      },
+      {
+        "userText": "我也想保留一点反思笔记，记下我为什么喜欢某个界面，或者哪里让我觉得别扭。",
+        "assistantText": "很好，这能帮助你建立自己的判断。"
+      },
+      {
+        "userText": "新的约束是我希望整个学习过程保持轻松，不要压力过大，而且有时候也会拖着不开始。",
+        "assistantText": "那我们要同时照顾低压力和拖延问题。"
+      },
+      {
+        "userText": "我觉得可以借用健身阶段的思路，先做一个特别小的起步任务，比如看一个短视频或者拆一个小案例。",
+        "assistantText": "这个从健身迁移过来的方法很有帮助。"
+      },
+      {
+        "userText": "如果那天很累，就只看一个短视频或者写一条反思笔记，这样至少不会完全中断。",
+        "assistantText": "很好，这就是你的学习兜底动作。"
+      },
+      {
+        "userText": "所以我的决定是：因为想保持兴趣和轻松感，我优先短视频、案例拆解和小项目；为了减少拖延，我保留超小起步任务；时间不稳定时就用反思笔记维持连续性。",
+        "assistantText": "你的解释把兴趣、压力和执行策略都串起来了。"
+      }
+    ]
+  },
+  "expected": {
+    "fitnessConstraints": [
+      "motivation is unstable",
+      "keep the process low pressure"
+    ],
+    "studyConstraints": [
+      "motivation is unstable",
+      "keep the process low pressure"
+    ],
+    "studyMethods": [
+      "lightweight content",
+      "case studies",
+      "project-based learning",
+      "reflection notes"
+    ]
+  }
+}

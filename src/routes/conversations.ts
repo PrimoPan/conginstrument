@@ -19,6 +19,7 @@ import {
 import {
   generateAssistantTextNonStreaming,
   generatePlainAssistantTextNonStreaming,
+  streamAssistantText,
   streamPlainAssistantText,
 } from "../services/chatResponder.js";
 import { buildCognitiveModel } from "../services/cognitiveModel.js";
@@ -53,6 +54,18 @@ import {
   type PortfolioDocumentState,
 } from "../services/planningState.js";
 import { normalizeLocale, isEnglishLocale, type AppLocale } from "../i18n/locale.js";
+import {
+  advanceLongTermScenario,
+  buildLongTermPseudoPlanningTask,
+  defaultLongTermScenarioState,
+  longTermTaskActionLabel,
+  readLongTermScenarioState,
+  rebuildLongTermScenarioState,
+  type LongTermScenarioState,
+  type PlanningCondition,
+  type PlanningDomain,
+} from "../services/longTermPlan/state.js";
+import { buildLongTermVisualConversationModel } from "../services/longTermPlan/visualModel.js";
 import type { ConceptItem } from "../services/concepts.js";
 import { semanticKeyForNode } from "../services/concepts.js";
 import {
@@ -95,6 +108,39 @@ function conversationExperimentArm(conv: any): ExperimentArm {
   return normalizeExperimentArm((conv as any)?.experiment_arm);
 }
 
+function normalizePlanningDomain(input: unknown): PlanningDomain {
+  const raw = String(input ?? "").trim().toLowerCase();
+  if (
+    raw === "long_term_personal_plan" ||
+    raw === "long-term" ||
+    raw === "long_term" ||
+    raw === "personal" ||
+    raw === "longterm"
+  ) {
+    return "long_term_personal_plan";
+  }
+  return "travel";
+}
+
+function conditionForExperimentArm(arm: ExperimentArm): PlanningCondition {
+  return isPureChatControlArm(arm) ? "chatbot" : "visual";
+}
+
+function normalizePlanningCondition(input: unknown, fallbackArm: ExperimentArm = DEFAULT_EXPERIMENT_ARM): PlanningCondition {
+  const raw = String(input ?? "").trim().toLowerCase();
+  if (raw === "chatbot" || raw === "plain_chat" || raw === "plain") return "chatbot";
+  if (raw === "visual") return "visual";
+  return conditionForExperimentArm(fallbackArm);
+}
+
+function conversationDomain(conv: any): PlanningDomain {
+  return normalizePlanningDomain((conv as any)?.domain);
+}
+
+function conversationCondition(conv: any): PlanningCondition {
+  return normalizePlanningCondition((conv as any)?.condition, conversationExperimentArm(conv));
+}
+
 function allowMotifFeatures(experimentArm: ExperimentArm): boolean {
   return isMotifEnabledForArm(experimentArm);
 }
@@ -103,23 +149,39 @@ function isPureChatArm(experimentArm: ExperimentArm): boolean {
   return isPureChatControlArm(experimentArm);
 }
 
-function defaultSystemPrompt(locale: AppLocale, experimentArm: ExperimentArm = DEFAULT_EXPERIMENT_ARM) {
+function defaultSystemPrompt(
+  locale: AppLocale,
+  experimentArm: ExperimentArm = DEFAULT_EXPERIMENT_ARM,
+  domain: PlanningDomain = "travel"
+) {
   if (isEnglishLocale(locale)) {
     if (isPureChatArm(experimentArm)) {
-      return `You are CogInstrument's control assistant. Reply as a normal helpful assistant in plain chat. Do not mention graphs, motifs, task state, planning state, or experiment grouping.`;
+      return domain === "long_term_personal_plan"
+        ? `You are CogInstrument's control assistant for long-term personal planning. Reply as a normal helpful assistant in plain chat. Focus on the current stage only, do not mention graphs, motifs, task state, planning state, or experiment grouping.`
+        : `You are CogInstrument's control assistant. Reply as a normal helpful assistant in plain chat. Do not mention graphs, motifs, task state, planning state, or experiment grouping.`;
     }
     if (!allowMotifFeatures(experimentArm)) {
-      return `You are CogInstrument's assistant. Help the user complete the current trip-planning task and ask focused clarification questions about goals, constraints, preferences, and logistics. Keep the conversation grounded in the current task only.`;
+      return domain === "long_term_personal_plan"
+        ? `You are CogInstrument's assistant. Help the user complete the current long-term planning stage. Stage 1 is a fitness plan, stage 2 is a study plan. Ask focused questions about time, energy, motivation, procrastination, schedule instability, methods, and how to keep the plan sustainable.`
+        : `You are CogInstrument's assistant. Help the user complete the current trip-planning task and ask focused clarification questions about goals, constraints, preferences, and logistics. Keep the conversation grounded in the current task only.`;
     }
-    return `You are CogInstrument's assistant. Help the user complete the current task and ask focused clarification questions about goals, constraints, and preferences. Each conversation is isolated by default; only use cross-task motifs when the user has explicitly adopted them.`;
+    return domain === "long_term_personal_plan"
+      ? `You are CogInstrument's assistant for a two-stage long-term personal planning scenario. Stage 1 is a fitness plan, stage 2 is a study plan. Help the user externalize reasoning about time, energy, motivation, procrastination, schedule instability, exercise or learning preferences, and sustainability. Only reuse prior motifs when they come from the earlier stage in this same scenario and the user has explicitly adopted them.`
+      : `You are CogInstrument's assistant. Help the user complete the current task and ask focused clarification questions about goals, constraints, and preferences. Each conversation is isolated by default; only use cross-task motifs when the user has explicitly adopted them.`;
   }
   if (isPureChatArm(experimentArm)) {
-    return `你是CogInstrument的对照组助手。请按普通LLM对话方式自然回答，不要提及图谱、motif、任务状态、规划状态或实验分组。`;
+    return domain === "long_term_personal_plan"
+      ? `你是CogInstrument的对照组助手。当前任务是长期个人计划，包含健身计划与学习计划两个阶段。请按普通LLM对话方式自然回答，不要提及图谱、motif、任务状态、规划状态或实验分组。`
+      : `你是CogInstrument的对照组助手。请按普通LLM对话方式自然回答，不要提及图谱、motif、任务状态、规划状态或实验分组。`;
   }
   if (!allowMotifFeatures(experimentArm)) {
-    return `你是CogInstrument的助手，目标是帮助用户完成当前旅行规划任务，并通过提问澄清用户的目标、约束、偏好和执行细节。请始终聚焦当前任务本身。`;
+    return domain === "long_term_personal_plan"
+      ? `你是CogInstrument的助手，目标是帮助用户完成当前长期个人计划阶段。该场景固定包含 Task 3 健身计划 与 Task 4 学习计划。请重点澄清时间、精力、动机、拖延、工作日程不稳定、运动/学习偏好，以及如何让计划更容易坚持。`
+      : `你是CogInstrument的助手，目标是帮助用户完成当前旅行规划任务，并通过提问澄清用户的目标、约束、偏好和执行细节。请始终聚焦当前任务本身。`;
   }
-  return `你是CogInstrument的助手，目标是帮助用户完成当前任务，并通过提问澄清用户的目标/约束/偏好。默认每个conversation独立；仅当用户明确采用迁移规则时，才可引用跨任务信息。`;
+  return domain === "long_term_personal_plan"
+    ? `你是CogInstrument的助手，当前处于长期个人计划场景。该场景固定包含健身计划与学习计划两个连续阶段。请帮助用户外显关于时间、精力、拖延、动机、日程不稳定、运动或学习方式偏好的推理过程。默认只使用当前阶段信息；只有当用户明确采用时，才可沿用同一场景上一阶段的规则。`
+    : `你是CogInstrument的助手，目标是帮助用户完成当前任务，并通过提问澄清用户的目标/约束/偏好。默认每个conversation独立；仅当用户明确采用迁移规则时，才可引用跨任务信息。`;
 }
 
 function emptyGraph(conversationId: string): CDG {
@@ -918,6 +980,434 @@ function parsePlanningBootstrap(raw: any): ConversationPlanningBootstrap | null 
     keepConsistentText: keepConsistentText || undefined,
     carryHealthReligion,
     carryStableProfile,
+  };
+}
+
+function defaultLongTermTitle(locale: AppLocale) {
+  return isEnglishLocale(locale) ? "Long-term Personal Plan" : "长期个人计划";
+}
+
+function currentLongTermTaskId(
+  scenario: LongTermScenarioState | null | undefined,
+  fallbackConversationId: string
+) {
+  const state = readLongTermScenarioState(scenario, {
+    conversationId: fallbackConversationId,
+  });
+  return cleanInput(state?.segments?.[state.active_segment]?.task_id, 120) || cleanInput(fallbackConversationId, 80);
+}
+
+async function buildLongTermRuntimeBase(params: {
+  conversationId: ObjectId;
+  userId: ObjectId;
+  conv: any;
+  locale: AppLocale;
+}) {
+  const scenario = readLongTermScenarioState((params.conv as any).longTermScenarioState, {
+    conversationId: String(params.conversationId),
+    locale: params.locale,
+  });
+  const taskId = currentLongTermTaskId(scenario, String(params.conversationId));
+  const recentDocs = await loadRecentTurnsForPlan({
+    conversationId: params.conversationId,
+    userId: params.userId,
+    taskId,
+    limit: 12,
+    sortDirection: -1,
+  });
+  const recentTurns = recentDocs
+    .slice()
+    .reverse()
+    .flatMap((turn) => [
+      { role: "user" as const, content: turn.userText },
+      { role: "assistant" as const, content: turn.assistantText },
+    ]);
+  const stateContextUserTurns = recentDocs
+    .slice()
+    .reverse()
+    .map((turn) => cleanInput(turn.userText, 320))
+    .filter(Boolean);
+  return {
+    scenario,
+    taskId,
+    recentDocs,
+    recentTurns,
+    stateContextUserTurns,
+  };
+}
+
+async function buildLongTermTransferRecommendations(params: {
+  userId: ObjectId;
+  locale: AppLocale;
+  conversationId: string;
+  currentTask: ReturnType<typeof buildLongTermPseudoPlanningTask>;
+  scenario: LongTermScenarioState;
+  existingState: MotifTransferState;
+}) {
+  if (!cleanInput(params.scenario.transfer_source_task_id, 120)) return params.existingState;
+  const motifLibrary = await listUserMotifLibrary(params.userId, params.locale);
+  const recommendations = buildTransferRecommendations({
+    locale: params.locale,
+    conversationId: params.conversationId,
+    currentTaskId: cleanInput(params.currentTask.task_id, 120) || params.conversationId,
+    travelPlanState: params.currentTask as any,
+    retrievalHints: {
+      sourceTaskId: params.scenario.transfer_source_task_id,
+      sourceConversationId: params.scenario.transfer_source_conversation_id || params.conversationId,
+      keepConsistentText: params.scenario.segments.fitness.export_ready_text || undefined,
+      carryHealthReligion: false,
+      carryStableProfile: false,
+    },
+    motifLibrary,
+    existingState: params.existingState,
+    maxCount: 4,
+  });
+  return {
+    ...params.existingState,
+    recommendations,
+    lastEvaluatedAt: new Date().toISOString(),
+  };
+}
+
+function buildLongTermTaskLifecyclePayload(
+  current: TaskLifecycleState | null | undefined,
+  scenario: LongTermScenarioState
+): TaskLifecycleState {
+  if (scenario.bundle_status === "completed") {
+    return {
+      status: "closed",
+      endedAt: scenario.last_updated,
+      endedTaskId: currentLongTermTaskId(scenario, scenario.scenario_id),
+      resumable: false,
+      resume_required: false,
+      updatedAt: scenario.last_updated,
+    };
+  }
+  return current || readTaskLifecycle(null);
+}
+
+function isChatbotCondition(
+  condition: PlanningCondition | null | undefined,
+  experimentArm: ExperimentArm
+) {
+  return condition === "chatbot" || isPureChatArm(experimentArm);
+}
+
+function buildLongTermTaskDetectionPayload(params: {
+  scenario: LongTermScenarioState;
+  locale: AppLocale;
+}): TaskDetection {
+  const currentTask = params.scenario.segments[params.scenario.active_segment];
+  const reason =
+    params.scenario.bundle_status === "completed"
+      ? isEnglishLocale(params.locale)
+        ? "The bundled long-term planning scenario is completed."
+        : "长期个人计划双任务已完成。"
+      : params.scenario.active_segment === "fitness"
+      ? isEnglishLocale(params.locale)
+        ? "Currently working on Task 3 Fitness Plan."
+        : "当前处于 Task 3 健身计划阶段。"
+      : isEnglishLocale(params.locale)
+      ? "Currently working on Task 4 Study Plan."
+      : "当前处于 Task 4 学习计划阶段。";
+  return {
+    current_task_id: currentTask.task_id,
+    is_task_switch: false,
+    reason,
+    signals: [
+      `domain:long_term_personal_plan`,
+      `segment:${params.scenario.active_segment}`,
+      `bundle_status:${params.scenario.bundle_status}`,
+    ],
+    mode: "single_conversation",
+    confidence: 0.92,
+    switch_reason_code: "continuous",
+  };
+}
+
+function buildLongTermCognitiveStatePayload(params: {
+  scenario: LongTermScenarioState;
+  locale: AppLocale;
+  model: ReturnType<typeof buildCognitiveModel>;
+  motifTransferState: MotifTransferState;
+  persistentMotifLibrary?: Awaited<ReturnType<typeof listUserMotifLibrary>>;
+}): CognitiveState {
+  const activeTaskId = currentLongTermTaskId(params.scenario, params.scenario.scenario_id);
+  const conceptRows = (params.model.concepts || []).map((concept: any) => ({
+    concept_id:
+      cleanInput(concept?.id, 120) ||
+      cleanInput(concept?.semanticKey, 120) ||
+      stableGraphItemId("lt_concept", cleanInput(concept?.title, 120) || "concept"),
+    kind: cleanInput(concept?.kind, 40) || "factual_assertion",
+    title: cleanInput(concept?.title, 180) || cleanInput(concept?.statement, 180) || "concept",
+    description: cleanInput(concept?.description, 220),
+    validation_status: cleanInput(concept?.validationStatus || concept?.validation_status, 24) || "resolved",
+    source_msg_ids: Array.isArray(concept?.sourceMsgIds) ? concept.sourceMsgIds.map((x: any) => cleanInput(x, 120)).filter(Boolean) : [],
+    evidence_terms: Array.isArray(concept?.evidenceTerms) ? concept.evidenceTerms.map((x: any) => cleanInput(x, 80)).filter(Boolean) : [],
+  }));
+  const motifRows = (params.model.motifs || []).map((motif: any) => ({
+    motif_id: cleanInput(motif?.id, 120),
+    motif_type: cleanInput(motif?.motif_type || motif?.relation, 40) || "enable",
+    relation: cleanInput(motif?.relation, 40) || "enable",
+    title: cleanInput(motif?.display_title || motif?.title, 180) || cleanInput(motif?.motif_type_title, 180) || "motif",
+    status: cleanInput(motif?.status, 24) || "active",
+    confidence: Number(motif?.confidence || 0.7),
+    concept_ids: Array.isArray(motif?.conceptIds) ? motif.conceptIds.map((x: any) => cleanInput(x, 120)).filter(Boolean) : [],
+    anchor_concept_id: cleanInput(motif?.anchorConceptId, 120),
+    rationale: cleanInput(motif?.statusReason || motif?.description, 220),
+  }));
+  const taskRows = (["fitness", "study"] as const).map((segment) => {
+    const task = params.scenario.segments[segment];
+    return {
+      task_id: task.task_id,
+      task_type: task.task_type as any,
+      task_context: {
+        conversation_id: params.scenario.scenario_id,
+        locale: params.locale,
+        focus_area: segment,
+        goal_summary: task.goal_summary,
+        updated_at: task.last_updated,
+      } as any,
+      concepts_from_user: task.task_id === activeTaskId ? conceptRows : [],
+      motif_instances_current_task: task.task_id === activeTaskId ? motifRows : [],
+      motif_transfer_candidates:
+        segment === "study"
+          ? (params.motifTransferState.recommendations || []).map((rec) => ({
+              candidate_id: rec.candidate_id,
+              motif_type_id: rec.motif_type_id,
+              motif_type_title: rec.motif_type_title,
+              dependency: rec.dependency,
+              reusable_description: rec.reusable_description,
+              status: rec.status,
+              match_score: rec.match_score,
+              recommended_mode: rec.recommended_mode,
+              decision_status: rec.decision_status,
+              decision_at: rec.decision_at,
+              reason: rec.reason,
+            }))
+          : [],
+      clarification_questions: task.open_questions || [],
+      history: [
+        {
+          at: task.last_updated,
+          action: task.status === "completed" ? "completed" : "updated",
+          summary: cleanInput(task.export_ready_text, 240) || cleanInput(task.goal_summary, 180),
+          source: "system",
+        },
+      ],
+    };
+  });
+  const motifLibrary = Array.isArray(params.persistentMotifLibrary)
+    ? params.persistentMotifLibrary.map((entry: any) => ({
+        motif_type_id: cleanInput(entry?.motif_type_id, 180),
+        motif_type_title: cleanInput(entry?.motif_type_title, 180),
+        dependency: cleanInput(entry?.dependency, 40) || "enable",
+        abstraction_levels: Array.isArray(entry?.abstraction_levels) ? entry.abstraction_levels : [],
+        status: cleanInput(entry?.status, 24) || "active",
+        current_version_id: cleanInput(entry?.current_version_id, 180),
+        versions: Array.isArray(entry?.versions) ? entry.versions : [],
+        reusable_description: cleanInput(entry?.reusable_description, 240),
+        usage_count: Number(entry?.usage_count || 0),
+        source_task_ids: Array.isArray(entry?.source_task_ids) ? entry.source_task_ids : [],
+        usage_stats: entry?.usage_stats,
+      }))
+    : [];
+  return {
+    current_task_id: activeTaskId,
+    tasks: taskRows as any,
+    motif_library: motifLibrary as any,
+  };
+}
+
+function buildLongTermVisualModelForRoute(params: {
+  scenario: LongTermScenarioState;
+  locale: AppLocale;
+  previousGraph?: CDG | null;
+  prevConcepts?: any[];
+  baseConcepts?: any[];
+  prevMotifs?: any[];
+  baseMotifLinks?: any[];
+  baseContexts?: any[];
+  manualGraphOverrides?: ManualGraphOverrides | null;
+}) {
+  let model = buildLongTermVisualConversationModel({
+    scenario: params.scenario,
+    locale: params.locale,
+    previousGraph: params.previousGraph,
+    prevConcepts: params.prevConcepts || [],
+    baseConcepts: params.baseConcepts || params.prevConcepts || [],
+    prevMotifs: params.prevMotifs || [],
+    baseMotifLinks: params.baseMotifLinks || [],
+    baseContexts: params.baseContexts || [],
+  });
+  const overriddenGraph = applyManualGraphOverrides(
+    model.graph,
+    normalizeManualGraphOverrides(params.manualGraphOverrides)
+  );
+  if (!graphChanged(model.graph, overriddenGraph)) return model;
+  model = buildCognitiveModel({
+    graph: overriddenGraph,
+    prevConcepts: params.prevConcepts || [],
+    baseConcepts: params.baseConcepts || params.prevConcepts || [],
+    baseMotifs: params.prevMotifs || [],
+    baseMotifLinks: params.baseMotifLinks || [],
+    baseContexts: params.baseContexts || [],
+    locale: params.locale,
+  });
+  return model;
+}
+
+type LongTermPersistedConversationSnapshot = {
+  model: ReturnType<typeof buildCognitiveModel>;
+  longTermScenarioState: LongTermScenarioState;
+  taskDetection: TaskDetection;
+  cognitiveState: CognitiveState;
+  taskLifecycle: TaskLifecycleState;
+  motifTransferState: MotifTransferState;
+};
+
+async function persistLongTermConversationState(params: {
+  conversationId: ObjectId;
+  userId: ObjectId;
+  experimentArm: ExperimentArm;
+  locale: AppLocale;
+  model: ReturnType<typeof buildCognitiveModel>;
+  updatedAt: Date;
+  previousScenario?: LongTermScenarioState | null;
+  motifTransferState?: MotifTransferState | null;
+  motifClarificationState?: MotifClarificationState | null;
+  taskLifecycle?: TaskLifecycleState | null;
+  previousMotifs?: any[];
+  previousConcepts?: any[];
+  manualGraphOverrides?: ManualGraphOverrides | null;
+  turnNumber?: number;
+  conversationModel?: string;
+}): Promise<LongTermPersistedConversationSnapshot> {
+  const nextMotifTransferState = motifTransferStateForArm(params.experimentArm, params.motifTransferState || null);
+  const previousScenario = readLongTermScenarioState(params.previousScenario, {
+    conversationId: String(params.conversationId),
+    locale: params.locale,
+    nowIso: params.updatedAt.toISOString(),
+  });
+  const activeSegment = previousScenario.active_segment;
+  const recentTurns = await loadRecentTurnsForPlan({
+    conversationId: params.conversationId,
+    userId: params.userId,
+    taskId: currentLongTermTaskId(previousScenario, String(params.conversationId)),
+    limit: 160,
+    sortDirection: 1,
+  });
+  let longTermScenarioState = rebuildLongTermScenarioState({
+    previous: previousScenario,
+    conversationId: String(params.conversationId),
+    locale: params.locale,
+    activeSegment,
+    recentTurns: recentTurns.map((turn) => ({
+      userText: turn.userText,
+      assistantText: turn.assistantText,
+    })),
+    updatedAt: params.updatedAt.toISOString(),
+  });
+  let modelWithTransfer = buildLongTermVisualModelForRoute({
+    scenario: longTermScenarioState,
+    locale: params.locale,
+    previousGraph: params.model.graph,
+    prevConcepts: params.previousConcepts || [],
+    baseConcepts: params.previousConcepts || [],
+    prevMotifs: params.previousMotifs || [],
+    baseMotifLinks: params.model.motifLinks || [],
+    baseContexts: params.model.contexts || [],
+    manualGraphOverrides: params.manualGraphOverrides,
+  });
+
+  let refreshedTransferState = nextMotifTransferState;
+  if (allowMotifFeatures(params.experimentArm)) {
+    if (longTermScenarioState.active_segment === "study" && cleanInput(longTermScenarioState.transfer_source_task_id, 120)) {
+      refreshedTransferState = await buildLongTermTransferRecommendations({
+        userId: params.userId,
+        locale: params.locale,
+        conversationId: String(params.conversationId),
+        currentTask: buildLongTermPseudoPlanningTask(longTermScenarioState.segments.study),
+        scenario: longTermScenarioState,
+        existingState: nextMotifTransferState,
+      });
+    } else {
+      refreshedTransferState = {
+        ...nextMotifTransferState,
+        recommendations: [],
+      };
+    }
+    modelWithTransfer.motifs = applyTransferStateToMotifs({
+      motifs: annotateMotifExtractionMeta({
+        motifs: modelWithTransfer.motifs || [],
+        previousMotifs: Array.isArray(params.previousMotifs) ? (params.previousMotifs as any) : [],
+        turnNumber: Number(params.turnNumber || 0) > 0 ? Number(params.turnNumber) : 1,
+      }),
+      state: refreshedTransferState,
+    });
+    modelWithTransfer.motifGraph = {
+      ...(modelWithTransfer.motifGraph || { motifs: [], motifLinks: [] }),
+      motifs: modelWithTransfer.motifs || [],
+    };
+    await applyDisplayTitlesToModel({
+      model: modelWithTransfer,
+      previousMotifs: params.previousMotifs,
+      previousConcepts: params.previousConcepts,
+      locale: params.locale,
+      conversationModel: params.conversationModel,
+    });
+  }
+  modelWithTransfer = sanitizeModelForExperimentArm(modelWithTransfer, params.experimentArm);
+  const taskLifecycle = buildLongTermTaskLifecyclePayload(params.taskLifecycle || null, longTermScenarioState);
+  const persistentMotifLibrary = allowMotifFeatures(params.experimentArm)
+    ? await listUserMotifLibrary(params.userId, params.locale)
+    : [];
+  const taskDetection = buildLongTermTaskDetectionPayload({
+    scenario: longTermScenarioState,
+    locale: params.locale,
+  });
+  const cognitiveState = buildLongTermCognitiveStatePayload({
+    scenario: longTermScenarioState,
+    locale: params.locale,
+    model: modelWithTransfer,
+    motifTransferState: refreshedTransferState,
+    persistentMotifLibrary,
+  });
+
+  await collections.conversations.updateOne(
+    { _id: params.conversationId, userId: params.userId },
+    {
+      $set: {
+        graph: modelWithTransfer.graph,
+        concepts: modelWithTransfer.concepts,
+        motifs: modelWithTransfer.motifs,
+        motifLinks: modelWithTransfer.motifLinks,
+        motifReasoningView: modelWithTransfer.motifReasoningView,
+        contexts: modelWithTransfer.contexts,
+        validationStatus: modelWithTransfer.validationStatus,
+        travelPlanState: null,
+        longTermScenarioState,
+        taskDetection,
+        cognitiveState,
+        portfolioDocumentState: null,
+        motifTransferState: refreshedTransferState,
+        motifClarificationState: motifClarificationStateForArm(
+          params.experimentArm,
+          params.motifClarificationState || null
+        ),
+        taskLifecycle,
+        manualGraphOverrides: normalizeManualGraphOverrides(params.manualGraphOverrides),
+        updatedAt: params.updatedAt,
+      },
+    }
+  );
+  return {
+    model: modelWithTransfer,
+    longTermScenarioState,
+    taskDetection,
+    cognitiveState,
+    taskLifecycle,
+    motifTransferState: refreshedTransferState,
   };
 }
 
@@ -2044,6 +2534,7 @@ async function refreshConversationTransferProjection(params: {
   taskLifecycle?: TaskLifecycleState;
   latestUserText?: string;
 }) {
+  const domain = conversationDomain(params.conv);
   const model = buildCognitiveModel({
     graph: params.conv.graph,
     prevConcepts: params.conv.concepts || [],
@@ -2062,6 +2553,135 @@ async function refreshConversationTransferProjection(params: {
     model.motifGraph = { ...(model.motifGraph || { motifs: [], motifLinks: [] }), motifs: model.motifs };
   }
   const safeModel = sanitizeModelForExperimentArm(model, params.experimentArm);
+
+  if (domain === "long_term_personal_plan") {
+    const now = new Date();
+    const longTermScenarioState = readLongTermScenarioState((params.conv as any).longTermScenarioState, {
+      conversationId: String(params.oid),
+      locale: params.locale,
+      nowIso: now.toISOString(),
+    });
+    const refreshedScenario =
+      longTermScenarioState.active_segment === "study" && cleanInput(longTermScenarioState.transfer_source_task_id, 120)
+        ? rebuildLongTermScenarioState({
+            previous: longTermScenarioState,
+            conversationId: String(params.oid),
+            locale: params.locale,
+            activeSegment: longTermScenarioState.active_segment,
+            recentTurns: (
+              await loadRecentTurnsForPlan({
+                conversationId: params.oid,
+                userId: params.userId,
+                taskId: currentLongTermTaskId(longTermScenarioState, String(params.oid)),
+                limit: 160,
+                sortDirection: 1,
+              })
+            ).map((turn) => ({
+              userText: turn.userText,
+              assistantText: turn.assistantText,
+            })),
+            updatedAt: now.toISOString(),
+          })
+        : longTermScenarioState;
+    let visualModel = buildLongTermVisualModelForRoute({
+      scenario: refreshedScenario,
+      locale: params.locale,
+      previousGraph: (params.conv as any).graph || null,
+      prevConcepts: params.conv.concepts || [],
+      baseConcepts: params.conv.concepts || [],
+      prevMotifs: (params.conv as any).motifs || [],
+      baseMotifLinks: (params.conv as any).motifLinks || [],
+      baseContexts: (params.conv as any).contexts || [],
+      manualGraphOverrides: (params.conv as any).manualGraphOverrides || null,
+    });
+    if (allowMotifFeatures(params.experimentArm)) {
+      visualModel.motifs = applyTransferStateToMotifs({
+        motifs: annotateMotifExtractionMeta({
+          motifs: visualModel.motifs || [],
+          previousMotifs: Array.isArray((params.conv as any).motifs) ? (params.conv as any).motifs : [],
+          turnNumber: 1,
+        }),
+        state: nextMotifTransferState,
+      });
+      visualModel.motifGraph = {
+        ...(visualModel.motifGraph || { motifs: [], motifLinks: [] }),
+        motifs: visualModel.motifs,
+      };
+    }
+    let activeTransferState = nextMotifTransferState;
+    if (allowMotifFeatures(params.experimentArm) && refreshedScenario.active_segment === "study") {
+      activeTransferState = await buildLongTermTransferRecommendations({
+        userId: params.userId,
+        locale: params.locale,
+        conversationId: String(params.oid),
+        currentTask: buildLongTermPseudoPlanningTask(refreshedScenario.segments.study),
+        scenario: refreshedScenario,
+        existingState: nextMotifTransferState,
+      });
+      visualModel.motifs = applyTransferStateToMotifs({
+        motifs: visualModel.motifs || [],
+        state: activeTransferState,
+      });
+      visualModel.motifGraph = {
+        ...(visualModel.motifGraph || { motifs: [], motifLinks: [] }),
+        motifs: visualModel.motifs,
+      };
+    }
+    const safeModel = sanitizeModelForExperimentArm(visualModel, params.experimentArm);
+    const taskLifecycle = buildLongTermTaskLifecyclePayload(params.taskLifecycle || null, refreshedScenario);
+    const persistentMotifLibrary = allowMotifFeatures(params.experimentArm)
+      ? await listUserMotifLibrary(params.userId, params.locale)
+      : [];
+    const cognitiveState = buildLongTermCognitiveStatePayload({
+      scenario: refreshedScenario,
+      locale: params.locale,
+      model: safeModel,
+      motifTransferState: activeTransferState,
+      persistentMotifLibrary,
+    });
+    const taskDetection = buildLongTermTaskDetectionPayload({
+      scenario: refreshedScenario,
+      locale: params.locale,
+    });
+    await collections.conversations.updateOne(
+      { _id: params.oid, userId: params.userId },
+      {
+        $set: {
+          graph: safeModel.graph,
+          concepts: safeModel.concepts,
+          motifs: safeModel.motifs,
+          motifLinks: safeModel.motifLinks,
+        motifReasoningView: safeModel.motifReasoningView,
+        contexts: safeModel.contexts,
+        validationStatus: safeModel.validationStatus,
+        travelPlanState: null,
+        longTermScenarioState: refreshedScenario,
+          taskDetection,
+        cognitiveState,
+        portfolioDocumentState: null,
+        motifTransferState: activeTransferState,
+        motifClarificationState: motifClarificationStateForArm(
+          params.experimentArm,
+          params.motifClarificationState || readMotifClarificationState((params.conv as any).motifClarificationState)
+        ),
+        taskLifecycle,
+          updatedAt: now,
+        },
+      }
+    );
+    return {
+      model: safeModel,
+      travelPlanState: null,
+      longTermScenarioState: refreshedScenario,
+      planning: {
+      taskDetection,
+      cognitiveState,
+      portfolioDocumentState: null,
+    },
+    taskLifecycle,
+    updatedAt: now,
+  };
+  }
   const taskScope = activeTaskScope((params.conv as any).travelPlanState || null, String(params.oid));
 
   const travelPlanState =
@@ -2123,7 +2743,9 @@ async function refreshConversationTransferProjection(params: {
   return {
     model: safeModel,
     travelPlanState,
+    longTermScenarioState: null,
     planning,
+    taskLifecycle: params.taskLifecycle || readTaskLifecycle((params.conv as any)?.taskLifecycle),
     updatedAt: now,
   };
 }
@@ -2137,9 +2759,14 @@ convRouter.get("/", asyncRoute(async (req: AuthedRequest, res) => {
   const localeQuery = cleanInput((req.query as any)?.locale, 16);
   const localeFilter = localeQuery ? normalizeLocale(localeQuery) : null;
   const experimentArm = normalizeExperimentArm((req.query as any)?.experiment_arm);
+  const domain = normalizePlanningDomain((req.query as any)?.domain);
   const list = await collections.conversations
-    .find(localeFilter ? { userId, locale: localeFilter, experiment_arm: experimentArm } : { userId, experiment_arm: experimentArm })
-    .project({ title: 1, updatedAt: 1, locale: 1, experiment_arm: 1 })
+    .find(
+      localeFilter
+        ? { userId, locale: localeFilter, experiment_arm: experimentArm, domain }
+        : { userId, experiment_arm: experimentArm, domain }
+    )
+    .project({ title: 1, updatedAt: 1, locale: 1, experiment_arm: 1, domain: 1, condition: 1 })
     .sort({ updatedAt: -1 })
     .toArray();
 
@@ -2150,6 +2777,8 @@ convRouter.get("/", asyncRoute(async (req: AuthedRequest, res) => {
       updatedAt: x.updatedAt,
       locale: normalizeLocale((x as any).locale),
       experiment_arm: normalizeExperimentArm((x as any).experiment_arm),
+      domain: normalizePlanningDomain((x as any).domain),
+      condition: normalizePlanningCondition((x as any).condition, normalizeExperimentArm((x as any).experiment_arm)),
     }))
   );
 }));
@@ -2158,21 +2787,35 @@ convRouter.post("/", asyncRoute(async (req: AuthedRequest, res) => {
   const userId = req.userId!;
   const locale = normalizeLocale(req.body?.locale);
   const experimentArm = normalizeExperimentArm(req.body?.experiment_arm);
+  const domain = normalizePlanningDomain(req.body?.domain);
+  const condition = normalizePlanningCondition(req.body?.condition, experimentArm);
   const conversationModel = normalizeConversationModel(req.body?.model, config.model);
   const planningBootstrap = parsePlanningBootstrap(req.body?.planningBootstrap);
   const planningBootstrapHints = readPlanningBootstrapHints(planningBootstrap);
-  const nextTransferRecommendationsEnabled = transferRecommendationsEnabled(planningBootstrapHints, experimentArm);
-  const defaultTitle = isEnglishLocale(locale) ? "New Conversation" : "新对话";
+  const nextTransferRecommendationsEnabled =
+    domain === "travel" ? transferRecommendationsEnabled(planningBootstrapHints, experimentArm) : false;
+  const defaultTitle =
+    domain === "long_term_personal_plan" ? defaultLongTermTitle(locale) : isEnglishLocale(locale) ? "New Conversation" : "新对话";
   const requestedTitle = cleanInput(req.body?.title || defaultTitle, 80) || defaultTitle;
   const now = new Date();
-  const systemPrompt = defaultSystemPrompt(locale, experimentArm);
+  const systemPrompt = defaultSystemPrompt(locale, experimentArm, domain);
   const nowIso = now.toISOString();
+  const defaultLongTermState =
+    domain === "long_term_personal_plan"
+      ? defaultLongTermScenarioState({
+          conversationId: "temp",
+          locale,
+          nowIso,
+        })
+      : null;
 
   const inserted = await collections.conversations.insertOne({
     userId,
     title: requestedTitle,
     locale,
     experiment_arm: experimentArm,
+    domain,
+    condition,
     systemPrompt,
     model: conversationModel,
     createdAt: now,
@@ -2188,14 +2831,126 @@ convRouter.post("/", asyncRoute(async (req: AuthedRequest, res) => {
     taskLifecycle: readTaskLifecycle(null),
     manualGraphOverrides: emptyManualGraphOverrides(),
     planningBootstrapHints,
-    travelPlanState: defaultTravelPlanState({
+    travelPlanState: domain === "travel" ? defaultTravelPlanState({
       locale,
       taskId: "temp",
       nowIso,
-    }),
+    }) : null,
+    longTermScenarioState: defaultLongTermState,
   } as any);
 
   const conversationId = String(inserted.insertedId);
+  if (domain === "long_term_personal_plan") {
+    const longTermScenarioState = defaultLongTermScenarioState({
+      conversationId,
+      locale,
+      nowIso,
+    });
+    const taskDetection = buildLongTermTaskDetectionPayload({ scenario: longTermScenarioState, locale });
+    const taskLifecycle = buildLongTermTaskLifecyclePayload(readTaskLifecycle(null), longTermScenarioState);
+    await collections.conversations.updateOne(
+      { _id: inserted.insertedId, userId },
+      {
+        $set: {
+          title: requestedTitle,
+          graph: emptyGraph(conversationId),
+          concepts: [],
+          motifs: [],
+          motifLinks: [],
+          motifReasoningView: emptyMotifReasoningView(),
+          contexts: [],
+          validationStatus: "unasked",
+          motifTransferState: motifTransferStateForArm(experimentArm, null),
+          motifClarificationState: motifClarificationStateForArm(experimentArm, null),
+          planningBootstrapHints: null,
+          travelPlanState: null,
+          longTermScenarioState,
+          taskDetection,
+          cognitiveState: null,
+          portfolioDocumentState: null,
+          taskLifecycle,
+          updatedAt: now,
+        },
+      }
+    );
+    if (isPureChatArm(experimentArm)) {
+      const safeModel = sanitizeModelForExperimentArm(buildPureChatModel(locale, conversationId, { graph: emptyGraph(conversationId) }), experimentArm);
+      return res.json({
+        conversationId,
+        title: requestedTitle,
+        locale,
+        experiment_arm: experimentArm,
+        domain,
+        condition,
+        model: conversationModel,
+        systemPrompt,
+        ...modelPayload(safeModel, experimentArm),
+        travelPlanState: null,
+        longTermScenarioState,
+        taskDetection,
+        cognitiveState: null,
+        portfolioDocumentState: null,
+        motifTransferState: null,
+        taskLifecycle,
+        transferRecommendationsEnabled: false,
+      });
+    }
+
+    const model = buildLongTermVisualModelForRoute({
+      scenario: longTermScenarioState,
+      locale,
+      previousGraph: emptyGraph(conversationId),
+      prevConcepts: [],
+      baseConcepts: [],
+      prevMotifs: [],
+      baseMotifLinks: [],
+      baseContexts: [],
+      manualGraphOverrides: null,
+    });
+    const safeModel = sanitizeModelForExperimentArm(model, experimentArm);
+    const cognitiveState = buildLongTermCognitiveStatePayload({
+      scenario: longTermScenarioState,
+      locale,
+      model: safeModel,
+      motifTransferState: motifTransferStateForArm(experimentArm, null),
+      persistentMotifLibrary: [],
+    });
+    await collections.conversations.updateOne(
+      { _id: inserted.insertedId, userId },
+      {
+        $set: {
+          graph: safeModel.graph,
+          concepts: safeModel.concepts,
+          motifs: safeModel.motifs,
+          motifLinks: safeModel.motifLinks,
+          motifReasoningView: safeModel.motifReasoningView,
+          contexts: safeModel.contexts,
+          validationStatus: safeModel.validationStatus,
+          cognitiveState,
+          updatedAt: now,
+        },
+      }
+    );
+    return res.json({
+      conversationId,
+      title: requestedTitle,
+      locale,
+      experiment_arm: experimentArm,
+      domain,
+      condition,
+      model: conversationModel,
+      systemPrompt,
+      ...modelPayload(safeModel, experimentArm),
+      travelPlanState: null,
+      longTermScenarioState,
+      taskDetection,
+      cognitiveState,
+      portfolioDocumentState: null,
+      motifTransferState: motifTransferStateForArm(experimentArm, null),
+      taskLifecycle,
+      transferRecommendationsEnabled: false,
+    });
+  }
   if (isPureChatArm(experimentArm)) {
     const graph = emptyGraph(conversationId);
     await collections.conversations.updateOne(
@@ -2215,6 +2970,7 @@ convRouter.post("/", asyncRoute(async (req: AuthedRequest, res) => {
           motifClarificationState: motifClarificationStateForArm(experimentArm, null),
           planningBootstrapHints,
           travelPlanState: null,
+          longTermScenarioState: null,
           taskDetection: null,
           cognitiveState: null,
           portfolioDocumentState: null,
@@ -2230,10 +2986,13 @@ convRouter.post("/", asyncRoute(async (req: AuthedRequest, res) => {
       title: requestedTitle,
       locale,
       experiment_arm: experimentArm,
+      domain,
+      condition,
       model: conversationModel,
       systemPrompt,
       ...modelPayload(safeModel, experimentArm),
       travelPlanState: null,
+      longTermScenarioState: null,
       taskDetection: null,
       cognitiveState: null,
       portfolioDocumentState: null,
@@ -2272,6 +3031,7 @@ convRouter.post("/", asyncRoute(async (req: AuthedRequest, res) => {
         taskLifecycle: readTaskLifecycle(null),
         planningBootstrapHints,
         travelPlanState: bootstrap.travelPlanState,
+        longTermScenarioState: null,
       },
     }
   );
@@ -2392,10 +3152,13 @@ convRouter.post("/", asyncRoute(async (req: AuthedRequest, res) => {
     title: finalTitle,
     locale: normalizeLocale((conv as any).locale),
     experiment_arm: experimentArm,
+    domain,
+    condition,
     model: conversationModel,
     systemPrompt: conv.systemPrompt,
     ...modelPayload(safeModel, experimentArm),
     travelPlanState,
+    longTermScenarioState: null,
     taskDetection: planning.taskDetection,
     cognitiveState: planning.cognitiveState,
     portfolioDocumentState: planning.portfolioDocumentState,
@@ -2416,22 +3179,112 @@ convRouter.get("/:id", asyncRoute(async (req: AuthedRequest, res) => {
   if (!conv) return res.status(404).json({ error: "conversation not found" });
   const locale = normalizeLocale((conv as any).locale);
   const experimentArm = conversationExperimentArm(conv);
+  const domain = conversationDomain(conv);
+  const condition = conversationCondition(conv);
   const conversationModel = conversationModelFromDoc(conv);
   const taskLifecycle = readTaskLifecycle((conv as any).taskLifecycle);
   const planningBootstrapHints = readPlanningBootstrapHints((conv as any).planningBootstrapHints);
   const nextTransferRecommendationsEnabled = transferRecommendationsEnabled(planningBootstrapHints, experimentArm);
 
-  if (isPureChatArm(experimentArm)) {
+  if (domain === "long_term_personal_plan") {
+    const longTermScenarioState = readLongTermScenarioState((conv as any).longTermScenarioState, {
+      conversationId: id,
+      locale,
+    });
+    const nextTaskLifecycle = buildLongTermTaskLifecyclePayload(taskLifecycle, longTermScenarioState);
+    if (isChatbotCondition(condition, experimentArm)) {
+      const safeModel = sanitizeModelForExperimentArm(buildPureChatModel(locale, id, conv), experimentArm);
+      return res.json({
+        conversationId: id,
+        title: conv.title,
+        locale,
+        experiment_arm: experimentArm,
+        domain,
+        condition,
+        model: conversationModel,
+        systemPrompt: conv.systemPrompt,
+        ...modelPayload(safeModel, experimentArm),
+        travelPlanState: null,
+        longTermScenarioState,
+        taskDetection: (conv as any).taskDetection || buildLongTermTaskDetectionPayload({ scenario: longTermScenarioState, locale }),
+        cognitiveState: (conv as any).cognitiveState || null,
+        portfolioDocumentState: null,
+        motifTransferState: null,
+        taskLifecycle: nextTaskLifecycle,
+        transferRecommendationsEnabled: false,
+      });
+    }
+
+    const model = buildLongTermVisualModelForRoute({
+      scenario: longTermScenarioState,
+      locale,
+      previousGraph: (conv as any).graph || null,
+      prevConcepts: conv.concepts || [],
+      baseConcepts: conv.concepts || [],
+      prevMotifs: (conv as any).motifs || [],
+      baseMotifLinks: (conv as any).motifLinks || [],
+      baseContexts: (conv as any).contexts || [],
+      manualGraphOverrides: (conv as any).manualGraphOverrides || null,
+    });
+    let motifTransferState = motifTransferStateForArm(experimentArm, (conv as any).motifTransferState);
+    if (allowMotifFeatures(experimentArm) && longTermScenarioState.active_segment === "study") {
+      motifTransferState = await buildLongTermTransferRecommendations({
+        userId,
+        locale,
+        conversationId: id,
+        currentTask: buildLongTermPseudoPlanningTask(longTermScenarioState.segments.study),
+        scenario: longTermScenarioState,
+        existingState: motifTransferState,
+      });
+      model.motifs = applyTransferStateToMotifs({
+        motifs: model.motifs || [],
+        state: motifTransferState,
+      });
+      model.motifGraph = { ...(model.motifGraph || { motifs: [], motifLinks: [] }), motifs: model.motifs };
+    }
+    const safeModel = sanitizeModelForExperimentArm(model, experimentArm);
+    const cognitiveState = buildLongTermCognitiveStatePayload({
+      scenario: longTermScenarioState,
+      locale,
+      model: safeModel,
+      motifTransferState,
+      persistentMotifLibrary: allowMotifFeatures(experimentArm) ? await listUserMotifLibrary(userId, locale) : [],
+    });
+    return res.json({
+      conversationId: id,
+      title: conv.title,
+      locale,
+      experiment_arm: experimentArm,
+      domain,
+      condition,
+      model: conversationModel,
+      systemPrompt: conv.systemPrompt,
+      ...modelPayload(safeModel, experimentArm),
+      travelPlanState: null,
+      longTermScenarioState,
+      taskDetection: (conv as any).taskDetection || buildLongTermTaskDetectionPayload({ scenario: longTermScenarioState, locale }),
+      cognitiveState,
+      portfolioDocumentState: null,
+      motifTransferState,
+      taskLifecycle: nextTaskLifecycle,
+      transferRecommendationsEnabled: longTermScenarioState.active_segment === "study",
+    });
+  }
+
+  if (isChatbotCondition(condition, experimentArm)) {
     const safeModel = sanitizeModelForExperimentArm(buildPureChatModel(locale, id, conv), experimentArm);
     return res.json({
       conversationId: id,
       title: conv.title,
       locale,
       experiment_arm: experimentArm,
+      domain,
+      condition,
       model: conversationModel,
       systemPrompt: conv.systemPrompt,
       ...modelPayload(safeModel, experimentArm),
       travelPlanState: null,
+      longTermScenarioState: null,
       taskDetection: null,
       cognitiveState: null,
       portfolioDocumentState: null,
@@ -2480,10 +3333,13 @@ convRouter.get("/:id", asyncRoute(async (req: AuthedRequest, res) => {
     title: conv.title,
     locale,
     experiment_arm: experimentArm,
+    domain,
+    condition,
     model: conversationModel,
     systemPrompt: conv.systemPrompt,
     ...modelPayload(safeModel, experimentArm),
     travelPlanState,
+    longTermScenarioState: null,
     taskDetection: (conv as any).taskDetection || planning.taskDetection,
     cognitiveState: (conv as any).cognitiveState || planning.cognitiveState,
     portfolioDocumentState: (conv as any).portfolioDocumentState || planning.portfolioDocumentState,
@@ -2503,6 +3359,8 @@ convRouter.post("/:id/task/resume", asyncRoute(async (req: AuthedRequest, res) =
   if (!conv) return res.status(404).json({ error: "conversation not found" });
   const locale = normalizeLocale((conv as any).locale);
   const experimentArm = conversationExperimentArm(conv);
+  const domain = conversationDomain(conv);
+  const condition = conversationCondition(conv);
   const conversationModel = conversationModelFromDoc(conv);
   const nextLifecycle = reopenTaskLifecycle(readTaskLifecycle((conv as any).taskLifecycle));
   const now = new Date();
@@ -2510,6 +3368,90 @@ convRouter.post("/:id/task/resume", asyncRoute(async (req: AuthedRequest, res) =
     readPlanningBootstrapHints((conv as any).planningBootstrapHints),
     experimentArm
   );
+
+  if (domain === "long_term_personal_plan") {
+    const longTermScenarioState = readLongTermScenarioState((conv as any).longTermScenarioState, {
+      conversationId: id,
+      locale,
+      nowIso: now.toISOString(),
+    });
+    const reopenedLifecycle =
+      longTermScenarioState.bundle_status === "completed"
+        ? buildLongTermTaskLifecyclePayload(readTaskLifecycle((conv as any).taskLifecycle), longTermScenarioState)
+        : {
+            ...nextLifecycle,
+            status: "active",
+            endedAt: undefined,
+            endedTaskId: undefined,
+            updatedAt: now.toISOString(),
+          };
+
+    await collections.conversations.updateOne(
+      { _id: oid, userId },
+      {
+        $set: {
+          taskLifecycle: reopenedLifecycle,
+          updatedAt: now,
+        },
+      }
+    );
+
+    const refreshedConv = await collections.conversations.findOne({ _id: oid, userId });
+    if (!refreshedConv) return res.status(500).json({ error: "conversation refresh failed" });
+    const refreshedScenario = readLongTermScenarioState((refreshedConv as any).longTermScenarioState, {
+      conversationId: id,
+      locale,
+      nowIso: now.toISOString(),
+    });
+    const safeModel = sanitizeModelForExperimentArm(
+      isChatbotCondition(condition, experimentArm)
+        ? buildPureChatModel(locale, id, refreshedConv)
+        : buildLongTermVisualModelForRoute({
+            scenario: refreshedScenario,
+            locale,
+            previousGraph: (refreshedConv as any).graph || null,
+            prevConcepts: refreshedConv.concepts || [],
+            baseConcepts: refreshedConv.concepts || [],
+            prevMotifs: (refreshedConv as any).motifs || [],
+            baseMotifLinks: (refreshedConv as any).motifLinks || [],
+            baseContexts: (refreshedConv as any).contexts || [],
+            manualGraphOverrides: (refreshedConv as any).manualGraphOverrides || null,
+          }),
+      experimentArm
+    );
+    const motifTransferState = isChatbotCondition(condition, experimentArm)
+      ? null
+      : motifTransferStateForArm(experimentArm, (refreshedConv as any).motifTransferState);
+    const cognitiveState =
+      isChatbotCondition(condition, experimentArm) || !safeModel
+        ? null
+        : buildLongTermCognitiveStatePayload({
+            scenario: refreshedScenario,
+            locale,
+            model: safeModel,
+            motifTransferState: motifTransferState || motifTransferStateForArm(experimentArm, null),
+            persistentMotifLibrary: allowMotifFeatures(experimentArm) ? await listUserMotifLibrary(userId, locale) : [],
+          });
+    return res.json({
+      conversationId: id,
+      title: refreshedConv.title,
+      locale,
+      experiment_arm: experimentArm,
+      domain,
+      condition,
+      model: conversationModel,
+      systemPrompt: refreshedConv.systemPrompt,
+      ...modelPayload(safeModel, experimentArm),
+      travelPlanState: null,
+      longTermScenarioState: refreshedScenario,
+      taskDetection: (refreshedConv as any).taskDetection || buildLongTermTaskDetectionPayload({ scenario: refreshedScenario, locale }),
+      cognitiveState,
+      portfolioDocumentState: null,
+      motifTransferState,
+      taskLifecycle: reopenedLifecycle,
+      transferRecommendationsEnabled: !isChatbotCondition(condition, experimentArm) && refreshedScenario.active_segment === "study",
+    });
+  }
 
   await collections.conversations.updateOne(
     { _id: oid, userId },
@@ -2574,10 +3516,13 @@ convRouter.post("/:id/task/resume", asyncRoute(async (req: AuthedRequest, res) =
     title: refreshedConv.title,
     locale,
     experiment_arm: experimentArm,
+    domain,
+    condition,
     model: conversationModel,
     systemPrompt: refreshedConv.systemPrompt,
     ...modelPayload(safeModel, experimentArm),
     travelPlanState,
+    longTermScenarioState: null,
     taskDetection: planning.taskDetection,
     cognitiveState: planning.cognitiveState,
     portfolioDocumentState: planning.portfolioDocumentState,
@@ -2627,6 +3572,8 @@ convRouter.put("/:id/graph", asyncRoute(async (req: AuthedRequest, res) => {
   if (!conv) return res.status(404).json({ error: "conversation not found" });
   const locale = normalizeLocale((conv as any).locale);
   const experimentArm = conversationExperimentArm(conv);
+  const domain = conversationDomain(conv);
+  const condition = conversationCondition(conv);
   const conversationModel = conversationModelFromDoc(conv);
   const nextTransferRecommendationsEnabled = transferRecommendationsEnabled(
     readPlanningBootstrapHints((conv as any).planningBootstrapHints),
@@ -2707,6 +3654,70 @@ convRouter.put("/:id/graph", asyncRoute(async (req: AuthedRequest, res) => {
   }
   const safeModel = sanitizeModelForExperimentArm(model, experimentArm);
   model.graph.version = prevGraph.version + (graphChanged(prevGraph, model.graph) ? 1 : 0);
+
+  if (domain === "long_term_personal_plan") {
+    const motifClarificationState = motifClarificationStateForArm(experimentArm, null);
+    const now = new Date();
+    const longTermScenarioState = readLongTermScenarioState((conv as any).longTermScenarioState, {
+      conversationId: id,
+      locale,
+      nowIso: now.toISOString(),
+    });
+    const visualModel = buildLongTermVisualModelForRoute({
+      scenario: longTermScenarioState,
+      locale,
+      previousGraph: normalized,
+      prevConcepts: conv.concepts || [],
+      baseConcepts: Array.isArray(req.body?.concepts) ? req.body.concepts : conv.concepts || [],
+      prevMotifs: (conv as any).motifs || [],
+      baseMotifLinks: Array.isArray(req.body?.motifLinks)
+        ? req.body.motifLinks
+        : Array.isArray(req.body?.motif_graph?.motif_links)
+        ? req.body.motif_graph.motif_links
+        : (conv as any).motifLinks || [],
+      baseContexts: Array.isArray(req.body?.contexts) ? req.body.contexts : (conv as any).contexts || [],
+      manualGraphOverrides,
+    });
+    const persisted = await persistLongTermConversationState({
+      conversationId: oid,
+      userId,
+      experimentArm,
+      locale,
+      model: visualModel,
+      updatedAt: now,
+      previousScenario: (conv as any).longTermScenarioState || null,
+      motifTransferState,
+      motifClarificationState,
+      taskLifecycle: readTaskLifecycle((conv as any).taskLifecycle),
+      previousMotifs: (conv as any).motifs || [],
+      previousConcepts: conv.concepts || [],
+      manualGraphOverrides,
+      conversationModel,
+    });
+    const safeModel = sanitizeModelForExperimentArm(persisted.model, experimentArm);
+    return res.json({
+      conversationId: id,
+      locale,
+      experiment_arm: experimentArm,
+      domain,
+      condition,
+      model: conversationModel,
+      ...modelPayload(safeModel, experimentArm),
+      travelPlanState: null,
+      longTermScenarioState: persisted.longTermScenarioState,
+      taskDetection: persisted.taskDetection,
+      cognitiveState: persisted.cognitiveState,
+      portfolioDocumentState: null,
+      motifTransferState: isChatbotCondition(condition, experimentArm) ? null : persisted.motifTransferState,
+      motifClarificationState,
+      taskLifecycle: persisted.taskLifecycle,
+      updatedAt: now,
+      assistantText: "",
+      adviceError: "",
+      conflictGate: null,
+      transferRecommendationsEnabled: !isChatbotCondition(condition, experimentArm) && persisted.longTermScenarioState.active_segment === "study",
+    });
+  }
 
   const requestAdvice = parseBoolFlag(req.body?.requestAdvice);
   const conflictGate =
@@ -2815,9 +3826,12 @@ convRouter.put("/:id/graph", asyncRoute(async (req: AuthedRequest, res) => {
     conversationId: id,
     locale,
     experiment_arm: experimentArm,
+    domain,
+    condition,
     model: conversationModel,
     ...modelPayload(safeModel, experimentArm),
     travelPlanState,
+    longTermScenarioState: null,
     taskDetection: planning.taskDetection,
     cognitiveState: planning.cognitiveState,
     portfolioDocumentState: planning.portfolioDocumentState,
@@ -2842,6 +3856,8 @@ convRouter.put("/:id/concepts", asyncRoute(async (req: AuthedRequest, res) => {
   if (!conv) return res.status(404).json({ error: "conversation not found" });
   const locale = normalizeLocale((conv as any).locale);
   const experimentArm = conversationExperimentArm(conv);
+  const domain = conversationDomain(conv);
+  const condition = conversationCondition(conv);
   const conversationModel = conversationModelFromDoc(conv);
   const nextTransferRecommendationsEnabled = transferRecommendationsEnabled(
     readPlanningBootstrapHints((conv as any).planningBootstrapHints),
@@ -2887,6 +3903,42 @@ convRouter.put("/:id/concepts", asyncRoute(async (req: AuthedRequest, res) => {
   }
   const safeModel = sanitizeModelForExperimentArm(model, experimentArm);
   model.graph.version = prevGraph.version + (graphChanged(prevGraph, model.graph) ? 1 : 0);
+
+  if (domain === "long_term_personal_plan") {
+    const now = new Date();
+    const persisted = await persistLongTermConversationState({
+      conversationId: oid,
+      userId,
+      experimentArm,
+      locale,
+      model,
+      updatedAt: now,
+      previousScenario: (conv as any).longTermScenarioState || null,
+      motifTransferState,
+      taskLifecycle,
+      previousMotifs: (conv as any).motifs || [],
+      previousConcepts: conv.concepts || [],
+      conversationModel,
+    });
+    return res.json({
+      conversationId: id,
+      locale,
+      experiment_arm: experimentArm,
+      domain,
+      condition,
+      model: conversationModel,
+      ...modelPayload(safeModel, experimentArm),
+      travelPlanState: null,
+      longTermScenarioState: persisted.longTermScenarioState,
+      taskDetection: persisted.taskDetection,
+      cognitiveState: persisted.cognitiveState,
+      portfolioDocumentState: null,
+      motifTransferState: isChatbotCondition(condition, experimentArm) ? null : persisted.motifTransferState,
+      taskLifecycle: persisted.taskLifecycle,
+      updatedAt: now,
+      transferRecommendationsEnabled: !isChatbotCondition(condition, experimentArm) && persisted.longTermScenarioState.active_segment === "study",
+    });
+  }
   const travelPlanState = await computeTravelPlanState({
     conversationId: oid,
     userId,
@@ -2939,9 +3991,12 @@ convRouter.put("/:id/concepts", asyncRoute(async (req: AuthedRequest, res) => {
     conversationId: id,
     locale,
     experiment_arm: experimentArm,
+    domain,
+    condition,
     model: conversationModel,
     ...modelPayload(safeModel, experimentArm),
     travelPlanState,
+    longTermScenarioState: null,
     taskDetection: planning.taskDetection,
     cognitiveState: planning.cognitiveState,
     portfolioDocumentState: planning.portfolioDocumentState,
@@ -2978,6 +4033,122 @@ convRouter.get("/:id/turns", asyncRoute(async (req: AuthedRequest, res) => {
       graphVersion: t.graphVersion,
     }))
   );
+}));
+
+convRouter.post("/:id/long-term/advance", asyncRoute(async (req: AuthedRequest, res) => {
+  const userId = req.userId!;
+  const id = req.params.id;
+  const oid = parseObjectId(id);
+  if (!oid) return res.status(400).json({ error: "invalid conversation id" });
+
+  const conv = await collections.conversations.findOne({ _id: oid, userId });
+  if (!conv) return res.status(404).json({ error: "conversation not found" });
+  const locale = normalizeLocale((conv as any).locale);
+  const experimentArm = conversationExperimentArm(conv);
+  const domain = conversationDomain(conv);
+  const condition = conversationCondition(conv);
+  const conversationModel = conversationModelFromDoc(conv);
+  if (domain !== "long_term_personal_plan") {
+    return res.status(400).json({ error: "conversation is not a long-term planning scenario" });
+  }
+
+  const now = new Date();
+  const previousScenario = readLongTermScenarioState((conv as any).longTermScenarioState, {
+    conversationId: id,
+    locale,
+    nowIso: now.toISOString(),
+  });
+  const longTermScenarioState = advanceLongTermScenario({
+    previous: previousScenario,
+    conversationId: id,
+    locale,
+    nowIso: now.toISOString(),
+  });
+  const taskLifecycle = buildLongTermTaskLifecyclePayload(readTaskLifecycle((conv as any).taskLifecycle), longTermScenarioState);
+  const taskDetection = buildLongTermTaskDetectionPayload({ scenario: longTermScenarioState, locale });
+  const model = isChatbotCondition(condition, experimentArm)
+    ? buildPureChatModel(locale, id, conv)
+    : buildLongTermVisualModelForRoute({
+        scenario: longTermScenarioState,
+        locale,
+        previousGraph: (conv as any).graph || null,
+        prevConcepts: conv.concepts || [],
+        baseConcepts: conv.concepts || [],
+        prevMotifs: (conv as any).motifs || [],
+        baseMotifLinks: (conv as any).motifLinks || [],
+        baseContexts: (conv as any).contexts || [],
+        manualGraphOverrides: (conv as any).manualGraphOverrides || null,
+      });
+  let motifTransferState = motifTransferStateForArm(experimentArm, (conv as any).motifTransferState);
+  if (!isChatbotCondition(condition, experimentArm) && longTermScenarioState.active_segment === "study") {
+    motifTransferState = await buildLongTermTransferRecommendations({
+      userId,
+      locale,
+      conversationId: id,
+      currentTask: buildLongTermPseudoPlanningTask(longTermScenarioState.segments.study),
+      scenario: longTermScenarioState,
+      existingState: motifTransferState,
+    });
+    model.motifs = applyTransferStateToMotifs({
+      motifs: model.motifs || [],
+      state: motifTransferState,
+    });
+    model.motifGraph = { ...(model.motifGraph || { motifs: [], motifLinks: [] }), motifs: model.motifs };
+  }
+  const cognitiveState = isChatbotCondition(condition, experimentArm)
+    ? null
+    : buildLongTermCognitiveStatePayload({
+        scenario: longTermScenarioState,
+        locale,
+        model,
+        motifTransferState,
+        persistentMotifLibrary: allowMotifFeatures(experimentArm) ? await listUserMotifLibrary(userId, locale) : [],
+      });
+  await collections.conversations.updateOne(
+    { _id: oid, userId },
+    {
+      $set: {
+        graph: isChatbotCondition(condition, experimentArm) ? (conv as any).graph || emptyGraph(id) : model.graph,
+        concepts: isChatbotCondition(condition, experimentArm) ? [] : model.concepts,
+        motifs: isChatbotCondition(condition, experimentArm) ? [] : model.motifs,
+        motifLinks: isChatbotCondition(condition, experimentArm) ? [] : model.motifLinks,
+        motifReasoningView: isChatbotCondition(condition, experimentArm)
+          ? emptyMotifReasoningView()
+          : model.motifReasoningView,
+        contexts: isChatbotCondition(condition, experimentArm) ? [] : model.contexts,
+        validationStatus: isChatbotCondition(condition, experimentArm) ? "unasked" : model.validationStatus,
+        longTermScenarioState,
+        travelPlanState: null,
+        taskDetection,
+        cognitiveState,
+        portfolioDocumentState: null,
+        motifTransferState: isChatbotCondition(condition, experimentArm) ? null : motifTransferState,
+        taskLifecycle,
+        updatedAt: now,
+      },
+    }
+  );
+  const safeModel = sanitizeModelForExperimentArm(model, experimentArm);
+  return res.json({
+    conversationId: id,
+    title: conv.title,
+    locale,
+    experiment_arm: experimentArm,
+    domain,
+    condition,
+    model: conversationModel,
+    systemPrompt: conv.systemPrompt,
+    ...modelPayload(safeModel, experimentArm),
+    assistantText: longTermTaskActionLabel({ scenario: longTermScenarioState, locale }),
+    travelPlanState: null,
+    longTermScenarioState,
+    taskDetection,
+    cognitiveState,
+    portfolioDocumentState: null,
+    motifTransferState: isChatbotCondition(condition, experimentArm) ? null : motifTransferState,
+    taskLifecycle,
+    transferRecommendationsEnabled: !isChatbotCondition(condition, experimentArm) && longTermScenarioState.active_segment === "study",
+  });
 }));
 
 // 导出当前旅行计划 PDF（含中文自然语言与按天行程）
@@ -3124,8 +4295,309 @@ convRouter.post("/:id/turn", asyncRoute(async (req: AuthedRequest, res) => {
 
   const locale = normalizeLocale((conv as any).locale);
   const experimentArm = conversationExperimentArm(conv);
+  const domain = conversationDomain(conv);
+  const condition = conversationCondition(conv);
   const conversationModel = conversationModelFromDoc(conv);
-  if (isPureChatArm(experimentArm)) {
+  if (domain === "long_term_personal_plan") {
+    const motifEnabled = allowMotifFeatures(experimentArm) && !isChatbotCondition(condition, experimentArm);
+    let motifTransferState = motifTransferStateForArm(experimentArm, (conv as any).motifTransferState);
+    let motifClarificationState = motifClarificationStateForArm(experimentArm, (conv as any).motifClarificationState);
+    const currentLifecycle = buildLongTermTaskLifecyclePayload(
+      readTaskLifecycle((conv as any).taskLifecycle),
+      readLongTermScenarioState((conv as any).longTermScenarioState, {
+        conversationId: id,
+        locale,
+      })
+    );
+    if (currentLifecycle.status === "closed") {
+      return res.status(409).json(taskClosedErrorPayload(currentLifecycle));
+    }
+    const longTermBase = await buildLongTermRuntimeBase({
+      conversationId: oid,
+      userId,
+      conv,
+      locale,
+    });
+
+    if (isChatbotCondition(condition, experimentArm)) {
+      const assistantText = await generatePlainAssistantTextNonStreaming({
+        userText,
+        recentTurns: longTermBase.recentTurns,
+        systemPrompt: conv.systemPrompt,
+        locale,
+        model: conversationModel,
+      });
+      const now = new Date();
+      const graph = conv?.graph && typeof conv.graph === "object" ? conv.graph : emptyGraph(String(oid));
+      const graphPatch = emptyGraphPatch();
+      await collections.turns.insertOne({
+        conversationId: oid,
+        userId,
+        taskId: longTermBase.taskId,
+        createdAt: now,
+        userText,
+        assistantText,
+        graphPatch,
+        graphVersion: Number(graph.version || 0),
+      } as any);
+      const longTermScenarioState = rebuildLongTermScenarioState({
+        previous: longTermBase.scenario,
+        conversationId: id,
+        locale,
+        activeSegment: longTermBase.scenario.active_segment,
+        recentTurns: [
+          ...longTermBase.recentDocs
+            .slice()
+            .reverse()
+            .map((turn) => ({ userText: turn.userText, assistantText: turn.assistantText })),
+          { userText, assistantText },
+        ],
+        updatedAt: now.toISOString(),
+      });
+      const taskLifecycle = buildLongTermTaskLifecyclePayload(currentLifecycle, longTermScenarioState);
+      const taskDetection = buildLongTermTaskDetectionPayload({ scenario: longTermScenarioState, locale });
+      await collections.conversations.updateOne(
+        { _id: oid, userId },
+        {
+          $set: {
+            updatedAt: now,
+            graph,
+            concepts: [],
+            motifs: [],
+            motifLinks: [],
+            motifReasoningView: emptyMotifReasoningView(),
+            contexts: [],
+            travelPlanState: null,
+            longTermScenarioState,
+            taskDetection,
+            cognitiveState: null,
+            portfolioDocumentState: null,
+            motifTransferState: null,
+            motifClarificationState: null,
+            taskLifecycle,
+          },
+        }
+      );
+      const safeModel = sanitizeModelForExperimentArm(buildPureChatModel(locale, String(oid), { graph }), experimentArm);
+      return res.json({
+        assistantText,
+        graphPatch,
+        experiment_arm: experimentArm,
+        domain,
+        condition,
+        model: conversationModel,
+        ...modelPayload(safeModel, experimentArm),
+        travelPlanState: null,
+        longTermScenarioState,
+        taskDetection,
+        cognitiveState: null,
+        portfolioDocumentState: null,
+        motifTransferState: null,
+        taskLifecycle,
+        transferRecommendationsEnabled: false,
+      });
+    }
+
+    const manualReferences = motifEnabled ? parseManualReferences(req.body?.manualReferences) : [];
+    const recentTurns = longTermBase.recentTurns;
+    const baseConcepts = conv.concepts || [];
+    const baseMotifs = (conv as any).motifs || [];
+    const baseMotifLinks = (conv as any).motifLinks || [];
+    const baseContexts = (conv as any).contexts || [];
+    const manualGraphOverrides = normalizeManualGraphOverrides((conv as any).manualGraphOverrides);
+    const turnNumber = Number(longTermBase.recentDocs.length || 0) + 1;
+    const clarificationResolved = motifEnabled
+      ? resolveMotifClarificationTurn({
+          locale,
+          currentState: motifClarificationState,
+          motifs: baseMotifs,
+          userText,
+        })
+      : { state: motifClarificationState, motifs: [] as typeof baseMotifs };
+    motifClarificationState = clarificationResolved.state;
+    const turnBaseMotifs = clarificationResolved.motifs;
+    const revisionProbe = motifEnabled
+      ? registerRevisionRequestFromUtterance({
+          locale,
+          currentState: motifTransferState,
+          userText,
+        })
+      : { state: motifTransferState, followupQuestion: "" };
+    motifTransferState = revisionProbe.state;
+    if (motifEnabled) {
+      const pendingInjection = (motifTransferState.activeInjections || []).find(
+        (x) => x.injection_state === "pending_confirmation"
+      );
+      if (pendingInjection && isAffirmativeForTransfer(userText)) {
+        const confirmed = confirmTransferInjection({
+          currentState: motifTransferState,
+          candidateId: pendingInjection.candidate_id,
+        });
+        motifTransferState = confirmed.state;
+        if (confirmed.decision) {
+          await recordTransferUsage({
+            userId,
+            locale,
+            motifTypeId: pendingInjection.motif_type_id,
+            action: "adopt",
+            confidenceDelta: 0.05,
+          });
+        }
+      } else if (pendingInjection && isNegativeForTransfer(userText)) {
+        const denied = applyTransferFeedback({
+          locale,
+          currentState: motifTransferState,
+          signal: "explicit_not_applicable",
+          signalText: userText,
+          candidateId: pendingInjection.candidate_id,
+          motifTypeId: pendingInjection.motif_type_id,
+        });
+        motifTransferState = denied.state;
+      }
+    }
+
+    const preModel = buildLongTermVisualModelForRoute({
+      scenario: longTermBase.scenario,
+      locale,
+      previousGraph: (conv as any).graph || emptyGraph(String(oid)),
+      prevConcepts: baseConcepts,
+      baseConcepts,
+      prevMotifs: turnBaseMotifs,
+      baseMotifLinks,
+      baseContexts,
+      manualGraphOverrides,
+    });
+    if (motifEnabled) {
+      preModel.motifs = applyTransferStateToMotifs({
+        motifs: annotateMotifExtractionMeta({
+          motifs: preModel.motifs || [],
+          previousMotifs: turnBaseMotifs,
+          turnNumber,
+        }),
+        state: motifTransferState,
+      });
+      preModel.motifGraph = { ...(preModel.motifGraph || { motifs: [], motifLinks: [] }), motifs: preModel.motifs };
+    }
+    const conflictGate = motifEnabled ? buildConflictGatePayload(preModel.motifs, locale) : null;
+    if (conflictGate) {
+      const now = new Date();
+      const blockedPatch = { ops: [], notes: ["blocked:motif_conflict_gate", "long_term_synthetic_graph"] };
+      await collections.turns.insertOne({
+        conversationId: oid,
+        userId,
+        taskId: longTermBase.taskId,
+        createdAt: now,
+        userText,
+        assistantText: conflictGate.message,
+        graphPatch: blockedPatch,
+        graphVersion: preModel.graph.version,
+      } as any);
+      const persisted = await persistLongTermConversationState({
+        conversationId: oid,
+        userId,
+        experimentArm,
+        locale,
+        model: preModel,
+        updatedAt: now,
+        previousScenario: longTermBase.scenario,
+        motifTransferState,
+        motifClarificationState,
+        taskLifecycle: currentLifecycle,
+        previousMotifs: turnBaseMotifs,
+        previousConcepts: baseConcepts,
+        manualGraphOverrides,
+        turnNumber,
+        conversationModel,
+      });
+      const persistedModel = sanitizeModelForExperimentArm(persisted.model, experimentArm);
+      return res.json({
+        assistantText: conflictGate.message,
+        graphPatch: blockedPatch,
+        experiment_arm: experimentArm,
+        domain,
+        condition,
+        model: conversationModel,
+        ...modelPayload(persistedModel, experimentArm),
+        travelPlanState: null,
+        longTermScenarioState: persisted.longTermScenarioState,
+        taskDetection: persisted.taskDetection,
+        cognitiveState: persisted.cognitiveState,
+        portfolioDocumentState: null,
+        motifTransferState: persisted.motifTransferState,
+        taskLifecycle: persisted.taskLifecycle,
+        conflictGate,
+        transferRecommendationsEnabled: persisted.longTermScenarioState.active_segment === "study",
+      });
+    }
+
+    let assistantText = await generateAssistantTextNonStreaming({
+      graph: preModel.graph,
+      userText,
+      recentTurns,
+      systemPrompt: motifEnabled
+        ? withTransferSystemPrompt({
+            locale,
+            baseSystemPrompt: conv.systemPrompt,
+            motifTransferState,
+            manualReferences,
+          })
+        : conv.systemPrompt,
+      locale,
+      model: conversationModel,
+      motifTransferState,
+    });
+    if (revisionProbe.followupQuestion) {
+      assistantText = appendFollowupQuestion(String(assistantText || ""), revisionProbe.followupQuestion);
+    }
+    const graphPatch = { ops: [] as any[], notes: ["long_term_synthetic_graph"] };
+    const now = new Date();
+    await collections.turns.insertOne({
+      conversationId: oid,
+      userId,
+      taskId: longTermBase.taskId,
+      createdAt: now,
+      userText,
+      assistantText,
+      graphPatch,
+      graphVersion: preModel.graph.version,
+    } as any);
+    const persisted = await persistLongTermConversationState({
+      conversationId: oid,
+      userId,
+      experimentArm,
+      locale,
+      model: preModel,
+      updatedAt: now,
+      previousScenario: longTermBase.scenario,
+      motifTransferState,
+      motifClarificationState,
+      taskLifecycle: currentLifecycle,
+      previousMotifs: turnBaseMotifs,
+      previousConcepts: baseConcepts,
+      manualGraphOverrides,
+      turnNumber,
+      conversationModel,
+    });
+    const safeModel = sanitizeModelForExperimentArm(persisted.model, experimentArm);
+    return res.json({
+      assistantText,
+      graphPatch,
+      experiment_arm: experimentArm,
+      domain,
+      condition,
+      model: conversationModel,
+      ...modelPayload(safeModel, experimentArm),
+      travelPlanState: null,
+      longTermScenarioState: persisted.longTermScenarioState,
+      taskDetection: persisted.taskDetection,
+      cognitiveState: persisted.cognitiveState,
+      portfolioDocumentState: null,
+      motifTransferState: persisted.motifTransferState,
+      taskLifecycle: persisted.taskLifecycle,
+      transferRecommendationsEnabled: persisted.longTermScenarioState.active_segment === "study",
+    });
+  }
+  if (isChatbotCondition(condition, experimentArm)) {
     const recentTurns = await loadRecentTurnsForPlainChat({
       conversationId: oid,
       userId,
@@ -3188,9 +4660,12 @@ convRouter.post("/:id/turn", asyncRoute(async (req: AuthedRequest, res) => {
       assistantText,
       graphPatch,
       experiment_arm: experimentArm,
+      domain,
+      condition,
       model: conversationModel,
       ...modelPayload(safeModel, experimentArm),
       travelPlanState: null,
+      longTermScenarioState: null,
       taskDetection: null,
       cognitiveState: null,
       portfolioDocumentState: null,
@@ -3337,9 +4812,12 @@ convRouter.post("/:id/turn", asyncRoute(async (req: AuthedRequest, res) => {
       assistantText: conflictGate.message,
       graphPatch: blockedPatch,
       experiment_arm: experimentArm,
+      domain,
+      condition,
       model: conversationModel,
       ...modelPayload(safePreModel, experimentArm),
       travelPlanState: persisted.travelPlanState,
+      longTermScenarioState: null,
       taskDetection: persisted.taskDetection,
       cognitiveState: persisted.cognitiveState,
       portfolioDocumentState: persisted.portfolioDocumentState,
@@ -3488,9 +4966,12 @@ convRouter.post("/:id/turn", asyncRoute(async (req: AuthedRequest, res) => {
     assistantText: out.assistant_text,
     graphPatch: merged.appliedPatch,
     experiment_arm: experimentArm,
+    domain,
+    condition,
     model: conversationModel,
     ...modelPayload(safeModel, experimentArm),
     travelPlanState: persisted.travelPlanState,
+    longTermScenarioState: null,
     taskDetection: persisted.taskDetection,
     cognitiveState: persisted.cognitiveState,
     portfolioDocumentState: persisted.portfolioDocumentState,
@@ -3519,8 +5000,289 @@ convRouter.post("/:id/turn/stream", asyncRoute(async (req: AuthedRequest, res) =
 
   const locale = normalizeLocale((conv as any).locale);
   const experimentArm = conversationExperimentArm(conv);
+  const domain = conversationDomain(conv);
+  const condition = conversationCondition(conv);
   const conversationModel = conversationModelFromDoc(conv);
-  if (isPureChatArm(experimentArm)) {
+  if (domain === "long_term_personal_plan") {
+    const scenario = readLongTermScenarioState((conv as any).longTermScenarioState, {
+      conversationId: id,
+      locale,
+    });
+    const lifecycle = buildLongTermTaskLifecyclePayload(readTaskLifecycle((conv as any).taskLifecycle), scenario);
+    if (lifecycle.status === "closed") {
+      return res.status(409).json(taskClosedErrorPayload(lifecycle));
+    }
+
+    res.status(200);
+    res.setHeader("Content-Type", "text/event-stream; charset=utf-8");
+    res.setHeader("Cache-Control", "no-cache, no-transform");
+    res.setHeader("Connection", "keep-alive");
+    res.setHeader("X-Accel-Buffering", "no");
+    (res as any).flushHeaders?.();
+
+    sseSend(res, "start", { conversationId: id, graphVersion: Number(conv?.graph?.version || 0) });
+
+    try {
+      const longTermBase = await buildLongTermRuntimeBase({
+        conversationId: oid,
+        userId,
+        conv,
+        locale,
+      });
+
+      if (isChatbotCondition(condition, experimentArm)) {
+        const assistantText = await generatePlainAssistantTextNonStreaming({
+          userText,
+          recentTurns: longTermBase.recentTurns,
+          systemPrompt: conv.systemPrompt,
+          locale,
+          model: conversationModel,
+        });
+        const now = new Date();
+        const graph = conv?.graph && typeof conv.graph === "object" ? conv.graph : emptyGraph(String(oid));
+        const graphPatch = emptyGraphPatch();
+        await collections.turns.insertOne({
+          conversationId: oid,
+          userId,
+          taskId: longTermBase.taskId,
+          createdAt: now,
+          userText,
+          assistantText,
+          graphPatch,
+          graphVersion: Number(graph.version || 0),
+        } as any);
+        const longTermScenarioState = rebuildLongTermScenarioState({
+          previous: longTermBase.scenario,
+          conversationId: id,
+          locale,
+          activeSegment: longTermBase.scenario.active_segment,
+          recentTurns: [
+            ...longTermBase.recentDocs
+              .slice()
+              .reverse()
+              .map((turn) => ({ userText: turn.userText, assistantText: turn.assistantText })),
+            { userText, assistantText },
+          ],
+          updatedAt: now.toISOString(),
+        });
+        const taskDetection = buildLongTermTaskDetectionPayload({ scenario: longTermScenarioState, locale });
+        const taskLifecycle = buildLongTermTaskLifecyclePayload(lifecycle, longTermScenarioState);
+        await collections.conversations.updateOne(
+          { _id: oid, userId },
+          {
+            $set: {
+              updatedAt: now,
+              graph,
+              concepts: [],
+              motifs: [],
+              motifLinks: [],
+              motifReasoningView: emptyMotifReasoningView(),
+              contexts: [],
+              travelPlanState: null,
+              longTermScenarioState,
+              taskDetection,
+              cognitiveState: null,
+              portfolioDocumentState: null,
+              motifTransferState: null,
+              motifClarificationState: null,
+              taskLifecycle,
+            },
+          }
+        );
+        const safeModel = sanitizeModelForExperimentArm(buildPureChatModel(locale, String(oid), { graph }), experimentArm);
+        sseSend(res, "token", { token: assistantText });
+        sseSend(res, "done", {
+          assistantText,
+          graphPatch,
+          experiment_arm: experimentArm,
+          domain,
+          condition,
+          model: conversationModel,
+          ...modelPayload(safeModel, experimentArm),
+          travelPlanState: null,
+          longTermScenarioState,
+          taskDetection,
+          cognitiveState: null,
+          portfolioDocumentState: null,
+          motifTransferState: null,
+          taskLifecycle,
+          transferRecommendationsEnabled: false,
+        });
+        return res.end();
+      }
+
+      let motifTransferState = motifTransferStateForArm(experimentArm, (conv as any).motifTransferState);
+      let motifClarificationState = motifClarificationStateForArm(experimentArm, (conv as any).motifClarificationState);
+      const manualReferences = parseManualReferences(req.body?.manualReferences);
+      const baseConcepts = conv.concepts || [];
+      const baseMotifs = (conv as any).motifs || [];
+      const baseMotifLinks = (conv as any).motifLinks || [];
+      const baseContexts = (conv as any).contexts || [];
+      const manualGraphOverrides = normalizeManualGraphOverrides((conv as any).manualGraphOverrides);
+      const clarificationResolved = resolveMotifClarificationTurn({
+        locale,
+        currentState: motifClarificationState,
+        motifs: baseMotifs,
+        userText,
+      });
+      motifClarificationState = clarificationResolved.state;
+      const turnBaseMotifs = clarificationResolved.motifs;
+      const revisionProbe = registerRevisionRequestFromUtterance({
+        locale,
+        currentState: motifTransferState,
+        userText,
+      });
+      motifTransferState = revisionProbe.state;
+      const preModel = buildLongTermVisualModelForRoute({
+        scenario: longTermBase.scenario,
+        locale,
+        previousGraph: (conv as any).graph || emptyGraph(String(oid)),
+        prevConcepts: baseConcepts,
+        baseConcepts,
+        prevMotifs: turnBaseMotifs,
+        baseMotifLinks,
+        baseContexts,
+        manualGraphOverrides,
+      });
+      preModel.motifs = applyTransferStateToMotifs({
+        motifs: annotateMotifExtractionMeta({
+          motifs: preModel.motifs || [],
+          previousMotifs: turnBaseMotifs,
+          turnNumber: Number(longTermBase.recentDocs.length || 0) + 1,
+        }),
+        state: motifTransferState,
+      });
+      preModel.motifGraph = { ...(preModel.motifGraph || { motifs: [], motifLinks: [] }), motifs: preModel.motifs };
+      const conflictGate = buildConflictGatePayload(preModel.motifs, locale);
+      if (conflictGate) {
+        const now = new Date();
+        const blockedPatch = { ops: [], notes: ["blocked:motif_conflict_gate", "long_term_synthetic_graph"] };
+        await collections.turns.insertOne({
+          conversationId: oid,
+          userId,
+          taskId: longTermBase.taskId,
+          createdAt: now,
+          userText,
+          assistantText: conflictGate.message,
+          graphPatch: blockedPatch,
+          graphVersion: preModel.graph.version,
+        } as any);
+        const persisted = await persistLongTermConversationState({
+          conversationId: oid,
+          userId,
+          experimentArm,
+          locale,
+          model: preModel,
+          updatedAt: now,
+          previousScenario: longTermBase.scenario,
+          motifTransferState,
+          motifClarificationState,
+          taskLifecycle: lifecycle,
+          previousMotifs: turnBaseMotifs,
+          previousConcepts: baseConcepts,
+          manualGraphOverrides,
+          turnNumber: Number(longTermBase.recentDocs.length || 0) + 1,
+          conversationModel,
+        });
+        const safeModel = sanitizeModelForExperimentArm(persisted.model, experimentArm);
+        sseSend(res, "token", { token: conflictGate.message });
+        sseSend(res, "done", {
+          assistantText: conflictGate.message,
+          graphPatch: blockedPatch,
+          experiment_arm: experimentArm,
+          domain,
+          condition,
+          model: conversationModel,
+          ...modelPayload(safeModel, experimentArm),
+          travelPlanState: null,
+          longTermScenarioState: persisted.longTermScenarioState,
+          taskDetection: persisted.taskDetection,
+          cognitiveState: persisted.cognitiveState,
+          portfolioDocumentState: null,
+          motifTransferState: persisted.motifTransferState,
+          taskLifecycle: persisted.taskLifecycle,
+          conflictGate,
+          transferRecommendationsEnabled: persisted.longTermScenarioState.active_segment === "study",
+        });
+        return res.end();
+      }
+      let assistantText = await streamAssistantText({
+        graph: preModel.graph,
+        userText,
+        recentTurns: longTermBase.recentTurns,
+        systemPrompt: withTransferSystemPrompt({
+          locale,
+          baseSystemPrompt: conv.systemPrompt,
+          motifTransferState,
+          manualReferences,
+        }),
+        locale,
+        model: conversationModel,
+        onToken: (token) => {
+          if (typeof token === "string" && token.length) sseSend(res, "token", { token });
+        },
+        motifTransferState,
+      });
+      if (revisionProbe.followupQuestion) {
+        const revised = appendFollowupQuestion(String(assistantText || ""), revisionProbe.followupQuestion);
+        const delta = revised.startsWith(assistantText) ? revised.slice(assistantText.length) : "";
+        if (delta) sseSend(res, "token", { token: delta });
+        assistantText = revised;
+      }
+      const graphPatch = { ops: [] as any[], notes: ["long_term_synthetic_graph"] };
+      const now = new Date();
+      await collections.turns.insertOne({
+        conversationId: oid,
+        userId,
+        taskId: longTermBase.taskId,
+        createdAt: now,
+        userText,
+        assistantText,
+        graphPatch,
+        graphVersion: preModel.graph.version,
+      } as any);
+      const persisted = await persistLongTermConversationState({
+        conversationId: oid,
+        userId,
+        experimentArm,
+        locale,
+        model: preModel,
+        updatedAt: now,
+        previousScenario: longTermBase.scenario,
+        motifTransferState,
+        motifClarificationState,
+        taskLifecycle: lifecycle,
+        previousMotifs: turnBaseMotifs,
+        previousConcepts: baseConcepts,
+        manualGraphOverrides,
+        turnNumber: Number(longTermBase.recentDocs.length || 0) + 1,
+        conversationModel,
+      });
+      const safeModel = sanitizeModelForExperimentArm(persisted.model, experimentArm);
+      sseSend(res, "done", {
+        assistantText,
+        graphPatch,
+        experiment_arm: experimentArm,
+        domain,
+        condition,
+        model: conversationModel,
+        ...modelPayload(safeModel, experimentArm),
+        travelPlanState: null,
+        longTermScenarioState: persisted.longTermScenarioState,
+        taskDetection: persisted.taskDetection,
+        cognitiveState: persisted.cognitiveState,
+        portfolioDocumentState: null,
+        motifTransferState: persisted.motifTransferState,
+        taskLifecycle: persisted.taskLifecycle,
+        transferRecommendationsEnabled: persisted.longTermScenarioState.active_segment === "study",
+      });
+      return res.end();
+    } catch (e: any) {
+      sseSend(res, "error", { message: e?.message || "stream failed" });
+      return res.end();
+    }
+  }
+  if (isChatbotCondition(condition, experimentArm)) {
     const recentTurns = await loadRecentTurnsForPlainChat({
       conversationId: oid,
       userId,
@@ -3650,9 +5412,12 @@ convRouter.post("/:id/turn/stream", asyncRoute(async (req: AuthedRequest, res) =
       assistantText,
       graphPatch,
       experiment_arm: experimentArm,
+      domain,
+      condition,
       model: conversationModel,
       ...modelPayload(safeModel, experimentArm),
       travelPlanState: null,
+      longTermScenarioState: null,
       taskDetection: null,
       cognitiveState: null,
       portfolioDocumentState: null,
@@ -3811,9 +5576,12 @@ convRouter.post("/:id/turn/stream", asyncRoute(async (req: AuthedRequest, res) =
       assistantText: conflictGate.message,
       graphPatch: blockedPatch,
       experiment_arm: experimentArm,
+      domain,
+      condition,
       model: conversationModel,
       ...modelPayload(safePreModel, experimentArm),
       travelPlanState: persisted.travelPlanState,
+      longTermScenarioState: null,
       taskDetection: persisted.taskDetection,
       cognitiveState: persisted.cognitiveState,
       portfolioDocumentState: persisted.portfolioDocumentState,
@@ -4010,9 +5778,12 @@ convRouter.post("/:id/turn/stream", asyncRoute(async (req: AuthedRequest, res) =
       assistantText: out.assistant_text,
       graphPatch: merged.appliedPatch,
       experiment_arm: experimentArm,
+      domain,
+      condition,
       model: conversationModel,
       ...modelPayload(safeModel, experimentArm),
       travelPlanState: persisted.travelPlanState,
+      longTermScenarioState: null,
       taskDetection: persisted.taskDetection,
       cognitiveState: persisted.cognitiveState,
       portfolioDocumentState: persisted.portfolioDocumentState,
@@ -4166,9 +5937,12 @@ convRouter.post("/:id/turn/stream", asyncRoute(async (req: AuthedRequest, res) =
           assistantText: out2.assistant_text,
           graphPatch: merged2.appliedPatch,
           experiment_arm: experimentArm,
+          domain,
+          condition,
           model: conversationModel,
           ...modelPayload(safeModel2, experimentArm),
           travelPlanState: persisted.travelPlanState,
+          longTermScenarioState: null,
           taskDetection: persisted.taskDetection,
           cognitiveState: persisted.cognitiveState,
           portfolioDocumentState: persisted.portfolioDocumentState,
@@ -4201,6 +5975,8 @@ convRouter.post("/:id/motif-transfer/decision", asyncRoute(async (req: AuthedReq
   if (!conv) return res.status(404).json({ error: "conversation not found" });
   const locale = normalizeLocale((conv as any).locale);
   const experimentArm = conversationExperimentArm(conv);
+  const domain = conversationDomain(conv);
+  const condition = conversationCondition(conv);
   if (!allowMotifFeatures(experimentArm)) return rejectMotifDisabled(res);
   const actionRaw = cleanInput(req.body?.action, 24).toLowerCase();
   const action =
@@ -4279,13 +6055,16 @@ convRouter.post("/:id/motif-transfer/decision", asyncRoute(async (req: AuthedReq
       ok: true,
       decision: confirmed.decision,
       experiment_arm: experimentArm,
+      domain,
+      condition,
       motifTransferState,
       ...modelPayload(refreshed.model, experimentArm),
       travelPlanState: refreshed.travelPlanState,
+      longTermScenarioState: (refreshed as any).longTermScenarioState || null,
       taskDetection: refreshed.planning.taskDetection,
       cognitiveState: refreshed.planning.cognitiveState,
       portfolioDocumentState: refreshed.planning.portfolioDocumentState,
-      taskLifecycle,
+      taskLifecycle: (refreshed as any).taskLifecycle || taskLifecycle,
       updatedAt: refreshed.updatedAt,
     });
   }
@@ -4327,13 +6106,16 @@ convRouter.post("/:id/motif-transfer/decision", asyncRoute(async (req: AuthedReq
     decision: decided.decision,
     followupQuestion: decided.followupQuestion,
     experiment_arm: experimentArm,
+    domain,
+    condition,
     motifTransferState,
     ...modelPayload(refreshed.model, experimentArm),
     travelPlanState: refreshed.travelPlanState,
+    longTermScenarioState: (refreshed as any).longTermScenarioState || null,
     taskDetection: refreshed.planning.taskDetection,
     cognitiveState: refreshed.planning.cognitiveState,
     portfolioDocumentState: refreshed.planning.portfolioDocumentState,
-    taskLifecycle,
+    taskLifecycle: (refreshed as any).taskLifecycle || taskLifecycle,
     updatedAt: refreshed.updatedAt,
   });
 }));
@@ -4346,6 +6128,8 @@ convRouter.post("/:id/motif-transfer/batch-decision", asyncRoute(async (req: Aut
   if (!conv) return res.status(404).json({ error: "conversation not found" });
   const locale = normalizeLocale((conv as any).locale);
   const experimentArm = conversationExperimentArm(conv);
+  const domain = conversationDomain(conv);
+  const condition = conversationCondition(conv);
   if (!allowMotifFeatures(experimentArm)) return rejectMotifDisabled(res);
   const taskLifecycle = readTaskLifecycle((conv as any).taskLifecycle);
 
@@ -4466,13 +6250,16 @@ convRouter.post("/:id/motif-transfer/batch-decision", asyncRoute(async (req: Aut
     decisions,
     followupQuestions: Array.from(new Set(followupQuestions.filter(Boolean))),
     experiment_arm: experimentArm,
+    domain,
+    condition,
     motifTransferState,
     ...modelPayload(refreshed.model, experimentArm),
     travelPlanState: refreshed.travelPlanState,
+    longTermScenarioState: (refreshed as any).longTermScenarioState || null,
     taskDetection: refreshed.planning.taskDetection,
     cognitiveState: refreshed.planning.cognitiveState,
     portfolioDocumentState: refreshed.planning.portfolioDocumentState,
-    taskLifecycle,
+    taskLifecycle: (refreshed as any).taskLifecycle || taskLifecycle,
     updatedAt: refreshed.updatedAt,
   });
 }));
@@ -4485,6 +6272,8 @@ convRouter.post("/:id/motif-transfer/feedback", asyncRoute(async (req: AuthedReq
   if (!conv) return res.status(404).json({ error: "conversation not found" });
   const locale = normalizeLocale((conv as any).locale);
   const experimentArm = conversationExperimentArm(conv);
+  const domain = conversationDomain(conv);
+  const condition = conversationCondition(conv);
   if (!allowMotifFeatures(experimentArm)) return rejectMotifDisabled(res);
   const taskLifecycle = readTaskLifecycle((conv as any).taskLifecycle);
 
@@ -4535,13 +6324,16 @@ convRouter.post("/:id/motif-transfer/feedback", asyncRoute(async (req: AuthedReq
     event: feedback.event,
     followupQuestion: feedback.followupQuestion,
     experiment_arm: experimentArm,
+    domain,
+    condition,
     motifTransferState,
     ...modelPayload(refreshed.model, experimentArm),
     travelPlanState: refreshed.travelPlanState,
+    longTermScenarioState: (refreshed as any).longTermScenarioState || null,
     taskDetection: refreshed.planning.taskDetection,
     cognitiveState: refreshed.planning.cognitiveState,
     portfolioDocumentState: refreshed.planning.portfolioDocumentState,
-    taskLifecycle,
+    taskLifecycle: (refreshed as any).taskLifecycle || taskLifecycle,
     updatedAt: refreshed.updatedAt,
   });
 }));
@@ -4597,13 +6389,16 @@ convRouter.post("/:id/motif-library/confirm", asyncRoute(async (req: AuthedReque
     ok: true,
     ...confirmResult,
     experiment_arm: experimentArm,
+    domain,
+    condition,
     motifTransferState,
     ...modelPayload(refreshed.model, experimentArm),
     travelPlanState: refreshed.travelPlanState,
+    longTermScenarioState: (refreshed as any).longTermScenarioState || null,
     taskDetection: refreshed.planning.taskDetection,
     cognitiveState: refreshed.planning.cognitiveState,
     portfolioDocumentState: refreshed.planning.portfolioDocumentState,
-    taskLifecycle,
+    taskLifecycle: (refreshed as any).taskLifecycle || taskLifecycle,
     updatedAt: refreshed.updatedAt,
   });
 }));
@@ -4616,6 +6411,8 @@ convRouter.post("/:id/motif-library/revise", asyncRoute(async (req: AuthedReques
   if (!conv) return res.status(404).json({ error: "conversation not found" });
   const locale = normalizeLocale((conv as any).locale);
   const experimentArm = conversationExperimentArm(conv);
+  const domain = conversationDomain(conv);
+  const condition = conversationCondition(conv);
   if (!allowMotifFeatures(experimentArm)) return rejectMotifDisabled(res);
   const taskLifecycle = readTaskLifecycle((conv as any).taskLifecycle);
 
@@ -4685,13 +6482,16 @@ convRouter.post("/:id/motif-library/revise", asyncRoute(async (req: AuthedReques
     revised_entry: revisedResult.entry,
     revision_summary: revisedResult.summary,
     experiment_arm: experimentArm,
+    domain,
+    condition,
     motifTransferState,
     ...modelPayload(refreshed.model, experimentArm),
     travelPlanState: refreshed.travelPlanState,
+    longTermScenarioState: (refreshed as any).longTermScenarioState || null,
     taskDetection: refreshed.planning.taskDetection,
     cognitiveState: refreshed.planning.cognitiveState,
     portfolioDocumentState: refreshed.planning.portfolioDocumentState,
-    taskLifecycle,
+    taskLifecycle: (refreshed as any).taskLifecycle || taskLifecycle,
     updatedAt: refreshed.updatedAt,
   });
 }));

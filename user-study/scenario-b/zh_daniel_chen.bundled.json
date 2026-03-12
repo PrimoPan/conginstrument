@@ -1,0 +1,100 @@
+{
+  "id": "zh_daniel_chen",
+  "locale": "zh-CN",
+  "persona": {
+    "name": "Daniel Chen",
+    "age": 34,
+    "occupation": "产品经理",
+    "profile": "工作繁忙，目标明确，但日程波动大且容易拖延，需要低阻力、可插空执行的方案。"
+  },
+  "fitness": {
+    "turns": [
+      {
+        "userText": "我想重新开始规律运动，主要是想提升体能、缓解压力，不然最近工作一忙就整个人很僵。",
+        "assistantText": "好的，我们先把健身目标定成提升体能和减压。"
+      },
+      {
+        "userText": "理想情况是每周三次，每次二十到三十分钟，不然很难挤出来。",
+        "assistantText": "每周三次、每次20到30分钟是一个很现实的起点。"
+      },
+      {
+        "userText": "运动方式我想以力量训练为主，再加一点快走或者短时 HIIT，这样效率高一点。",
+        "assistantText": "力量训练、快走和短时HIIT很符合你的目标。"
+      },
+      {
+        "userText": "作息上我也该少熬夜，不然第二天根本没精力动。",
+        "assistantText": "那作息和精力恢复也要一起考虑。"
+      },
+      {
+        "userText": "新的情况是我的工作排期非常不稳定，经常临时开会或者加班，固定哪几天运动基本不现实。",
+        "assistantText": "明白，那我们要从固定日程改成按周最低目标来设计。"
+      },
+      {
+        "userText": "而且有些天我下班后很累，精力有限，哪怕知道该练也会拖延。",
+        "assistantText": "这说明我们需要同时处理精力和拖延。"
+      },
+      {
+        "userText": "所以我更适合周目标而不是固定哪天，能插空就做二十分钟；如果太忙就做十分钟徒手或者快走。",
+        "assistantText": "这种按周目标加兜底版本的结构很适合不稳定排期。"
+      },
+      {
+        "userText": "我的理由是：排期不稳定，所以不能绑定固定日期；时间和精力有限，所以只保留短时高效训练；为了避免拖延，我把最低版本压到十分钟。",
+        "assistantText": "很好，你已经把权衡逻辑解释清楚了。"
+      }
+    ]
+  },
+  "study": {
+    "turns": [
+      {
+        "userText": "学习计划这边，我想补 AI 和数据素养，主要是为了和算法团队沟通更顺畅，也提升自己的职业竞争力。",
+        "assistantText": "好的，我们把学习目标聚焦在 AI 概念理解和工作沟通上。"
+      },
+      {
+        "userText": "每周能拿出来的时间其实也就三小时左右，而且最好拆成碎片时间。",
+        "assistantText": "明白，学习节奏要设计成短时段。"
+      },
+      {
+        "userText": "我更适合项目式学习和案例拆解，比如结合真实产品看看推荐系统或者聊天助手是怎么落地的。",
+        "assistantText": "项目式学习和案例拆解会让内容更贴近你的工作。"
+      },
+      {
+        "userText": "我还想加上反思笔记，记录我可以拿去问工程师的问题。",
+        "assistantText": "反思笔记会帮助你把学习和工作真正连起来。"
+      },
+      {
+        "userText": "新的限制是我还是很容易拖延，而且工作日程继续不稳定，所以学习不能依赖大块完整时间。",
+        "assistantText": "那我们要重点处理拖延和不稳定日程。"
+      },
+      {
+        "userText": "我觉得可以沿用健身阶段的办法：先做一个很小的起步，比如看一个短视频或者听一段播客，开始了再决定要不要继续。",
+        "assistantText": "这个迁移策略非常自然，也很适合你。"
+      },
+      {
+        "userText": "如果当天太累，我就只看十分钟内容或者记一条反思笔记，这样至少不断线。",
+        "assistantText": "很好，这样即使忙也能保持连续性。"
+      },
+      {
+        "userText": "所以我的决定是：因为排期不稳定，我优先碎片化学习；因为容易拖延，我先做微小起步任务；因为想要工作相关性，我选项目式学习、案例拆解、播客和反思笔记。",
+        "assistantText": "你的解释把时间、动机和目标之间的平衡说明得很完整。"
+      }
+    ]
+  },
+  "expected": {
+    "fitnessConstraints": [
+      "schedule is unstable",
+      "energy is limited",
+      "motivation is unstable"
+    ],
+    "studyConstraints": [
+      "schedule is unstable",
+      "motivation is unstable"
+    ],
+    "studyMethods": [
+      "project-based learning",
+      "case studies",
+      "reflection notes",
+      "audio learning",
+      "lightweight content"
+    ]
+  }
+}

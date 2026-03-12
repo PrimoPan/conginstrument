@@ -16,6 +16,8 @@
     "test:planning-alignment": "tsx src/services/__tests__/planningAlignment.regression.ts",
     "test:multi-task-stability": "tsx src/services/__tests__/multiTaskStability.regression.ts",
     "test:mock-dialogue-fixtures": "tsx src/services/__tests__/mockDialogueFixtureBatch.regression.ts",
+    "test:long-term-scenario": "tsx src/services/__tests__/longTermScenario.regression.ts",
+    "test:long-term-chinese-visual": "tsx src/services/__tests__/longTermChineseVisual.regression.ts",
     "test:turn-task-scoping": "tsx src/services/__tests__/turnTaskScoping.regression.ts",
     "test:travel-plan-pdf": "tsx src/services/__tests__/travelPlanPdf.regression.ts",
     "test:algorithm-v3": "tsx src/services/__tests__/algorithmV3.regression.ts",

@@ -1,0 +1,95 @@
+{
+  "id": "li_wei_bundled",
+  "locale": "en-US",
+  "persona": {
+    "name": "Li Wei",
+    "age": 23,
+    "occupation": "Master's student",
+    "profile": "Highly motivated but overloaded student with limited time."
+  },
+  "fitness": {
+    "turns": [
+      {
+        "userText": "I want to start exercising more regularly, but I sit a lot because of studying and I mostly want to stay healthy.",
+        "assistantText": "We can build a low-pressure beginner fitness plan around health, posture, and sustainability."
+      },
+      {
+        "userText": "My main issue is back stiffness from sitting and I do not have a very stable research schedule.",
+        "assistantText": "Then a useful mix is short cardio, simple strength training for core and back, and light stretching."
+      },
+      {
+        "userText": "Four workouts per week sounds too much. Two or three sessions would feel more realistic for me.",
+        "assistantText": "A manageable weekly frequency is 2-3 times per week, with 20-30 minute sessions and quick stretch breaks between study blocks."
+      },
+      {
+        "userText": "Shorter workouts definitely sound easier to stick to.",
+        "assistantText": "Great, we can focus on short running, bodyweight strength training, and yoga or stretching so the plan stays efficient."
+      },
+      {
+        "userText": "Actually my time is even tighter than I expected. Some weeks I may only have very small time slots.",
+        "assistantText": "In that case we should switch to a short, high-efficiency format with 10-20 minute sessions when time is limited."
+      },
+      {
+        "userText": "That would help because long workouts feel hard to start after a full day of research.",
+        "assistantText": "Let's use a fallback plan: a brief bodyweight circuit, a short walk, or a quick stretch routine during study breaks."
+      },
+      {
+        "userText": "I also do not want the plan to drain my energy because coursework already takes a lot out of me.",
+        "assistantText": "Then we will keep the process low pressure, avoid heavy volume, and make sleep and recovery part of the plan."
+      },
+      {
+        "userText": "So the idea is to keep it short, practical, and easier to repeat even during busy weeks.",
+        "assistantText": "Exactly. The plan balances limited time, limited energy, strength training, and recovery so you can stay consistent."
+      }
+    ]
+  },
+  "study": {
+    "turns": [
+      {
+        "userText": "Now I want a study plan for learning data visualization for research papers and presentations.",
+        "assistantText": "Because your goal is research-focused, a project-based learning plan will be more useful than a heavy theory-first path."
+      },
+      {
+        "userText": "I probably only have around three to four hours per week and I prefer practical work.",
+        "assistantText": "We can aim for 3-4 hours per week split into short blocks: one concept session, one chart remake, and one project-based learning session."
+      },
+      {
+        "userText": "If the plan gets too big, I probably will not follow it.",
+        "assistantText": "Then we should keep it low pressure and focus on the smallest set of methods that still improve your real figures."
+      },
+      {
+        "userText": "Should I learn tools first or principles first?",
+        "assistantText": "For your use case, principles first and then tool practice is the better balance, because it prevents weak habits while staying practical."
+      },
+      {
+        "userText": "My time just got worse because a new project started and I may only have one or two hours per week now.",
+        "assistantText": "When time becomes more limited, an ultra-light routine works better: one short article or video, one tiny chart exercise, and one reflection note."
+      },
+      {
+        "userText": "I worry that learning this slowly might not be useful.",
+        "assistantText": "It still helps because consistency matters more than speed when your schedule is constrained."
+      },
+      {
+        "userText": "I also want the learning rhythm to stay manageable instead of feeling like another course.",
+        "assistantText": "Then the study rhythm should stay lightweight, use small starter tasks, and connect each session to your own research data."
+      },
+      {
+        "userText": "That makes sense. I would rather improve steadily than burn out.",
+        "assistantText": "Good. Your study plan now balances time limits, energy, project-based learning, lightweight content, and reflection notes."
+      }
+    ]
+  },
+  "expected": {
+    "fitnessConstraints": [
+      "time becomes more limited",
+      "energy is limited"
+    ],
+    "studyConstraints": [
+      "time becomes more limited",
+      "keep the process low pressure"
+    ],
+    "studyMethods": [
+      "project-based learning"
+    ]
+  }
+}
