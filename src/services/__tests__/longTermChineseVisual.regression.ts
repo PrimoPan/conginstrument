@@ -140,6 +140,12 @@ async function main() {
     assert.ok(fitnessModel.graph.nodes.length >= 5, `${fixture.id} fitness graph should have multiple nodes`);
     assert.ok(fitnessModel.concepts.length > 0, `${fixture.id} fitness concepts should not be empty`);
     assert.ok(fitnessModel.motifs.length > 0, `${fixture.id} fitness motifs should not be empty`);
+    const fitnessGoalNode = fitnessModel.graph.nodes.find((node) => clean((node as any).key) === "lt:goal:fitness");
+    assert.ok(fitnessGoalNode, `${fixture.id} should include a fitness goal node`);
+    assert.ok(
+      !/排班|临时开会|被抽干|第二份工作/u.test(clean(fitnessGoalNode?.statement)),
+      `${fixture.id} fitness goal node should stay concise and avoid constraint leakage`
+    );
     assert.ok(
       fitnessModel.graph.nodes.some((node) => clean(node.statement).includes("当前约束")),
       `${fixture.id} fitness graph should include localized constraint statements`
@@ -196,6 +202,12 @@ async function main() {
     assert.ok(
       studyModel.graph.nodes.some((node) => clean((node as any).key).startsWith("lt:study:transfer:")),
       `${fixture.id} study graph should include transfer-aware nodes`
+    );
+    const studyGoalNode = studyModel.graph.nodes.find((node) => clean((node as any).key) === "lt:goal:study");
+    assert.ok(studyGoalNode, `${fixture.id} should include a study goal node`);
+    assert.ok(
+      !/第二份工作|拖延|犯懒|排班/u.test(clean(studyGoalNode?.statement)),
+      `${fixture.id} study goal node should stay concise and avoid constraint leakage`
     );
     assert.ok(
       studyModel.graph.nodes.some((node) => clean(node.statement).includes("沿用自健身阶段")),

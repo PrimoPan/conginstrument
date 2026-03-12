@@ -57,6 +57,11 @@ async function main() {
     ["schedule is unstable", "energy is limited", "motivation is unstable"],
     "fitness idiom constraints"
   );
+  assert.equal(
+    /排班|开会|被抽干/u.test(scenario.segments.fitness.goal_summary),
+    false,
+    `fitness goal summary should stay focused on the goal, got "${scenario.segments.fitness.goal_summary}"`
+  );
   excludesAll(
     scenario.segments.fitness.constraints,
     ["keep the process low pressure"],
@@ -97,6 +102,11 @@ async function main() {
     scenario.segments.study.constraints,
     ["keep the process low pressure", "motivation is unstable"],
     "study idiom constraints"
+  );
+  assert.equal(
+    /第二份工作|播客|犯懒/u.test(scenario.segments.study.goal_summary),
+    false,
+    `study goal summary should stay focused on the goal, got "${scenario.segments.study.goal_summary}"`
   );
   includesAll(
     scenario.segments.study.methods_or_activities,

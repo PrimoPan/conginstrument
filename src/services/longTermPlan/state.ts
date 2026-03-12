@@ -304,6 +304,119 @@ function firstNonEmpty(values: string[]): string {
   return "";
 }
 
+function splitLongTermGoalSentences(text: string): string[] {
+  return String(text || "")
+    .replace(/\r\n/g, "\n")
+    .split(/[。！？!?;\n]+/)
+    .map((part) => clean(part, 220))
+    .filter(Boolean);
+}
+
+function trimConstraintTail(text: string): string {
+  return clean(
+    String(text || "")
+      .split(/(?:但|不过|只是|最近|因为|所以|而且|同时|后来|结果|but|because|since|so|lately|recently)/i)[0],
+    180
+  );
+}
+
+function normalizeLongTermGoalChunk(raw: string, segment: LongTermSegmentKey): string {
+  let text = clean(raw, 180);
+  if (!text) return "";
+
+  const directPatterns =
+    segment === "fitness"
+      ? [
+          /主要(?:想|是)\s*([^，,。；！？!?]+)/,
+          /目标(?:是|想)?\s*([^，,。；！？!?]+)/,
+          /(?:我)?(?:最)?(?:想|希望|打算|准备)\s*([^，,。；！？!?]+)/,
+          /(?:mainly want to|mostly want to|goal is to|want to|hope to)\s*([^,.;!?]+)/i,
+        ]
+      : [
+          /主要(?:想|是)\s*([^，,。；！？!?]+)/,
+          /目标(?:是|想)?\s*([^，,。；！？!?]+)/,
+          /(?:我)?(?:最)?(?:想|希望|打算|准备)\s*([^，,。；！？!?]+)/,
+          /(?:mainly want to|mostly want to|goal is to|want to|hope to)\s*([^,.;!?]+)/i,
+        ];
+  for (const pattern of directPatterns) {
+    const match = text.match(pattern);
+    if (match?.[1]) {
+      text = clean(match[1], 160);
+      break;
+    }
+  }
+
+  text = clean(
+    text
+      .replace(/^(健身|运动|学习)(这块|方面)?/u, "")
+      .replace(/^(我|现在|目前|最近|其实|就是|大概|先)\s*/u, "")
+      .replace(/^(想|希望|打算|准备|计划)\s*/u, "")
+      .replace(/^(做个?|制定|安排|建立|开始|尝试)\s*/u, "")
+      .replace(/^(一个|一套)\s*/u, "")
+      .replace(/^(健身|运动|学习)(计划|习惯|routine)?/iu, "")
+      .replace(/^(先把健身搞起来|把健身搞起来|先运动起来|先学起来)/u, "")
+      .replace(/^(补一点|补一补)/u, "补")
+      .replace(/^(提升一点|提升一丢丢)/u, "提升")
+      .replace(/^(关于|有关)\s*/u, "")
+      .replace(/^to\s+/i, "")
+      .replace(/^learn\s+/i, "learn ")
+      .replace(/^build\s+(?:a\s+)?/i, "")
+      .replace(/^start\s+/i, "")
+      .replace(/[，,]\s*(?:主要|最好|然后|最近|因为|所以|但|不过).*/u, "")
+      .replace(/[。；！？!?]+$/u, ""),
+    120
+  );
+
+  return text;
+}
+
+function isGenericLongTermGoal(text: string, segment: LongTermSegmentKey): boolean {
+  const normalized = clean(text, 120).toLowerCase();
+  if (!normalized) return true;
+  if (segment === "fitness") {
+    return /^(健身|运动|健身计划|运动计划|健身习惯|运动习惯|开始健身|开始运动|build a sustainable fitness plan|start exercising|fitness plan|fitness routine)$/i.test(
+      normalized
+    );
+  }
+  return /^(学习|学习计划|学习习惯|开始学习|补知识|学点东西|build a sustainable study plan|study plan|study routine|learn more)$/i.test(
+    normalized
+  );
+}
+
+function extractGoalSummary(text: string, segment: LongTermSegmentKey, locale?: AppLocale): string {
+  const sentences = splitLongTermGoalSentences(text);
+  const specific: string[] = [];
+  const generic: string[] = [];
+
+  for (const sentence of sentences) {
+    const candidate = normalizeLongTermGoalChunk(trimConstraintTail(sentence), segment);
+    if (!candidate) continue;
+    if (isGenericLongTermGoal(candidate, segment)) generic.push(candidate);
+    else specific.push(candidate);
+  }
+
+  const picked = firstNonEmpty([...specific, ...generic]);
+  if (picked) return picked;
+  return segment === "fitness"
+    ? t(locale, "建立一个可坚持的健身计划。", "Build a sustainable fitness plan.")
+    : t(locale, "建立一个可坚持的学习计划。", "Build a sustainable study plan.");
+}
+
+function shouldReplaceGoalSummary(
+  previousGoal: string,
+  nextGoal: string,
+  segment: LongTermSegmentKey
+): boolean {
+  const prev = clean(previousGoal, 180);
+  const next = clean(nextGoal, 180);
+  if (!next) return false;
+  if (!prev) return true;
+  if (prev === next) return false;
+  if (isGenericLongTermGoal(prev, segment) && !isGenericLongTermGoal(next, segment)) return true;
+  if (prev.length > 80 && next.length <= 60) return true;
+  return false;
+}
+
 function extractWeeklyCadence(text: string, segment: LongTermSegmentKey, locale?: AppLocale): string {
   const src = String(text || "");
   const cn = pickFirstMatch(src, [
@@ -527,14 +640,10 @@ export function rebuildLongTermScenarioState(params: {
   const previousTask = previous.segments[activeSegment];
   const userText = collectUserTexts(params.recentTurns).join(" ");
   const fullText = userText;
-
-  const goalSummary =
-    firstNonEmpty([
-      previousTask.goal_summary,
-      activeSegment === "fitness"
-        ? clean(userText, 240) || t(params.locale, "建立一个可坚持的健身计划。", "Build a sustainable fitness plan.")
-        : clean(userText, 240) || t(params.locale, "建立一个可坚持的学习计划。", "Build a sustainable study plan."),
-    ]) || "";
+  const extractedGoalSummary = extractGoalSummary(userText, activeSegment, params.locale);
+  const goalSummary = shouldReplaceGoalSummary(previousTask.goal_summary, extractedGoalSummary, activeSegment)
+    ? extractedGoalSummary
+    : firstNonEmpty([previousTask.goal_summary, extractedGoalSummary]);
   const weeklyTimeOrFrequency = extractWeeklyCadence(fullText, activeSegment, params.locale);
   const methods = uniqStrings(
     [...previousTask.methods_or_activities, ...detectMethods(fullText, activeSegment)],
