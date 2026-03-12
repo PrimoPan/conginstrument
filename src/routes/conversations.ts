@@ -2736,6 +2736,7 @@ convRouter.put("/:id/graph", asyncRoute(async (req: AuthedRequest, res) => {
     planningBootstrapHints,
     taskLifecycle,
   });
+  const motifClarificationState = motifClarificationStateForArm(experimentArm, null);
 
   const now = new Date();
   await collections.conversations.updateOne(
@@ -2754,7 +2755,7 @@ convRouter.put("/:id/graph", asyncRoute(async (req: AuthedRequest, res) => {
         cognitiveState: planning.cognitiveState,
         portfolioDocumentState: planning.portfolioDocumentState,
         motifTransferState,
-        motifClarificationState: motifClarificationStateForArm(experimentArm, null),
+        motifClarificationState,
         taskLifecycle,
         manualGraphOverrides,
         updatedAt: now,
