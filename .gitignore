@@ -8,6 +8,7 @@ node_modules/
 dist/
 *.log
 local_long_term_mock_regression_report.latest.json
+algorithm.local.zh-CN.md
 
 # editor
 .vscode/
