@@ -79,6 +79,16 @@ function runSegment(params: {
   const recentTurns: FixtureTurn[] = [];
   let scenario = params.scenario;
   let previousGraph = null as any;
+  let model = buildLongTermVisualConversationModel({
+    scenario,
+    locale: params.locale,
+    previousGraph,
+    prevConcepts: [],
+    baseConcepts: [],
+    prevMotifs: [],
+    baseMotifLinks: [],
+    baseContexts: [],
+  });
   for (const [index, turn] of params.turns.entries()) {
     recentTurns.push(turn);
     scenario = rebuildLongTermScenarioState({
@@ -89,7 +99,7 @@ function runSegment(params: {
       recentTurns,
       updatedAt: isoFor(index + (params.segment === "study" ? 100 : 0)),
     });
-    previousGraph = buildLongTermVisualConversationModel({
+    model = buildLongTermVisualConversationModel({
       scenario,
       locale: params.locale,
       previousGraph,
@@ -98,9 +108,10 @@ function runSegment(params: {
       prevMotifs: [],
       baseMotifLinks: [],
       baseContexts: [],
-    }).graph;
+    });
+    previousGraph = model.graph;
   }
-  return { scenario, previousGraph };
+  return { scenario, previousGraph, model };
 }
 
 async function main() {
@@ -127,16 +138,7 @@ async function main() {
       fixture.expected.fitnessConstraints,
       `${fixture.id} fitness constraints`
     );
-    const fitnessModel = buildLongTermVisualConversationModel({
-      scenario,
-      locale: fixture.locale,
-      previousGraph: fitnessResult.previousGraph,
-      prevConcepts: [],
-      baseConcepts: [],
-      prevMotifs: [],
-      baseMotifLinks: [],
-      baseContexts: [],
-    });
+    const fitnessModel = fitnessResult.model;
     assert.ok(fitnessModel.graph.nodes.length >= 5, `${fixture.id} fitness graph should have multiple nodes`);
     assert.ok(fitnessModel.concepts.length > 0, `${fixture.id} fitness concepts should not be empty`);
     assert.ok(fitnessModel.motifs.length > 0, `${fixture.id} fitness motifs should not be empty`);
@@ -169,6 +171,18 @@ async function main() {
       locale: fixture.locale,
       nowIso: isoFor(99),
     });
+    const blankStudyModel = buildLongTermVisualConversationModel({
+      scenario,
+      locale: fixture.locale,
+      previousGraph: fitnessModel.graph,
+      prevConcepts: fitnessModel.concepts,
+      baseConcepts: fitnessModel.concepts,
+      prevMotifs: fitnessModel.motifs,
+      baseMotifLinks: fitnessModel.motifLinks,
+      baseContexts: fitnessModel.contexts,
+    });
+    assert.equal(blankStudyModel.graph.nodes.length, 0, `${fixture.id} Task 4 should start with an empty graph`);
+    assert.equal(blankStudyModel.concepts.length, 0, `${fixture.id} Task 4 should start with no carried concepts`);
 
     const studyResult = runSegment({
       scenario,
@@ -189,19 +203,10 @@ async function main() {
       `${fixture.id} study methods`
     );
 
-    const studyModel = buildLongTermVisualConversationModel({
-      scenario,
-      locale: fixture.locale,
-      previousGraph: studyResult.previousGraph,
-      prevConcepts: fitnessModel.concepts,
-      baseConcepts: fitnessModel.concepts,
-      prevMotifs: fitnessModel.motifs,
-      baseMotifLinks: fitnessModel.motifLinks,
-      baseContexts: fitnessModel.contexts,
-    });
+    const studyModel = studyResult.model;
     assert.ok(
-      studyModel.graph.nodes.some((node) => clean((node as any).key).startsWith("lt:study:transfer:")),
-      `${fixture.id} study graph should include transfer-aware nodes`
+      studyModel.graph.nodes.length >= 4,
+      `${fixture.id} study graph should rebuild around the current task`
     );
     const studyGoalNode = studyModel.graph.nodes.find((node) => clean((node as any).key) === "lt:goal:study");
     assert.ok(studyGoalNode, `${fixture.id} should include a study goal node`);
@@ -210,8 +215,11 @@ async function main() {
       `${fixture.id} study goal node should stay concise and avoid constraint leakage`
     );
     assert.ok(
-      studyModel.graph.nodes.some((node) => clean(node.statement).includes("沿用自健身阶段")),
-      `${fixture.id} study graph should include Chinese transfer statements`
+      studyModel.graph.nodes.every((node) => {
+        const key = clean((node as any).key);
+        return !key.startsWith("lt:goal:fitness") && !key.startsWith("lt:stage:");
+      }),
+      `${fixture.id} study graph should not keep Task 3 or stage-label nodes`
     );
     assert.ok(
       studyModel.graph.nodes.every((node) => !/^slot:(destination|budget|lodging|duration)/.test(clean((node as any).key))),

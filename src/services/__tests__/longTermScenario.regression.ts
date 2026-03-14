@@ -97,6 +97,52 @@ function runSegment(params: {
 async function main() {
   const fixtures = await loadFixtures();
 
+  const greetingOnlyScenario = rebuildLongTermScenarioState({
+    previous: defaultLongTermScenarioState({
+      conversationId: "greeting_only",
+      locale: "zh-CN",
+      nowIso: isoFor(0),
+    }),
+    conversationId: "greeting_only",
+    locale: "zh-CN",
+    activeSegment: "fitness",
+    recentTurns: [{ userText: "你好", assistantText: "你好！你正在计划健身吗？" }],
+    updatedAt: isoFor(1),
+  });
+  assert.equal(greetingOnlyScenario.segments.fitness.goal_summary, "", "greeting-only turns should not become a goal");
+  assert.equal(
+    greetingOnlyScenario.segments.fitness.export_ready_text,
+    "",
+    "greeting-only turns should not create an export-ready task summary"
+  );
+  assert.equal(
+    canAdvanceLongTermScenario(greetingOnlyScenario),
+    false,
+    "greeting-only turns should not make the task advanceable"
+  );
+
+  const mixedGreetingScenario = rebuildLongTermScenarioState({
+    previous: defaultLongTermScenarioState({
+      conversationId: "mixed_greeting",
+      locale: "zh-CN",
+      nowIso: isoFor(0),
+    }),
+    conversationId: "mixed_greeting",
+    locale: "zh-CN",
+    activeSegment: "fitness",
+    recentTurns: [{ userText: "你好，我想每周健身2-3次，谢谢", assistantText: "" }],
+    updatedAt: isoFor(2),
+  });
+  assert.notEqual(
+    mixedGreetingScenario.segments.fitness.goal_summary,
+    "你好",
+    "mixed utterances should ignore the greeting wrapper"
+  );
+  assert.ok(
+    mixedGreetingScenario.segments.fitness.weekly_time_or_frequency.includes("2-3"),
+    "mixed utterances should still retain the task-relevant cadence"
+  );
+
   for (const fixture of fixtures) {
     let scenario = defaultLongTermScenarioState({
       conversationId: fixture.id,

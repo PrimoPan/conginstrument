@@ -213,8 +213,11 @@ function buildStageReport(params: {
   if ((params.model.graph.nodes || []).some((node) => /^slot:(destination|duration|budget|lodging|people)/.test(clean((node as any).key)))) {
     warnings.push("travel slot leakage detected");
   }
-  if (params.stage === "study" && transferStatements.length === 0) {
-    warnings.push("study stage has no transfer statements");
+  if (params.stage === "study" && (params.model.graph.nodes || []).some((node) => clean((node as any).key).startsWith("lt:goal:fitness"))) {
+    warnings.push("study stage still includes carried fitness nodes");
+  }
+  if ((params.model.graph.nodes || []).some((node) => clean((node as any).key).startsWith("lt:stage:"))) {
+    warnings.push("stage label nodes are still present");
   }
 
   return {

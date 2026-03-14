@@ -292,6 +292,47 @@ function collectUserTexts(turns: Array<{ userText?: string }>): string[] {
   return (turns || []).map((turn) => clean(turn?.userText, 400)).filter(Boolean);
 }
 
+const PURE_SMALL_TALK_RE =
+  /^(?:(?:你好(?:呀|啊|哦)?|您好|哈喽|嗨|hi|hello|hey|早上好|中午好|下午好|晚上好|再见(?:啦)?|拜拜(?:啦)?|bye|goodbye|谢谢(?:你)?|多谢|感谢(?:你)?|thanks?|thank you|辛苦了|好的|ok(?:ay)?|收到|嗯嗯?|嗯哼|在吗|有人吗|test|testing)(?:\s|[，,。.!！？~～、；;:：])*)+$/i;
+const LEADING_SMALL_TALK_PATTERNS = [
+  /^(?:你好(?:呀|啊|哦)?|您好|哈喽|嗨|hi|hello|hey|早上好|中午好|下午好|晚上好|请问|打扰了|不好意思|劳驾)\s*(?:[，,。.!！？~～、；;:：]|\s)*/i,
+  /^(?:谢谢(?:你)?|多谢|感谢(?:你)?|thanks?|thank you|辛苦了)\s*(?:[，,。.!！？~～、；;:：]|\s)*/i,
+  /^(?:好的|好呀|好的呢|ok(?:ay)?|收到|嗯嗯?|嗯哼)\s*(?:[，,。.!！？~～、；;:：]|\s)*/i,
+];
+const TRAILING_SMALL_TALK_PATTERNS = [
+  /(?:[，,。.!！？~～、；;:：]|\s)*(?:谢谢(?:你)?|多谢|感谢(?:你)?|thanks?|thank you|辛苦了)$/i,
+  /(?:[，,。.!！？~～、；;:：]|\s)*(?:再见(?:啦)?|拜拜(?:啦)?|bye|goodbye)$/i,
+];
+
+function extractTaskRelevantUserText(raw: string): string {
+  let text = clean(raw, 400);
+  if (!text) return "";
+  if (PURE_SMALL_TALK_RE.test(text)) return "";
+
+  let changed = true;
+  while (changed && text) {
+    changed = false;
+    for (const pattern of LEADING_SMALL_TALK_PATTERNS) {
+      const next = clean(text.replace(pattern, ""), 400);
+      if (next !== text) {
+        text = next;
+        changed = true;
+      }
+    }
+    for (const pattern of TRAILING_SMALL_TALK_PATTERNS) {
+      const next = clean(text.replace(pattern, ""), 400);
+      if (next !== text) {
+        text = next;
+        changed = true;
+      }
+    }
+  }
+
+  if (!text) return "";
+  if (PURE_SMALL_TALK_RE.test(text)) return "";
+  return text;
+}
+
 function collectAssistantTexts(turns: Array<{ assistantText?: string }>): string[] {
   return (turns || []).map((turn) => clean(turn?.assistantText, 500)).filter(Boolean);
 }
@@ -638,7 +679,24 @@ export function rebuildLongTermScenarioState(params: {
   });
   const activeSegment = params.activeSegment || previous.active_segment;
   const previousTask = previous.segments[activeSegment];
-  const userText = collectUserTexts(params.recentTurns).join(" ");
+  const relevantUserTurns = collectUserTexts(params.recentTurns)
+    .map((turn) => extractTaskRelevantUserText(turn))
+    .filter(Boolean);
+  const userText = relevantUserTurns.join(" ");
+  if (!userText) {
+    return {
+      ...previous,
+      active_segment: activeSegment,
+      segments: {
+        ...previous.segments,
+        [activeSegment]: {
+          ...previousTask,
+          last_updated: nowIso,
+        },
+      },
+      last_updated: nowIso,
+    };
+  }
   const fullText = userText;
   const extractedGoalSummary = extractGoalSummary(userText, activeSegment, params.locale);
   const goalSummary = shouldReplaceGoalSummary(previousTask.goal_summary, extractedGoalSummary, activeSegment)

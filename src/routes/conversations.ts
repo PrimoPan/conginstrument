@@ -4080,12 +4080,12 @@ convRouter.post("/:id/long-term/advance", asyncRoute(async (req: AuthedRequest, 
     : buildLongTermVisualModelForRoute({
         scenario: longTermScenarioState,
         locale,
-        previousGraph: (conv as any).graph || null,
-        prevConcepts: conv.concepts || [],
-        baseConcepts: conv.concepts || [],
-        prevMotifs: (conv as any).motifs || [],
-        baseMotifLinks: (conv as any).motifLinks || [],
-        baseContexts: (conv as any).contexts || [],
+        previousGraph: emptyGraph(id),
+        prevConcepts: [],
+        baseConcepts: [],
+        prevMotifs: [],
+        baseMotifLinks: [],
+        baseContexts: [],
         manualGraphOverrides: (conv as any).manualGraphOverrides || null,
       });
   let motifTransferState = motifTransferStateForArm(experimentArm, (conv as any).motifTransferState);

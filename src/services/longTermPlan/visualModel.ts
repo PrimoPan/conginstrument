@@ -7,6 +7,7 @@ import type {
   LongTermTaskState,
 } from "./state.js";
 import {
+  longTermTaskHasProgress,
   localizeLongTermAdjustment,
   localizeLongTermConstraint,
   localizeLongTermFallback,
@@ -53,16 +54,8 @@ function edgeIdFor(from: string, to: string, type: EdgeType) {
 
 function stageLabel(segment: LongTermSegmentKey, locale?: AppLocale) {
   return segment === "fitness"
-    ? t(locale, "Task 3 健身计划", "Task 3 Fitness Plan")
-    : t(locale, "Task 4 学习计划", "Task 4 Study Plan");
-}
-
-function stageRootStatement(segment: LongTermSegmentKey, locale?: AppLocale) {
-  return t(
-    locale,
-    segment === "fitness" ? "当前阶段：Task 3 健身计划" : "当前阶段：Task 4 学习计划",
-    segment === "fitness" ? "Current stage: Task 3 Fitness Plan" : "Current stage: Task 4 Study Plan"
-  );
+    ? t(locale, "健身", "Fitness")
+    : t(locale, "学习", "Study");
 }
 
 function buildNode(params: {
@@ -154,18 +147,6 @@ function buildSegmentNodes(params: {
   edges: ConceptEdge[];
 }) {
   const task = params.scenario.segments[params.segment];
-  const rootKey = `lt:stage:${params.segment}`;
-  const rootNode = buildNode({
-    key: rootKey,
-    statement: stageRootStatement(params.segment, params.locale),
-    type: "belief",
-    layer: "intent",
-    confidence: 0.94,
-    importance: 0.92,
-    tags: [params.segment, "stage"],
-  });
-  pushUniqueNode(params.nodes, rootNode);
-
   const goalKey = `lt:goal:${params.segment}`;
   const goalNode = buildNode({
     key: goalKey,
@@ -180,7 +161,6 @@ function buildSegmentNodes(params: {
     tags: [params.segment, "goal"],
   });
   pushUniqueNode(params.nodes, goalNode);
-  pushUniqueEdge(params.edges, buildEdge(rootNode.id, goalNode.id, "determine", 0.9));
 
   if (clean(task.weekly_time_or_frequency, 160)) {
     const cadenceNode = buildNode({
@@ -280,96 +260,33 @@ function buildSegmentNodes(params: {
   }
 }
 
-function addStudyTransferNodes(params: {
-  scenario: LongTermScenarioState;
-  locale?: AppLocale;
-  nodes: ConceptNode[];
-  edges: ConceptEdge[];
-}) {
-  if (params.scenario.active_segment !== "study") return;
-  const studyGoalId = nodeIdFor("lt:goal:study");
-  const transferable = [
-    ...(params.scenario.segments.fitness.adherence_strategy || []).slice(0, 2).map((item) => ({
-      key: `lt:study:transfer:strategy:${slug(item) || stableHash(item)}`,
-      text: localizeLongTermStrategy(item, params.locale),
-    })),
-    ...(params.scenario.segments.fitness.fallback_plan || []).slice(0, 1).map((item) => ({
-      key: `lt:study:transfer:fallback:${slug(item) || stableHash(item)}`,
-      text: localizeLongTermFallback(item, params.locale),
-    })),
-  ];
-  for (const transfer of transferable) {
-    const node = buildNode({
-      key: transfer.key,
-      statement: t(
-        params.locale,
-        `沿用自健身阶段的可复用做法：${transfer.text}`,
-        `Reusable pattern carried from fitness: ${transfer.text}`
-      ),
-      type: "belief",
-      layer: "preference",
-      confidence: 0.8,
-      importance: 0.74,
-      tags: ["study", "transfer"],
-    });
-    pushUniqueNode(params.nodes, node);
-    pushUniqueEdge(params.edges, buildEdge(node.id, studyGoalId, "enable", 0.8));
-  }
-}
-
 export function buildLongTermVisualGraph(params: {
   scenario: LongTermScenarioState;
   locale?: AppLocale;
   previousGraph?: CDG | null;
 }): CDG {
+  const activeSegment = params.scenario.active_segment;
+  const activeTask = params.scenario.segments[activeSegment];
   const nodes: ConceptNode[] = [];
   const edges: ConceptEdge[] = [];
   const previousGraph = params.previousGraph && typeof params.previousGraph === "object" ? params.previousGraph : null;
 
-  const scenarioNode = buildNode({
-    key: "lt:scenario:bundle",
-    statement: t(
-      params.locale,
-      "长期个人计划：Task 3 健身计划 -> Task 4 学习计划",
-      "Long-term planning bundle: Task 3 Fitness -> Task 4 Study"
-    ),
-    type: "belief",
-    layer: "intent",
-    confidence: 0.96,
-    importance: 0.98,
-    tags: ["scenario"],
-  });
-  pushUniqueNode(nodes, scenarioNode);
+  if (!longTermTaskHasProgress(activeTask)) {
+    return {
+      id: params.scenario.scenario_id,
+      version: Number(previousGraph?.version || 0),
+      nodes: [],
+      edges: [],
+    };
+  }
 
   buildSegmentNodes({
     scenario: params.scenario,
-    segment: "fitness",
+    segment: activeSegment,
     locale: params.locale,
     nodes,
     edges,
   });
-  pushUniqueEdge(edges, buildEdge(scenarioNode.id, nodeIdFor("lt:stage:fitness"), "determine", 0.88));
-
-  if (
-    params.scenario.active_segment === "study" ||
-    params.scenario.segments.study.status !== "idle" ||
-    clean(params.scenario.segments.study.goal_summary, 160)
-  ) {
-    buildSegmentNodes({
-      scenario: params.scenario,
-      segment: "study",
-      locale: params.locale,
-      nodes,
-      edges,
-    });
-    pushUniqueEdge(edges, buildEdge(scenarioNode.id, nodeIdFor("lt:stage:study"), "determine", 0.88));
-    addStudyTransferNodes({
-      scenario: params.scenario,
-      locale: params.locale,
-      nodes,
-      edges,
-    });
-  }
 
   const autoKeys = new Set(nodes.map((node) => clean(node.key, 180)).filter(Boolean));
   const mergedNodes = nodes.slice();
