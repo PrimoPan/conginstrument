@@ -118,6 +118,89 @@ async function main() {
   const fixtures = await loadFixtures();
   assert.equal(fixtures.length, 3);
 
+  const prefilledScenario = defaultLongTermScenarioState({
+    conversationId: "prefilled-task-3",
+    locale: "zh-CN",
+    nowIso: isoFor(0),
+  });
+  prefilledScenario.segments.fitness.goal_summary = "你好 我要规划一个柔韧性的三个月的训练";
+  prefilledScenario.segments.fitness.weekly_time_or_frequency = "每周2-3次，每次15-30分钟";
+  prefilledScenario.segments.fitness.last_updated = isoFor(1);
+  const coldStartModel = buildLongTermVisualConversationModel({
+    scenario: prefilledScenario,
+    locale: "zh-CN",
+    previousGraph: null,
+    prevConcepts: [],
+    baseConcepts: [],
+    prevMotifs: [],
+    baseMotifLinks: [],
+    baseContexts: [],
+    allowSyntheticGraphFromScenario: false,
+  });
+  assert.equal(coldStartModel.graph.nodes.length, 0, "Task 3 should stay empty before its first dialogue turn");
+  assert.equal(coldStartModel.concepts.length, 0, "Task 3 should not project concepts before dialogue evidence exists");
+
+  const firstTurnScenario = rebuildLongTermScenarioState({
+    previous: prefilledScenario,
+    conversationId: "prefilled-task-3",
+    locale: "zh-CN",
+    activeSegment: "fitness",
+    recentTurns: [
+      {
+        userText: "你好 我要规划一个柔韧性的三个月的训练",
+        assistantText: "好的，我们先把目标、频率和可坚持性梳理清楚。",
+      },
+    ],
+    updatedAt: isoFor(2),
+  });
+  const staleSystemGraph = {
+    id: "prefilled-task-3",
+    version: 4,
+    nodes: [
+      {
+        id: "legacy_stage",
+        key: "legacy:stage",
+        statement: "当前阶段：Task 3 健身计划",
+        type: "belief",
+        layer: "intent",
+        status: "confirmed",
+        confidence: 0.9,
+        importance: 0.8,
+      } as any,
+      {
+        id: "legacy_bridge",
+        key: "legacy:bundle_bridge",
+        statement: "长期个人计划：Task 3 健身计划 -> Task 4 学习计划",
+        type: "belief",
+        layer: "intent",
+        status: "confirmed",
+        confidence: 0.9,
+        importance: 0.8,
+      } as any,
+    ],
+    edges: [],
+  };
+  const recoveredModel = buildLongTermVisualConversationModel({
+    scenario: firstTurnScenario,
+    locale: "zh-CN",
+    previousGraph: staleSystemGraph,
+    prevConcepts: [],
+    baseConcepts: [],
+    prevMotifs: [],
+    baseMotifLinks: [],
+    baseContexts: [],
+  });
+  assert.equal(
+    recoveredModel.graph.nodes.some((node) => /^当前阶段[:：]/u.test(clean(node.statement))),
+    false,
+    "legacy current-stage nodes should not carry forward into Task 3"
+  );
+  assert.equal(
+    recoveredModel.graph.nodes.some((node) => /^长期个人计划[:：]/u.test(clean(node.statement))),
+    false,
+    "legacy task-bridge nodes should not carry forward into Task 3"
+  );
+
   for (const fixture of fixtures) {
     let scenario = defaultLongTermScenarioState({
       conversationId: fixture.id,

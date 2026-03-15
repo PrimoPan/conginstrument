@@ -126,12 +126,25 @@ function isTravelishStatement(statement: string): boolean {
   );
 }
 
+function isLongTermSystemStatement(statement: string): boolean {
+  return (
+    /^当前阶段[:：]/u.test(statement) ||
+    /^Current stage[:：]/i.test(statement) ||
+    /^长期个人计划[:：]/u.test(statement) ||
+    /^Long-term (personal )?plan[:：]/i.test(statement) ||
+    (/Task\s*3/i.test(statement) && /Task\s*4/i.test(statement) && /->/.test(statement)) ||
+    (/健身计划/.test(statement) && /学习计划/.test(statement) && /->/.test(statement))
+  );
+}
+
 function shouldCarryForwardNode(node: ConceptNode, autoKeys: Set<string>) {
   const key = clean(node.key, 180);
   if (key && autoKeys.has(key)) return false;
   if (key.startsWith("lt:")) return false;
   if (isTravelLeakKey(key)) return false;
-  if (isTravelishStatement(clean(node.statement, 220))) return false;
+  const statement = clean(node.statement, 220);
+  if (isTravelishStatement(statement)) return false;
+  if (isLongTermSystemStatement(statement)) return false;
   return true;
 }
 
@@ -264,14 +277,16 @@ export function buildLongTermVisualGraph(params: {
   scenario: LongTermScenarioState;
   locale?: AppLocale;
   previousGraph?: CDG | null;
+  allowSyntheticGraphFromScenario?: boolean;
 }): CDG {
   const activeSegment = params.scenario.active_segment;
   const activeTask = params.scenario.segments[activeSegment];
   const nodes: ConceptNode[] = [];
   const edges: ConceptEdge[] = [];
   const previousGraph = params.previousGraph && typeof params.previousGraph === "object" ? params.previousGraph : null;
+  const allowSyntheticGraphFromScenario = params.allowSyntheticGraphFromScenario !== false;
 
-  if (!longTermTaskHasProgress(activeTask)) {
+  if (!allowSyntheticGraphFromScenario || !longTermTaskHasProgress(activeTask)) {
     return {
       id: params.scenario.scenario_id,
       version: Number(previousGraph?.version || 0),
@@ -330,11 +345,13 @@ export function buildLongTermVisualConversationModel(params: {
   prevMotifs?: any[];
   baseMotifLinks?: any[];
   baseContexts?: any[];
+  allowSyntheticGraphFromScenario?: boolean;
 }): CognitiveModel {
   const graph = buildLongTermVisualGraph({
     scenario: params.scenario,
     locale: params.locale,
     previousGraph: params.previousGraph,
+    allowSyntheticGraphFromScenario: params.allowSyntheticGraphFromScenario,
   });
   return buildCognitiveModel({
     graph,

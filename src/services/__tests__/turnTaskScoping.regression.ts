@@ -6,9 +6,11 @@ import { collections } from "../../db/mongo.js";
 import type { CDG } from "../../core/graph.js";
 import {
   buildTurnRuntimeBase,
+  buildLongTermRuntimeBase,
   computeTravelPlanState,
   emptyManualGraphOverrides,
 } from "../../routes/conversations.js";
+import { defaultLongTermScenarioState } from "../longTermPlan/state.js";
 
 type FakeTurnDoc = {
   conversationId: ObjectId;
@@ -213,7 +215,42 @@ async function main() {
       false
     );
 
-    console.log("PASS turn task scoping keeps current-task runtime and plan reconstruction isolated");
+    const longTermScenario = defaultLongTermScenarioState({
+      conversationId: String(conversationId),
+      locale: "zh-CN",
+      nowIso: "2026-03-08T03:00:00.000Z",
+    });
+    longTermScenario.segments.fitness.status = "completed";
+    longTermScenario.segments.study.status = "active";
+    longTermScenario.active_segment = "study";
+    const longTermTurns: FakeTurnDoc[] = [
+      {
+        conversationId,
+        userId,
+        taskId: longTermScenario.segments.fitness.task_id,
+        createdAt: new Date("2026-03-08T03:05:00.000Z"),
+        userText: "我想每周锻炼两三次，每次十五到三十分钟。",
+        assistantText: "我们先按轻量健身计划来。",
+      },
+    ];
+    (collections as any).turns = makeTurnsCollection(longTermTurns);
+
+    const longTermRuntime = await buildLongTermRuntimeBase({
+      conversationId,
+      userId,
+      conv: {
+        longTermScenarioState: longTermScenario,
+      },
+      locale: "zh-CN",
+    });
+
+    assert.equal(longTermRuntime.taskId, longTermScenario.segments.study.task_id);
+    assert.equal(longTermRuntime.recentDocs.length, 0);
+    assert.deepEqual(longTermRuntime.recentTurns, []);
+    assert.deepEqual(longTermRuntime.stateContextUserTurns, []);
+    assert.equal(longTermRuntime.hasTaskDialogue, false);
+
+    console.log("PASS turn task scoping keeps current-task runtime and long-term task boundaries isolated");
   } finally {
     (collections as any).turns = originalTurns;
   }
