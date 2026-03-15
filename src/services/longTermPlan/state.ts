@@ -4,6 +4,19 @@ export type PlanningDomain = "travel" | "long_term_personal_plan";
 export type PlanningCondition = "visual" | "chatbot";
 export type LongTermSegmentKey = "fitness" | "study";
 export type LongTermTaskType = "fitness_planning" | "study_planning";
+export type LongTermSourceLabel = "assistant_proposed" | "user_confirmed" | "co_authored";
+export type LongTermSourceMapEntry = {
+  source_label: LongTermSourceLabel;
+  source_msg_ids: string[];
+  evidence_terms: string[];
+  field?: string;
+  value?: string;
+};
+export type LongTermRecentTurn = {
+  turnId?: string;
+  userText?: string;
+  assistantText?: string;
+};
 
 export type LongTermTaskState = {
   task_id: string;
@@ -18,7 +31,7 @@ export type LongTermTaskState = {
   fallback_plan: string[];
   open_questions: string[];
   rationale_refs: string[];
-  source_map: Record<string, { source_label: "assistant_proposed" | "user_confirmed" | "co_authored" }>;
+  source_map: Record<string, LongTermSourceMapEntry>;
   export_ready_text: string;
   status: "idle" | "active" | "completed";
   last_updated: string;
@@ -71,6 +84,206 @@ function uniqStrings(values: any[], max = 8): string[] {
 
 function t(locale: AppLocale | undefined, zh: string, en: string) {
   return isEnglishLocale(locale) ? en : zh;
+}
+
+const LONG_TERM_ARRAY_SOURCE_FIELDS = new Set([
+  "methods_or_activities",
+  "constraints",
+  "diet_sleep_adjustments",
+  "adherence_strategy",
+  "fallback_plan",
+]);
+
+function stableHash(input: string): string {
+  let hash = 2166136261;
+  for (const ch of String(input || "")) {
+    hash ^= ch.codePointAt(0) || 0;
+    hash = Math.imul(hash, 16777619);
+  }
+  return (hash >>> 0).toString(36);
+}
+
+function slug(input: string, max = 48): string {
+  return clean(input, 240)
+    .toLowerCase()
+    .replace(/[^\p{L}\p{N}]+/gu, "_")
+    .replace(/_+/g, "_")
+    .replace(/^_+|_+$/g, "")
+    .slice(0, max);
+}
+
+function normalizeLongTermSourceLabel(raw: unknown): LongTermSourceLabel {
+  const text = clean(raw, 40);
+  if (text === "assistant_proposed" || text === "co_authored") return text;
+  return "user_confirmed";
+}
+
+function looksLikeUserScopedSourceToken(token: string): boolean {
+  return (
+    token.includes("user") ||
+    token === "latest_user" ||
+    token.startsWith("msg_u") ||
+    token.startsWith("u_") ||
+    token.startsWith("turn_") ||
+    token.startsWith("manual_")
+  );
+}
+
+function normalizeLongTermSourceToken(
+  raw: unknown,
+  label: LongTermSourceLabel,
+  fallbackIndex?: number
+): string {
+  const token = clean(raw, 120);
+  if (!token) {
+    return label === "user_confirmed" ? `turn_u_${Number(fallbackIndex || 0) + 1}` : "";
+  }
+  if (label !== "user_confirmed") return token;
+  if (looksLikeUserScopedSourceToken(token)) return token;
+  return `turn_u_${token}`;
+}
+
+function normalizeLongTermSourceMsgIds(raw: any[], label: LongTermSourceLabel): string[] {
+  const out: string[] = [];
+  const seen = new Set<string>();
+  for (const [index, value] of (raw || []).entries()) {
+    const token = normalizeLongTermSourceToken(value, label, index);
+    if (!token || seen.has(token)) continue;
+    seen.add(token);
+    out.push(token);
+    if (out.length >= 12) break;
+  }
+  return out;
+}
+
+function inferLongTermSourceField(key: string): string {
+  const normalized = clean(key, 120);
+  if (!normalized) return "";
+  const splitAt = normalized.indexOf("__");
+  return splitAt >= 0 ? normalized.slice(0, splitAt) : normalized;
+}
+
+export function buildLongTermSourceMapKey(field: string, value?: string): string {
+  const base = clean(field, 80).replace(/[^a-z0-9_]+/gi, "_");
+  if (!base) return "field";
+  if (!LONG_TERM_ARRAY_SOURCE_FIELDS.has(base)) return base;
+  const cleanedValue = clean(value, 180);
+  if (!cleanedValue) return base;
+  return `${base}__${slug(cleanedValue, 48) || stableHash(cleanedValue)}`;
+}
+
+function normalizeLongTermSourceMapEntry(raw: any, fieldHint?: string): LongTermSourceMapEntry | null {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
+  const field = clean(raw?.field, 80) || clean(fieldHint, 80);
+  const value = clean(raw?.value, 180);
+  const sourceLabel = normalizeLongTermSourceLabel(raw?.source_label);
+  return {
+    source_label: sourceLabel,
+    source_msg_ids: normalizeLongTermSourceMsgIds(raw?.source_msg_ids || raw?.sourceMsgIds || [], sourceLabel),
+    evidence_terms: uniqStrings(raw?.evidence_terms || raw?.evidenceTerms || [], 8),
+    field: field || undefined,
+    value: value || undefined,
+  };
+}
+
+function normalizeLongTermSourceMap(
+  raw: any,
+  fallback: Record<string, LongTermSourceMapEntry> = {}
+): Record<string, LongTermSourceMapEntry> {
+  const out: Record<string, LongTermSourceMapEntry> = {};
+  const source = raw && typeof raw === "object" && !Array.isArray(raw) ? raw : fallback;
+  for (const [key, value] of Object.entries(source || {})) {
+    const field = inferLongTermSourceField(key);
+    const entry = normalizeLongTermSourceMapEntry(value, field);
+    if (!entry) continue;
+    const normalizedKey = buildLongTermSourceMapKey(entry.field || field, entry.value);
+    out[normalizedKey] = entry;
+  }
+  return out;
+}
+
+function cloneLongTermSourceMap(
+  raw: Record<string, LongTermSourceMapEntry> | null | undefined
+): Record<string, LongTermSourceMapEntry> {
+  return normalizeLongTermSourceMap(raw || {});
+}
+
+function upsertLongTermSourceMapEntry(
+  target: Record<string, LongTermSourceMapEntry>,
+  entry: LongTermSourceMapEntry
+) {
+  const field = clean(entry.field, 80);
+  if (!field) return;
+  const normalized: LongTermSourceMapEntry = {
+    source_label: normalizeLongTermSourceLabel(entry.source_label),
+    source_msg_ids: uniqStrings(entry.source_msg_ids || [], 12),
+    evidence_terms: uniqStrings(entry.evidence_terms || [], 8),
+    field,
+    value: clean(entry.value, 180) || undefined,
+  };
+  const key = buildLongTermSourceMapKey(field, normalized.value);
+  const prev = normalizeLongTermSourceMapEntry(target[key], field);
+  target[key] = prev
+    ? {
+        ...normalized,
+        source_msg_ids: uniqStrings([...(prev.source_msg_ids || []), ...(normalized.source_msg_ids || [])], 12),
+        evidence_terms: uniqStrings([...(prev.evidence_terms || []), ...(normalized.evidence_terms || [])], 8),
+      }
+    : normalized;
+}
+
+function deleteLongTermSourceMapEntries(
+  target: Record<string, LongTermSourceMapEntry>,
+  field: string,
+  value?: string
+) {
+  const normalizedField = clean(field, 80);
+  if (!normalizedField) return;
+  if (value != null) {
+    delete target[buildLongTermSourceMapKey(normalizedField, value)];
+    return;
+  }
+  for (const key of Object.keys(target)) {
+    const entryField = clean(target[key]?.field, 80) || inferLongTermSourceField(key);
+    if (entryField === normalizedField) delete target[key];
+  }
+}
+
+export function getLongTermSourceMapEntry(
+  task: Partial<LongTermTaskState> | null | undefined,
+  field: string,
+  value?: string
+): LongTermSourceMapEntry | null {
+  const map = normalizeLongTermSourceMap(task?.source_map || {});
+  const normalizedField = clean(field, 80);
+  if (!normalizedField) return null;
+  const direct = map[buildLongTermSourceMapKey(normalizedField, value)];
+  if (direct) return direct;
+  const normalizedValue = clean(value, 180);
+  if (!normalizedValue) return map[normalizedField] || null;
+  for (const entry of Object.values(map)) {
+    if (clean(entry?.field, 80) !== normalizedField) continue;
+    if (clean(entry?.value, 180) === normalizedValue) return entry;
+  }
+  return null;
+}
+
+function hasLongTermUserSource(
+  task: Partial<LongTermTaskState> | null | undefined,
+  field: string,
+  value?: string
+) {
+  const entry = getLongTermSourceMapEntry(task, field, value);
+  return !!entry && entry.source_label === "user_confirmed" && entry.source_msg_ids.length > 0;
+}
+
+export function longTermTaskHasUserGroundedEvidence(
+  task: Partial<LongTermTaskState> | null | undefined
+): boolean {
+  const map = normalizeLongTermSourceMap(task?.source_map || {});
+  return Object.values(map).some(
+    (entry) => entry.source_label === "user_confirmed" && (entry.source_msg_ids || []).length > 0
+  );
 }
 
 const METHOD_LABELS: Record<string, { zh: string; en: string }> = {
@@ -259,10 +472,7 @@ function normalizeTaskState(raw: any, fallback: LongTermTaskState): LongTermTask
     fallback_plan: uniqStrings(raw?.fallback_plan || [], 8),
     open_questions: uniqStrings(raw?.open_questions || [], 6),
     rationale_refs: uniqStrings(raw?.rationale_refs || [], 8),
-    source_map:
-      raw?.source_map && typeof raw.source_map === "object" && !Array.isArray(raw.source_map)
-        ? raw.source_map
-        : fallback.source_map,
+    source_map: normalizeLongTermSourceMap(raw?.source_map, fallback.source_map),
     export_ready_text: cleanMultiline(raw?.export_ready_text, 4000),
     status,
     last_updated: clean(raw?.last_updated, 80) || fallback.last_updated,
@@ -288,8 +498,32 @@ export function canAdvanceLongTermScenario(scenario: LongTermScenarioState | nul
   return longTermTaskHasProgress(activeTask);
 }
 
-function collectUserTexts(turns: Array<{ userText?: string }>): string[] {
-  return (turns || []).map((turn) => clean(turn?.userText, 400)).filter(Boolean);
+type RelevantLongTermUserTurn = {
+  sourceMsgId: string;
+  rawText: string;
+  relevantText: string;
+};
+
+function sourceTokenForLongTermTurn(turnId: unknown, index: number): string {
+  return normalizeLongTermSourceToken(turnId, "user_confirmed", index);
+}
+
+function collectRelevantUserTurns(turns: LongTermRecentTurn[]): RelevantLongTermUserTurn[] {
+  const out: RelevantLongTermUserTurn[] = [];
+  let userIndex = 0;
+  for (const turn of turns || []) {
+    const rawText = clean(turn?.userText, 400);
+    if (!rawText) continue;
+    const relevantText = extractTaskRelevantUserText(rawText);
+    if (!relevantText) continue;
+    out.push({
+      sourceMsgId: sourceTokenForLongTermTurn(turn?.turnId, userIndex),
+      rawText,
+      relevantText,
+    });
+    userIndex += 1;
+  }
+  return out;
 }
 
 const PURE_SMALL_TALK_RE =
@@ -331,10 +565,6 @@ function extractTaskRelevantUserText(raw: string): string {
   if (!text) return "";
   if (PURE_SMALL_TALK_RE.test(text)) return "";
   return text;
-}
-
-function collectAssistantTexts(turns: Array<{ assistantText?: string }>): string[] {
-  return (turns || []).map((turn) => clean(turn?.assistantText, 500)).filter(Boolean);
 }
 
 function firstNonEmpty(values: string[]): string {
@@ -424,7 +654,7 @@ function isGenericLongTermGoal(text: string, segment: LongTermSegmentKey): boole
   );
 }
 
-function extractGoalSummary(text: string, segment: LongTermSegmentKey, locale?: AppLocale): string {
+function extractGoalSummary(text: string, segment: LongTermSegmentKey, _locale?: AppLocale): string {
   const sentences = splitLongTermGoalSentences(text);
   const specific: string[] = [];
   const generic: string[] = [];
@@ -438,9 +668,7 @@ function extractGoalSummary(text: string, segment: LongTermSegmentKey, locale?: 
 
   const picked = firstNonEmpty([...specific, ...generic]);
   if (picked) return picked;
-  return segment === "fitness"
-    ? t(locale, "建立一个可坚持的健身计划。", "Build a sustainable fitness plan.")
-    : t(locale, "建立一个可坚持的学习计划。", "Build a sustainable study plan.");
+  return "";
 }
 
 function shouldReplaceGoalSummary(
@@ -458,7 +686,7 @@ function shouldReplaceGoalSummary(
   return false;
 }
 
-function extractWeeklyCadence(text: string, segment: LongTermSegmentKey, locale?: AppLocale): string {
+function extractWeeklyCadence(text: string, _segment: LongTermSegmentKey, _locale?: AppLocale): string {
   const src = String(text || "");
   const cn = pickFirstMatch(src, [
     /(每周[^。；\n]{0,24}(?:[0-9一二三四五六七八九十两半]+(?:到|至|\-|~)?[0-9一二三四五六七八九十两半]*)(?:次|小时|个小时))/,
@@ -468,9 +696,7 @@ function extractWeeklyCadence(text: string, segment: LongTermSegmentKey, locale?
   if (cn) return cn;
   const enMatch = src.match(/(\d+\s*(?:-|to)?\s*\d*\s*(?:times|hours?)\s+per week)/i);
   if (enMatch?.[1]) return clean(enMatch[1], 80);
-  return segment === "fitness"
-    ? t(locale, "每周2-3次，单次15-30分钟", "2-3 times per week, 15-30 minutes each")
-    : t(locale, "每周3-4小时，拆成短时段", "3-4 hours per week in short blocks");
+  return "";
 }
 
 function detectMethods(text: string, segment: LongTermSegmentKey): string[] {
@@ -657,6 +883,64 @@ function buildTaskExportText(task: LongTermTaskState, locale?: AppLocale): strin
   return lines.join("\n");
 }
 
+function turnContainsEvidence(turn: RelevantLongTermUserTurn, evidenceTerms: string[]): boolean {
+  const haystacks = [clean(turn.rawText, 400).toLowerCase(), clean(turn.relevantText, 400).toLowerCase()].filter(Boolean);
+  return evidenceTerms.some((term) => {
+    const needle = clean(term, 120).toLowerCase();
+    if (!needle) return false;
+    return haystacks.some((text) => text.includes(needle));
+  });
+}
+
+function buildLongTermSourceMapEntry(params: {
+  field: string;
+  value: string;
+  turns: RelevantLongTermUserTurn[];
+  evidenceTerms?: string[];
+}): LongTermSourceMapEntry | null {
+  const field = clean(params.field, 80);
+  const value = clean(params.value, 180);
+  if (!field || !value || !(params.turns || []).length) return null;
+  const evidenceTerms = uniqStrings([...(params.evidenceTerms || []), value], 8);
+  const matchedTurns = params.turns.filter((turn) => turnContainsEvidence(turn, evidenceTerms));
+  const sourceMsgIds = uniqStrings(
+    (matchedTurns.length ? matchedTurns : [params.turns[params.turns.length - 1]]).map((turn) => turn.sourceMsgId),
+    12
+  );
+  return {
+    source_label: "user_confirmed",
+    source_msg_ids: sourceMsgIds,
+    evidence_terms: evidenceTerms,
+    field,
+    value,
+  };
+}
+
+function syncLongTermArraySourceMap(params: {
+  target: Record<string, LongTermSourceMapEntry>;
+  field: string;
+  values: string[];
+  detectedValues: string[];
+  turns: RelevantLongTermUserTurn[];
+}) {
+  const keptValues = new Set(params.values.map((value) => clean(value, 180)).filter(Boolean));
+  for (const [key, entry] of Object.entries(params.target)) {
+    const field = clean(entry?.field, 80) || inferLongTermSourceField(key);
+    if (field !== clean(params.field, 80)) continue;
+    const value = clean(entry?.value, 180);
+    if (value && !keptValues.has(value)) delete params.target[key];
+  }
+  for (const value of params.detectedValues || []) {
+    const entry = buildLongTermSourceMapEntry({
+      field: params.field,
+      value,
+      turns: params.turns,
+      evidenceTerms: [value],
+    });
+    if (entry) upsertLongTermSourceMapEntry(params.target, entry);
+  }
+}
+
 function nextPlanVersion(previous: LongTermTaskState, nextText: string): number {
   return clean(previous.export_ready_text, 1200) === clean(nextText, 1200)
     ? Math.max(1, Number(previous.plan_version || 1))
@@ -668,7 +952,7 @@ export function rebuildLongTermScenarioState(params: {
   conversationId: string;
   locale?: AppLocale;
   activeSegment?: LongTermSegmentKey;
-  recentTurns: Array<{ userText?: string; assistantText?: string }>;
+  recentTurns: LongTermRecentTurn[];
   updatedAt?: string;
 }): LongTermScenarioState {
   const nowIso = clean(params.updatedAt, 80) || new Date().toISOString();
@@ -679,10 +963,8 @@ export function rebuildLongTermScenarioState(params: {
   });
   const activeSegment = params.activeSegment || previous.active_segment;
   const previousTask = previous.segments[activeSegment];
-  const relevantUserTurns = collectUserTexts(params.recentTurns)
-    .map((turn) => extractTaskRelevantUserText(turn))
-    .filter(Boolean);
-  const userText = relevantUserTurns.join(" ");
+  const relevantUserTurns = collectRelevantUserTurns(params.recentTurns);
+  const userText = relevantUserTurns.map((turn) => turn.relevantText).join(" ");
   if (!userText) {
     return {
       ...previous,
@@ -698,25 +980,31 @@ export function rebuildLongTermScenarioState(params: {
     };
   }
   const fullText = userText;
+  const previousGoalSummary = hasLongTermUserSource(previousTask, "goal_summary")
+    ? clean(previousTask.goal_summary, 280)
+    : "";
+  const previousWeeklyCadence = hasLongTermUserSource(previousTask, "weekly_time_or_frequency")
+    ? clean(previousTask.weekly_time_or_frequency, 180)
+    : "";
   const extractedGoalSummary = extractGoalSummary(userText, activeSegment, params.locale);
-  const goalSummary = shouldReplaceGoalSummary(previousTask.goal_summary, extractedGoalSummary, activeSegment)
+  const goalSummary = shouldReplaceGoalSummary(previousGoalSummary, extractedGoalSummary, activeSegment)
     ? extractedGoalSummary
-    : firstNonEmpty([previousTask.goal_summary, extractedGoalSummary]);
-  const weeklyTimeOrFrequency = extractWeeklyCadence(fullText, activeSegment, params.locale);
-  const methods = uniqStrings(
-    [...previousTask.methods_or_activities, ...detectMethods(fullText, activeSegment)],
-    8
-  );
+    : firstNonEmpty([previousGoalSummary, extractedGoalSummary]);
+  const extractedWeeklyCadence = extractWeeklyCadence(fullText, activeSegment, params.locale);
+  const weeklyTimeOrFrequency = firstNonEmpty([extractedWeeklyCadence, previousWeeklyCadence]);
+  const detectedMethods = detectMethods(fullText, activeSegment);
+  const methods = uniqStrings([...previousTask.methods_or_activities, ...detectedMethods], 8);
+  const detectedDietSleepAdjustments = detectDietSleepAdjustments(fullText);
   const dietSleepAdjustments = uniqStrings(
-    [...previousTask.diet_sleep_adjustments, ...detectDietSleepAdjustments(fullText)],
+    [...previousTask.diet_sleep_adjustments, ...detectedDietSleepAdjustments],
     6
   );
-  const adherenceStrategy = uniqStrings(
-    [...previousTask.adherence_strategy, ...detectAdherence(fullText)],
-    6
-  );
-  const constraints = uniqStrings([...previousTask.constraints, ...detectConstraints(fullText)], 6);
-  const fallbackPlan = uniqStrings([...previousTask.fallback_plan, ...detectFallback(fullText, activeSegment)], 5);
+  const detectedAdherenceStrategy = detectAdherence(fullText);
+  const adherenceStrategy = uniqStrings([...previousTask.adherence_strategy, ...detectedAdherenceStrategy], 6);
+  const detectedConstraints = detectConstraints(fullText);
+  const constraints = uniqStrings([...previousTask.constraints, ...detectedConstraints], 6);
+  const detectedFallbackPlan = detectFallback(fullText, activeSegment);
+  const fallbackPlan = uniqStrings([...previousTask.fallback_plan, ...detectedFallbackPlan], 5);
   const rationaleRefs = uniqStrings(
     [
       ...previousTask.rationale_refs,
@@ -725,6 +1013,83 @@ export function rebuildLongTermScenarioState(params: {
     ],
     8
   );
+  const sourceMap = cloneLongTermSourceMap(previousTask.source_map);
+
+  deleteLongTermSourceMapEntries(sourceMap, "goal_summary");
+  if (goalSummary) {
+    const goalEntry =
+      extractedGoalSummary && clean(goalSummary, 180) === clean(extractedGoalSummary, 180)
+        ? buildLongTermSourceMapEntry({
+            field: "goal_summary",
+            value: goalSummary,
+            turns: relevantUserTurns,
+            evidenceTerms: [extractedGoalSummary],
+          })
+        : getLongTermSourceMapEntry(previousTask, "goal_summary");
+    if (goalEntry) {
+      upsertLongTermSourceMapEntry(sourceMap, {
+        ...goalEntry,
+        field: "goal_summary",
+        value: goalSummary,
+      });
+    }
+  }
+
+  deleteLongTermSourceMapEntries(sourceMap, "weekly_time_or_frequency");
+  if (weeklyTimeOrFrequency) {
+    const cadenceEntry =
+      extractedWeeklyCadence && clean(weeklyTimeOrFrequency, 180) === clean(extractedWeeklyCadence, 180)
+        ? buildLongTermSourceMapEntry({
+            field: "weekly_time_or_frequency",
+            value: weeklyTimeOrFrequency,
+            turns: relevantUserTurns,
+            evidenceTerms: [extractedWeeklyCadence],
+          })
+        : getLongTermSourceMapEntry(previousTask, "weekly_time_or_frequency");
+    if (cadenceEntry) {
+      upsertLongTermSourceMapEntry(sourceMap, {
+        ...cadenceEntry,
+        field: "weekly_time_or_frequency",
+        value: weeklyTimeOrFrequency,
+      });
+    }
+  }
+
+  syncLongTermArraySourceMap({
+    target: sourceMap,
+    field: "methods_or_activities",
+    values: methods,
+    detectedValues: detectedMethods,
+    turns: relevantUserTurns,
+  });
+  syncLongTermArraySourceMap({
+    target: sourceMap,
+    field: "diet_sleep_adjustments",
+    values: dietSleepAdjustments,
+    detectedValues: detectedDietSleepAdjustments,
+    turns: relevantUserTurns,
+  });
+  syncLongTermArraySourceMap({
+    target: sourceMap,
+    field: "adherence_strategy",
+    values: adherenceStrategy,
+    detectedValues: detectedAdherenceStrategy,
+    turns: relevantUserTurns,
+  });
+  syncLongTermArraySourceMap({
+    target: sourceMap,
+    field: "constraints",
+    values: constraints,
+    detectedValues: detectedConstraints,
+    turns: relevantUserTurns,
+  });
+  syncLongTermArraySourceMap({
+    target: sourceMap,
+    field: "fallback_plan",
+    values: fallbackPlan,
+    detectedValues: detectedFallbackPlan,
+    turns: relevantUserTurns,
+  });
 
   const draftTask: LongTermTaskState = {
     ...previousTask,
@@ -737,6 +1102,7 @@ export function rebuildLongTermScenarioState(params: {
     fallback_plan: fallbackPlan,
     rationale_refs: rationaleRefs,
     open_questions: [],
+    source_map: sourceMap,
     status: previousTask.status === "completed" ? "completed" : "active",
     last_updated: nowIso,
   };

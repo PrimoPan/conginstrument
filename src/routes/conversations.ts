@@ -1128,6 +1128,54 @@ function buildLongTermTaskDetectionPayload(params: {
   };
 }
 
+function longTermSourceRoleFromToken(raw: unknown): "user" | "assistant" | "function_call" | "system" | "unknown" {
+  const token = cleanInput(raw, 80).toLowerCase();
+  if (!token) return "unknown";
+  if (
+    token.includes("function") ||
+    token.includes("tool") ||
+    token.includes("slot_call") ||
+    token.includes("slot_function") ||
+    token.startsWith("fn_")
+  ) {
+    return "function_call";
+  }
+  if (
+    token.includes("assistant") ||
+    token === "latest_assistant" ||
+    token.startsWith("msg_a") ||
+    token.startsWith("a_")
+  ) {
+    return "assistant";
+  }
+  if (token.includes("system") || token.startsWith("sys_")) return "system";
+  if (
+    token.includes("user") ||
+    token === "latest_user" ||
+    token.startsWith("msg_u") ||
+    token.startsWith("u_") ||
+    token.startsWith("turn_") ||
+    token.startsWith("manual_")
+  ) {
+    return "user";
+  }
+  return "unknown";
+}
+
+function longTermConceptLooksUserGrounded(concept: any): boolean {
+  const sourceMsgIds = Array.isArray(concept?.sourceMsgIds) ? concept.sourceMsgIds : [];
+  if (!sourceMsgIds.length) return false;
+  return sourceMsgIds.some((token: any) => longTermSourceRoleFromToken(token) === "user");
+}
+
+function toLongTermRecentTurnDoc(turn: any) {
+  return {
+    turnId: cleanInput((turn as any)?._id, 120) || cleanInput((turn as any)?.id, 120),
+    userText: turn?.userText,
+    assistantText: turn?.assistantText,
+  };
+}
+
 function buildLongTermCognitiveStatePayload(params: {
   scenario: LongTermScenarioState;
   locale: AppLocale;
@@ -1136,7 +1184,11 @@ function buildLongTermCognitiveStatePayload(params: {
   persistentMotifLibrary?: Awaited<ReturnType<typeof listUserMotifLibrary>>;
 }): CognitiveState {
   const activeTaskId = currentLongTermTaskId(params.scenario, params.scenario.scenario_id);
-  const conceptRows = (params.model.concepts || []).map((concept: any) => ({
+  const currentTaskConcepts = (params.model.concepts || []).filter((concept: any) => longTermConceptLooksUserGrounded(concept));
+  const keptConceptIds = new Set(
+    currentTaskConcepts.map((concept: any) => cleanInput(concept?.id || concept?.semanticKey, 120)).filter(Boolean)
+  );
+  const conceptRows = currentTaskConcepts.map((concept: any) => ({
     concept_id:
       cleanInput(concept?.id, 120) ||
       cleanInput(concept?.semanticKey, 120) ||
@@ -1148,17 +1200,23 @@ function buildLongTermCognitiveStatePayload(params: {
     source_msg_ids: Array.isArray(concept?.sourceMsgIds) ? concept.sourceMsgIds.map((x: any) => cleanInput(x, 120)).filter(Boolean) : [],
     evidence_terms: Array.isArray(concept?.evidenceTerms) ? concept.evidenceTerms.map((x: any) => cleanInput(x, 80)).filter(Boolean) : [],
   }));
-  const motifRows = (params.model.motifs || []).map((motif: any) => ({
-    motif_id: cleanInput(motif?.id, 120),
-    motif_type: cleanInput(motif?.motif_type || motif?.relation, 40) || "enable",
-    relation: cleanInput(motif?.relation, 40) || "enable",
-    title: cleanInput(motif?.display_title || motif?.title, 180) || cleanInput(motif?.motif_type_title, 180) || "motif",
-    status: cleanInput(motif?.status, 24) || "active",
-    confidence: Number(motif?.confidence || 0.7),
-    concept_ids: Array.isArray(motif?.conceptIds) ? motif.conceptIds.map((x: any) => cleanInput(x, 120)).filter(Boolean) : [],
-    anchor_concept_id: cleanInput(motif?.anchorConceptId, 120),
-    rationale: cleanInput(motif?.statusReason || motif?.description, 220),
-  }));
+  const motifRows = (params.model.motifs || [])
+    .filter((motif: any) => {
+      const conceptIds = Array.isArray(motif?.conceptIds) ? motif.conceptIds.map((x: any) => cleanInput(x, 120)).filter(Boolean) : [];
+      if (!conceptIds.length) return true;
+      return conceptIds.some((id) => keptConceptIds.has(id));
+    })
+    .map((motif: any) => ({
+      motif_id: cleanInput(motif?.id, 120),
+      motif_type: cleanInput(motif?.motif_type || motif?.relation, 40) || "enable",
+      relation: cleanInput(motif?.relation, 40) || "enable",
+      title: cleanInput(motif?.display_title || motif?.title, 180) || cleanInput(motif?.motif_type_title, 180) || "motif",
+      status: cleanInput(motif?.status, 24) || "active",
+      confidence: Number(motif?.confidence || 0.7),
+      concept_ids: Array.isArray(motif?.conceptIds) ? motif.conceptIds.map((x: any) => cleanInput(x, 120)).filter(Boolean) : [],
+      anchor_concept_id: cleanInput(motif?.anchorConceptId, 120),
+      rationale: cleanInput(motif?.statusReason || motif?.description, 220),
+    }));
   const taskRows = (["fitness", "study"] as const).map((segment) => {
     const task = params.scenario.segments[segment];
     return {
@@ -1265,9 +1323,7 @@ function buildLongTermVisualModelForRoute(params: {
 function hasLongTermTaskDialogue(
   turns: Array<{ userText?: string; assistantText?: string }> | null | undefined
 ) {
-  return (turns || []).some(
-    (turn) => !!cleanInput(turn?.userText, 320) || !!cleanInput(turn?.assistantText, 320)
-  );
+  return (turns || []).some((turn) => !!cleanInput(turn?.userText, 320));
 }
 
 type LongTermPersistedConversationSnapshot = {
@@ -1316,10 +1372,7 @@ async function persistLongTermConversationState(params: {
     conversationId: String(params.conversationId),
     locale: params.locale,
     activeSegment,
-    recentTurns: recentTurns.map((turn) => ({
-      userText: turn.userText,
-      assistantText: turn.assistantText,
-    })),
+    recentTurns: recentTurns.map((turn) => toLongTermRecentTurnDoc(turn)),
     updatedAt: params.updatedAt.toISOString(),
   });
   let modelWithTransfer = buildLongTermVisualModelForRoute({
@@ -2596,10 +2649,7 @@ async function refreshConversationTransferProjection(params: {
             conversationId: String(params.oid),
             locale: params.locale,
             activeSegment: longTermScenarioState.active_segment,
-            recentTurns: currentTaskTurns.map((turn) => ({
-              userText: turn.userText,
-              assistantText: turn.assistantText,
-            })),
+            recentTurns: currentTaskTurns.map((turn) => toLongTermRecentTurnDoc(turn)),
             updatedAt: now.toISOString(),
           })
         : longTermScenarioState;
@@ -4400,7 +4450,7 @@ convRouter.post("/:id/turn", asyncRoute(async (req: AuthedRequest, res) => {
       const now = new Date();
       const graph = conv?.graph && typeof conv.graph === "object" ? conv.graph : emptyGraph(String(oid));
       const graphPatch = emptyGraphPatch();
-      await collections.turns.insertOne({
+      const insertedTurn = await collections.turns.insertOne({
         conversationId: oid,
         userId,
         taskId: longTermBase.taskId,
@@ -4419,8 +4469,8 @@ convRouter.post("/:id/turn", asyncRoute(async (req: AuthedRequest, res) => {
           ...longTermBase.recentDocs
             .slice()
             .reverse()
-            .map((turn) => ({ userText: turn.userText, assistantText: turn.assistantText })),
-          { userText, assistantText },
+            .map((turn) => toLongTermRecentTurnDoc(turn)),
+          { turnId: String(insertedTurn.insertedId), userText, assistantText },
         ],
         updatedAt: now.toISOString(),
       });
@@ -5112,7 +5162,7 @@ convRouter.post("/:id/turn/stream", asyncRoute(async (req: AuthedRequest, res) =
         const now = new Date();
         const graph = conv?.graph && typeof conv.graph === "object" ? conv.graph : emptyGraph(String(oid));
         const graphPatch = emptyGraphPatch();
-        await collections.turns.insertOne({
+        const insertedTurn = await collections.turns.insertOne({
           conversationId: oid,
           userId,
           taskId: longTermBase.taskId,
@@ -5131,8 +5181,8 @@ convRouter.post("/:id/turn/stream", asyncRoute(async (req: AuthedRequest, res) =
             ...longTermBase.recentDocs
               .slice()
               .reverse()
-              .map((turn) => ({ userText: turn.userText, assistantText: turn.assistantText })),
-            { userText, assistantText },
+              .map((turn) => toLongTermRecentTurnDoc(turn)),
+            { turnId: String(insertedTurn.insertedId), userText, assistantText },
           ],
           updatedAt: now.toISOString(),
         });

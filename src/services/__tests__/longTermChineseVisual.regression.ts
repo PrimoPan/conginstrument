@@ -96,7 +96,11 @@ function runSegment(params: {
       conversationId: params.conversationId,
       locale: params.locale,
       activeSegment: params.segment,
-      recentTurns,
+      recentTurns: recentTurns.map((item, turnIndex) => ({
+        turnId: `${params.segment}_turn_${turnIndex + 1}`,
+        userText: item.userText,
+        assistantText: item.assistantText,
+      })),
       updatedAt: isoFor(index + (params.segment === "study" ? 100 : 0)),
     });
     model = buildLongTermVisualConversationModel({
@@ -147,6 +151,7 @@ async function main() {
     activeSegment: "fitness",
     recentTurns: [
       {
+        turnId: "prefilled_turn_1",
         userText: "你好 我要规划一个柔韧性的三个月的训练",
         assistantText: "好的，我们先把目标、频率和可坚持性梳理清楚。",
       },
@@ -200,6 +205,15 @@ async function main() {
     false,
     "legacy task-bridge nodes should not carry forward into Task 3"
   );
+  assert.equal(
+    recoveredModel.graph.nodes.some((node) => clean((node as any).key) === "lt:fitness:cadence"),
+    false,
+    "assistant cadence suggestions should not create a cadence node"
+  );
+  assert.ok(
+    (recoveredModel.concepts || []).every((concept) => (concept.sourceMsgIds || []).length > 0),
+    "all long-term concepts should keep user source ids"
+  );
 
   for (const fixture of fixtures) {
     let scenario = defaultLongTermScenarioState({
@@ -225,6 +239,10 @@ async function main() {
     assert.ok(fitnessModel.graph.nodes.length >= 5, `${fixture.id} fitness graph should have multiple nodes`);
     assert.ok(fitnessModel.concepts.length > 0, `${fixture.id} fitness concepts should not be empty`);
     assert.ok(fitnessModel.motifs.length > 0, `${fixture.id} fitness motifs should not be empty`);
+    assert.ok(
+      fitnessModel.concepts.every((concept) => (concept.sourceMsgIds || []).length > 0),
+      `${fixture.id} fitness concepts should all stay user-grounded`
+    );
     const fitnessGoalNode = fitnessModel.graph.nodes.find((node) => clean((node as any).key) === "lt:goal:fitness");
     assert.ok(fitnessGoalNode, `${fixture.id} should include a fitness goal node`);
     assert.ok(
@@ -290,6 +308,10 @@ async function main() {
     assert.ok(
       studyModel.graph.nodes.length >= 4,
       `${fixture.id} study graph should rebuild around the current task`
+    );
+    assert.ok(
+      studyModel.concepts.every((concept) => (concept.sourceMsgIds || []).length > 0),
+      `${fixture.id} study concepts should all stay user-grounded`
     );
     const studyGoalNode = studyModel.graph.nodes.find((node) => clean((node as any).key) === "lt:goal:study");
     assert.ok(studyGoalNode, `${fixture.id} should include a study goal node`);

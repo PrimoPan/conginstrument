@@ -143,6 +143,84 @@ async function main() {
     "mixed utterances should still retain the task-relevant cadence"
   );
 
+  const assistantSuggestedCadenceScenario = rebuildLongTermScenarioState({
+    previous: defaultLongTermScenarioState({
+      conversationId: "assistant_suggested_cadence",
+      locale: "zh-CN",
+      nowIso: isoFor(3),
+    }),
+    conversationId: "assistant_suggested_cadence",
+    locale: "zh-CN",
+    activeSegment: "fitness",
+    recentTurns: [
+      {
+        turnId: "turn_task3_goal",
+        userText: "你好 我要规划一个柔韧性的三个月训练",
+        assistantText: "好的，建议每周2-3次，每次15-30分钟。",
+      },
+    ],
+    updatedAt: isoFor(4),
+  });
+  assert.match(
+    assistantSuggestedCadenceScenario.segments.fitness.goal_summary,
+    /柔韧/u,
+    "goal summary should still come from the user utterance"
+  );
+  assert.equal(
+    assistantSuggestedCadenceScenario.segments.fitness.weekly_time_or_frequency,
+    "",
+    "assistant cadence suggestions should not become task cadence"
+  );
+  assert.equal(
+    assistantSuggestedCadenceScenario.segments.fitness.export_ready_text.includes("2-3"),
+    false,
+    "export text should not fabricate cadence from assistant text"
+  );
+  assert.deepEqual(
+    assistantSuggestedCadenceScenario.segments.fitness.source_map.goal_summary?.source_msg_ids || [],
+    ["turn_task3_goal"],
+    "goal provenance should point to the user turn id"
+  );
+  assert.equal(
+    !!assistantSuggestedCadenceScenario.segments.fitness.source_map.weekly_time_or_frequency,
+    false,
+    "cadence should stay unsourced when only the assistant suggested it"
+  );
+
+  const explicitCadenceScenario = rebuildLongTermScenarioState({
+    previous: defaultLongTermScenarioState({
+      conversationId: "explicit_cadence",
+      locale: "zh-CN",
+      nowIso: isoFor(5),
+    }),
+    conversationId: "explicit_cadence",
+    locale: "zh-CN",
+    activeSegment: "fitness",
+    recentTurns: [
+      {
+        turnId: "turn_task3_cadence",
+        userText: "我想做一个三个月的柔韧性训练，每周2-3次，每次15-30分钟。",
+        assistantText: "",
+      },
+    ],
+    updatedAt: isoFor(6),
+  });
+  assert.match(
+    explicitCadenceScenario.segments.fitness.goal_summary,
+    /柔韧/u,
+    "explicit cadence turn should still retain the user goal"
+  );
+  assert.match(
+    explicitCadenceScenario.segments.fitness.weekly_time_or_frequency,
+    /每周/u,
+    "explicit user cadence should be kept"
+  );
+  assert.deepEqual(
+    explicitCadenceScenario.segments.fitness.source_map.weekly_time_or_frequency?.source_msg_ids || [],
+    ["turn_task3_cadence"],
+    "explicit cadence provenance should point to the user turn id"
+  );
+
   for (const fixture of fixtures) {
     let scenario = defaultLongTermScenarioState({
       conversationId: fixture.id,

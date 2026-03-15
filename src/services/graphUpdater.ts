@@ -338,6 +338,7 @@ async function buildSignals(params: {
   model?: string;
 }): Promise<IntentSignals> {
   const recentTurns = params.recentTurns || [];
+  const userOnlyRecentTurns = recentTurns.filter((turn) => turn.role === "user");
   const fallbackRecentUserTexts = recentTurns
     .filter((t) => t.role === "user")
     .map((t) => String(t.content || ""))
@@ -380,7 +381,7 @@ async function buildSignals(params: {
       const slotResult = await extractIntentSignalsByFunctionCall({
         model: params.model || GRAPH_MODEL,
         latestUserText: params.userText,
-        recentTurns: params.recentTurns,
+        recentTurns: userOnlyRecentTurns,
         systemPrompt: params.systemPrompt,
         locale: params.locale,
         debug: DEBUG,
@@ -417,7 +418,7 @@ async function buildSignals(params: {
     signals = await resolveIntentSignalsGeo({
       signals,
       latestUserText: params.userText,
-      recentTurns: params.recentTurns,
+      recentTurns: userOnlyRecentTurns,
     });
   } catch (e: any) {
     dlog("geo resolver failed:", e?.message || e);
@@ -560,7 +561,8 @@ export async function generateGraphPatch(params: {
   userText: string;
   recentTurns: Array<{ role: "user" | "assistant"; content: string }>;
   stateContextUserTurns?: string[];
-  assistantText: string;
+  // Intentionally ignored: graph construction must stay user-grounded.
+  assistantText?: string;
   systemPrompt?: string;
   locale?: AppLocale;
   model?: string;

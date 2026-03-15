@@ -590,7 +590,9 @@ function sourceRoleFromToken(raw: string): "user" | "assistant" | "function_call
     token.includes("user") ||
     token.startsWith("u_") ||
     token.startsWith("msg_u") ||
-    token.startsWith("turn_u")
+    token.startsWith("turn_u") ||
+    token.startsWith("turn_") ||
+    token.startsWith("manual_")
   ) {
     return "user";
   }

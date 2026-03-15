@@ -7,7 +7,9 @@ import type {
   LongTermTaskState,
 } from "./state.js";
 import {
+  getLongTermSourceMapEntry,
   longTermTaskHasProgress,
+  longTermTaskHasUserGroundedEvidence,
   localizeLongTermAdjustment,
   localizeLongTermConstraint,
   localizeLongTermFallback,
@@ -67,6 +69,8 @@ function buildNode(params: {
   importance?: number;
   tags?: string[];
   severity?: ConceptNode["severity"];
+  evidenceIds?: string[];
+  sourceMsgIds?: string[];
 }): ConceptNode {
   return {
     id: nodeIdFor(params.key),
@@ -78,6 +82,8 @@ function buildNode(params: {
     confidence: Number.isFinite(Number(params.confidence)) ? Number(params.confidence) : 0.84,
     importance: Number.isFinite(Number(params.importance)) ? Number(params.importance) : 0.82,
     tags: params.tags || [],
+    evidenceIds: (params.evidenceIds || []).slice(0, 8),
+    sourceMsgIds: (params.sourceMsgIds || []).slice(0, 12),
     severity: params.severity,
     value: {
       presentation: {
@@ -152,6 +158,15 @@ function localizeTaskGoal(task: LongTermTaskState, locale?: AppLocale) {
   return clean(task.goal_summary, 220) || t(locale, "待进一步澄清目标", "Goal still needs clarification");
 }
 
+function sourceNodeMeta(task: LongTermTaskState, field: string, value?: string) {
+  const entry = getLongTermSourceMapEntry(task, field, value);
+  if (!entry || !(entry.source_msg_ids || []).length) return null;
+  return {
+    sourceMsgIds: entry.source_msg_ids,
+    evidenceIds: entry.evidence_terms,
+  };
+}
+
 function buildSegmentNodes(params: {
   scenario: LongTermScenarioState;
   segment: LongTermSegmentKey;
@@ -161,39 +176,51 @@ function buildSegmentNodes(params: {
 }) {
   const task = params.scenario.segments[params.segment];
   const goalKey = `lt:goal:${params.segment}`;
-  const goalNode = buildNode({
-    key: goalKey,
-    statement:
-      params.segment === "fitness"
-        ? t(params.locale, `健身目标：${localizeTaskGoal(task, params.locale)}`, `Fitness goal: ${localizeTaskGoal(task, params.locale)}`)
-        : t(params.locale, `学习目标：${localizeTaskGoal(task, params.locale)}`, `Study goal: ${localizeTaskGoal(task, params.locale)}`),
-    type: "belief",
-    layer: "intent",
-    confidence: 0.92,
-    importance: 0.96,
-    tags: [params.segment, "goal"],
-  });
-  pushUniqueNode(params.nodes, goalNode);
+  const goalSource = clean(task.goal_summary, 220) ? sourceNodeMeta(task, "goal_summary") : null;
+  const goalNode = goalSource
+    ? buildNode({
+        key: goalKey,
+        statement:
+          params.segment === "fitness"
+            ? t(params.locale, `健身目标：${localizeTaskGoal(task, params.locale)}`, `Fitness goal: ${localizeTaskGoal(task, params.locale)}`)
+            : t(params.locale, `学习目标：${localizeTaskGoal(task, params.locale)}`, `Study goal: ${localizeTaskGoal(task, params.locale)}`),
+        type: "belief",
+        layer: "intent",
+        confidence: 0.92,
+        importance: 0.96,
+        tags: [params.segment, "goal"],
+        sourceMsgIds: goalSource.sourceMsgIds,
+        evidenceIds: goalSource.evidenceIds,
+      })
+    : null;
+  if (goalNode) pushUniqueNode(params.nodes, goalNode);
 
   if (clean(task.weekly_time_or_frequency, 160)) {
-    const cadenceNode = buildNode({
-      key: `lt:${params.segment}:cadence`,
-      statement: t(
-        params.locale,
-        `${stageLabel(params.segment, params.locale)}节奏：${clean(task.weekly_time_or_frequency, 160)}`,
-        `${stageLabel(params.segment, params.locale)} cadence: ${clean(task.weekly_time_or_frequency, 160)}`
-      ),
-      type: "factual_assertion",
-      layer: "requirement",
-      confidence: 0.86,
-      importance: 0.82,
-      tags: [params.segment, "cadence"],
-    });
-    pushUniqueNode(params.nodes, cadenceNode);
-    pushUniqueEdge(params.edges, buildEdge(cadenceNode.id, goalNode.id, "determine", 0.84));
+    const cadenceSource = sourceNodeMeta(task, "weekly_time_or_frequency");
+    if (cadenceSource) {
+      const cadenceNode = buildNode({
+        key: `lt:${params.segment}:cadence`,
+        statement: t(
+          params.locale,
+          `${stageLabel(params.segment, params.locale)}节奏：${clean(task.weekly_time_or_frequency, 160)}`,
+          `${stageLabel(params.segment, params.locale)} cadence: ${clean(task.weekly_time_or_frequency, 160)}`
+        ),
+        type: "factual_assertion",
+        layer: "requirement",
+        confidence: 0.86,
+        importance: 0.82,
+        tags: [params.segment, "cadence"],
+        sourceMsgIds: cadenceSource.sourceMsgIds,
+        evidenceIds: cadenceSource.evidenceIds,
+      });
+      pushUniqueNode(params.nodes, cadenceNode);
+      if (goalNode) pushUniqueEdge(params.edges, buildEdge(cadenceNode.id, goalNode.id, "determine", 0.84));
+    }
   }
 
   for (const method of task.methods_or_activities || []) {
+    const methodSource = sourceNodeMeta(task, "methods_or_activities", method);
+    if (!methodSource) continue;
     const label = localizeLongTermMethod(method, params.locale);
     const methodNode = buildNode({
       key: `lt:${params.segment}:method:${slug(method) || stableHash(method)}`,
@@ -206,12 +233,16 @@ function buildSegmentNodes(params: {
       confidence: 0.84,
       importance: 0.8,
       tags: [params.segment, "method"],
+      sourceMsgIds: methodSource.sourceMsgIds,
+      evidenceIds: methodSource.evidenceIds,
     });
     pushUniqueNode(params.nodes, methodNode);
-    pushUniqueEdge(params.edges, buildEdge(methodNode.id, goalNode.id, "enable", 0.82));
+    if (goalNode) pushUniqueEdge(params.edges, buildEdge(methodNode.id, goalNode.id, "enable", 0.82));
   }
 
   for (const adjustment of task.diet_sleep_adjustments || []) {
+    const adjustmentSource = sourceNodeMeta(task, "diet_sleep_adjustments", adjustment);
+    if (!adjustmentSource) continue;
     const label = localizeLongTermAdjustment(adjustment, params.locale);
     const node = buildNode({
       key: `lt:${params.segment}:adjustment:${slug(adjustment) || stableHash(adjustment)}`,
@@ -221,12 +252,16 @@ function buildSegmentNodes(params: {
       confidence: 0.8,
       importance: 0.76,
       tags: [params.segment, "adjustment"],
+      sourceMsgIds: adjustmentSource.sourceMsgIds,
+      evidenceIds: adjustmentSource.evidenceIds,
     });
     pushUniqueNode(params.nodes, node);
-    pushUniqueEdge(params.edges, buildEdge(node.id, goalNode.id, "enable", 0.78));
+    if (goalNode) pushUniqueEdge(params.edges, buildEdge(node.id, goalNode.id, "enable", 0.78));
   }
 
   for (const constraint of task.constraints || []) {
+    const constraintSource = sourceNodeMeta(task, "constraints", constraint);
+    if (!constraintSource) continue;
     const label = localizeLongTermConstraint(constraint, params.locale);
     const node = buildNode({
       key: `lt:${params.segment}:constraint:${slug(constraint) || stableHash(constraint)}`,
@@ -237,12 +272,16 @@ function buildSegmentNodes(params: {
       importance: 0.88,
       severity: constraint === "energy is limited" ? "medium" : undefined,
       tags: [params.segment, "constraint"],
+      sourceMsgIds: constraintSource.sourceMsgIds,
+      evidenceIds: constraintSource.evidenceIds,
     });
     pushUniqueNode(params.nodes, node);
-    pushUniqueEdge(params.edges, buildEdge(node.id, goalNode.id, "constraint", 0.9));
+    if (goalNode) pushUniqueEdge(params.edges, buildEdge(node.id, goalNode.id, "constraint", 0.9));
   }
 
   for (const strategy of task.adherence_strategy || []) {
+    const strategySource = sourceNodeMeta(task, "adherence_strategy", strategy);
+    if (!strategySource) continue;
     const label = localizeLongTermStrategy(strategy, params.locale);
     const node = buildNode({
       key: `lt:${params.segment}:strategy:${slug(strategy) || stableHash(strategy)}`,
@@ -252,12 +291,16 @@ function buildSegmentNodes(params: {
       confidence: 0.82,
       importance: 0.8,
       tags: [params.segment, "strategy"],
+      sourceMsgIds: strategySource.sourceMsgIds,
+      evidenceIds: strategySource.evidenceIds,
     });
     pushUniqueNode(params.nodes, node);
-    pushUniqueEdge(params.edges, buildEdge(node.id, goalNode.id, "enable", 0.84));
+    if (goalNode) pushUniqueEdge(params.edges, buildEdge(node.id, goalNode.id, "enable", 0.84));
   }
 
   for (const fallback of task.fallback_plan || []) {
+    const fallbackSource = sourceNodeMeta(task, "fallback_plan", fallback);
+    if (!fallbackSource) continue;
     const label = localizeLongTermFallback(fallback, params.locale);
     const node = buildNode({
       key: `lt:${params.segment}:fallback:${slug(fallback) || stableHash(fallback)}`,
@@ -267,9 +310,11 @@ function buildSegmentNodes(params: {
       confidence: 0.8,
       importance: 0.76,
       tags: [params.segment, "fallback"],
+      sourceMsgIds: fallbackSource.sourceMsgIds,
+      evidenceIds: fallbackSource.evidenceIds,
     });
     pushUniqueNode(params.nodes, node);
-    pushUniqueEdge(params.edges, buildEdge(node.id, goalNode.id, "enable", 0.78));
+    if (goalNode) pushUniqueEdge(params.edges, buildEdge(node.id, goalNode.id, "enable", 0.78));
   }
 }
 
@@ -286,7 +331,11 @@ export function buildLongTermVisualGraph(params: {
   const previousGraph = params.previousGraph && typeof params.previousGraph === "object" ? params.previousGraph : null;
   const allowSyntheticGraphFromScenario = params.allowSyntheticGraphFromScenario !== false;
 
-  if (!allowSyntheticGraphFromScenario || !longTermTaskHasProgress(activeTask)) {
+  if (
+    !allowSyntheticGraphFromScenario ||
+    !longTermTaskHasProgress(activeTask) ||
+    !longTermTaskHasUserGroundedEvidence(activeTask)
+  ) {
     return {
       id: params.scenario.scenario_id,
       version: Number(previousGraph?.version || 0),

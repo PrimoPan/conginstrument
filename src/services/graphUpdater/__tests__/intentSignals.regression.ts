@@ -47,6 +47,37 @@ function cleanedGenericTexts(signals: { genericConstraints?: Array<{ text?: stri
   return (signals.genericConstraints || []).map((item) => String(item?.text || ""));
 }
 
+function stableGraphProjection(graph: any) {
+  const nodes = (graph?.nodes || [])
+    .map((node: any) => ({
+      key: String(node?.key || ""),
+      statement: String(node?.statement || ""),
+      type: String(node?.type || ""),
+      layer: String(node?.layer || ""),
+      sourceMsgIds: [...(Array.isArray(node?.sourceMsgIds) ? node.sourceMsgIds : [])].map((x) => String(x)).sort(),
+      evidenceIds: [...(Array.isArray(node?.evidenceIds) ? node.evidenceIds : [])].map((x) => String(x)).sort(),
+    }))
+    .sort(
+      (a, b) =>
+        a.key.localeCompare(b.key) ||
+        a.statement.localeCompare(b.statement) ||
+        a.type.localeCompare(b.type) ||
+        a.layer.localeCompare(b.layer)
+    );
+  const edges = (graph?.edges || [])
+    .map((edge: any) => {
+      const fromNode = (graph?.nodes || []).find((node: any) => node?.id === edge?.from);
+      const toNode = (graph?.nodes || []).find((node: any) => node?.id === edge?.to);
+      return {
+        fromKey: String(fromNode?.key || ""),
+        toKey: String(toNode?.key || ""),
+        type: String(edge?.type || ""),
+      };
+    })
+    .sort((a, b) => a.fromKey.localeCompare(b.fromKey) || a.toKey.localeCompare(b.toKey) || a.type.localeCompare(b.type));
+  return { nodes, edges };
+}
+
 const cases: Case[] = [
   {
     name: "budget colloquial: 1万5",
@@ -713,6 +744,32 @@ const cases: Case[] = [
       const goalNode = (applied.nodes || []).find((node) => String((node as any)?.key || "") === "slot:goal");
       assert.deepEqual(destinationStatements, ["目的地: 杭州"]);
       assert.equal(String(goalNode?.statement || ""), "意图：去杭州旅游5天");
+    },
+  },
+  {
+    name: "graph patch ignores assistant text when inferring user intent",
+    run: async () => {
+      const baseGraph = { id: "conv_ignore_assistant", version: 0, nodes: [], edges: [] } as any;
+      const params = {
+        graph: baseGraph,
+        userText: "我想去台北旅游，一个人，为期三天",
+        locale: "zh-CN" as const,
+      };
+      const patchFromShortReply = await generateGraphPatch({
+        ...params,
+        recentTurns: [{ role: "assistant" as const, content: "收到。" }],
+      });
+      const patchFromOpinionatedReply = await generateGraphPatch({
+        ...params,
+        recentTurns: [{ role: "assistant" as const, content: "我建议改成五天四晚，并且优先住在信义区。" }],
+      });
+      const appliedShortReply = applyPatchWithGuards(baseGraph, patchFromShortReply).newGraph;
+      const appliedOpinionatedReply = applyPatchWithGuards(baseGraph, patchFromOpinionatedReply).newGraph;
+      assert.deepEqual(
+        stableGraphProjection(appliedOpinionatedReply),
+        stableGraphProjection(appliedShortReply),
+        "assistant wording should not change the graph semantics"
+      );
     },
   },
   {
@@ -3825,8 +3882,8 @@ const cases: Case[] = [
           },
         ] as any,
         edges: [
-          { id: "e1", from: "n_budget", to: "n_goal", type: "enable", confidence: 0.9 },
-          { id: "e2", from: "n_budget", to: "n_lodging", type: "determine", confidence: 0.86 },
+          { id: "e1", from: "n_budget", to: "n_lodging", type: "determine", confidence: 0.86 },
+          { id: "e2", from: "n_lodging", to: "n_goal", type: "enable", confidence: 0.9 },
         ] as any,
       } as any;
 
