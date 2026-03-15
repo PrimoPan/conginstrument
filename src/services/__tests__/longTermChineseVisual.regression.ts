@@ -91,16 +91,17 @@ function runSegment(params: {
   });
   for (const [index, turn] of params.turns.entries()) {
     recentTurns.push(turn);
+    const turnDocs = recentTurns.map((item, turnIndex) => ({
+      turnId: `${params.segment}_turn_${turnIndex + 1}`,
+      userText: item.userText,
+      assistantText: item.assistantText,
+    }));
     scenario = rebuildLongTermScenarioState({
       previous: scenario,
       conversationId: params.conversationId,
       locale: params.locale,
       activeSegment: params.segment,
-      recentTurns: recentTurns.map((item, turnIndex) => ({
-        turnId: `${params.segment}_turn_${turnIndex + 1}`,
-        userText: item.userText,
-        assistantText: item.assistantText,
-      })),
+      recentTurns: turnDocs,
       updatedAt: isoFor(index + (params.segment === "study" ? 100 : 0)),
     });
     model = buildLongTermVisualConversationModel({
@@ -112,6 +113,7 @@ function runSegment(params: {
       prevMotifs: [],
       baseMotifLinks: [],
       baseContexts: [],
+      recentTurns: turnDocs,
     });
     previousGraph = model.graph;
   }
@@ -194,6 +196,13 @@ async function main() {
     prevMotifs: [],
     baseMotifLinks: [],
     baseContexts: [],
+    recentTurns: [
+      {
+        turnId: "prefilled_turn_1",
+        userText: "你好 我要规划一个柔韧性的三个月的训练",
+        assistantText: "好的，我们先把目标、频率和可坚持性梳理清楚。",
+      },
+    ],
   });
   assert.equal(
     recoveredModel.graph.nodes.some((node) => /^当前阶段[:：]/u.test(clean(node.statement))),
@@ -213,6 +222,118 @@ async function main() {
   assert.ok(
     (recoveredModel.concepts || []).every((concept) => (concept.sourceMsgIds || []).length > 0),
     "all long-term concepts should keep user source ids"
+  );
+
+  const richUserTurn =
+    "我希望进行长期计划，我希望养成固定轻松的习惯，因为我是一个p h d；再次强调学习过程保持轻松而不是压力过大，因为我认为我是一个需要在兴趣中学习的人，保证一个人的我不喜欢和人互动。我是一个内向的人，保证一个人的学习方法，避免互动；我现在要进行一个三个月的柔韧度的训练的规划；我进行柔韧度的训练是因为我每天都久坐，所以感觉很多肌肉都僵硬锁死，关节的活动度也在下降，这对体态健康不利；我的时间很有限，有什么类型的运动可以推荐；有什么针对精力恢复和专注度恢复，尤其是对前额叶有锻炼的运动。";
+  const richScenario = rebuildLongTermScenarioState({
+    previous: defaultLongTermScenarioState({
+      conversationId: "rich-task-3",
+      locale: "zh-CN",
+      nowIso: isoFor(3),
+    }),
+    conversationId: "rich-task-3",
+    locale: "zh-CN",
+    activeSegment: "fitness",
+    recentTurns: [
+      {
+        turnId: "rich_turn_1",
+        userText: richUserTurn,
+        assistantText: "",
+      },
+    ],
+    updatedAt: isoFor(4),
+  });
+  assert.match(
+    richScenario.segments.fitness.goal_summary,
+    /柔韧/u,
+    "rich Task 3 input should keep the concrete flexibility goal instead of the meta long-term-plan phrasing"
+  );
+  const richModel = buildLongTermVisualConversationModel({
+    scenario: richScenario,
+    locale: "zh-CN",
+    previousGraph: null,
+    prevConcepts: [],
+    baseConcepts: [],
+    prevMotifs: [],
+    baseMotifLinks: [],
+    baseContexts: [],
+    recentTurns: [
+      {
+        turnId: "rich_turn_1",
+        userText: richUserTurn,
+        assistantText: "",
+      },
+    ],
+  });
+  assert.ok(richModel.concepts.length >= 10, "rich Task 3 input should yield a denser user-grounded concept set");
+  for (const keyword of ["长期目标", "兴趣驱动", "内向", "独立完成", "长期久坐", "肌肉僵硬", "关节活动度下降", "恢复精力", "恢复专注度", "前额叶"]) {
+    assert.ok(
+      richModel.concepts.some((concept) => clean(concept.title).includes(keyword)),
+      `rich Task 3 input should surface concept "${keyword}"`
+    );
+  }
+  const advancedRichScenario = advanceLongTermScenario({
+    previous: richScenario,
+    conversationId: "rich-task-3",
+    locale: "zh-CN",
+    nowIso: isoFor(5),
+  });
+  const blankRichStudyModel = buildLongTermVisualConversationModel({
+    scenario: advancedRichScenario,
+    locale: "zh-CN",
+    previousGraph: richModel.graph,
+    prevConcepts: richModel.concepts,
+    baseConcepts: richModel.concepts,
+    prevMotifs: richModel.motifs,
+    baseMotifLinks: richModel.motifLinks,
+    baseContexts: richModel.contexts,
+  });
+  assert.equal(blankRichStudyModel.graph.nodes.length, 0, "Task 4 should still start empty even after a rich Task 3 profile turn");
+  assert.equal(blankRichStudyModel.concepts.length, 0, "Task 4 should not silently carry Task 3 concepts before Task 4 dialogue");
+  const studyRichUserTurn =
+    "进入学习计划后，我还是希望学习过程轻松，不要压力过大，最好一个人完成，尽量避免互动，因为我更适合兴趣驱动的学习。";
+  const richStudyScenario = rebuildLongTermScenarioState({
+    previous: advancedRichScenario,
+    conversationId: "rich-task-3",
+    locale: "zh-CN",
+    activeSegment: "study",
+    recentTurns: [
+      {
+        turnId: "rich_study_turn_1",
+        userText: studyRichUserTurn,
+        assistantText: "",
+      },
+    ],
+    updatedAt: isoFor(6),
+  });
+  const richStudyModel = buildLongTermVisualConversationModel({
+    scenario: richStudyScenario,
+    locale: "zh-CN",
+    previousGraph: blankRichStudyModel.graph,
+    prevConcepts: [],
+    baseConcepts: [],
+    prevMotifs: [],
+    baseMotifLinks: [],
+    baseContexts: [],
+    recentTurns: [
+      {
+        turnId: "rich_study_turn_1",
+        userText: studyRichUserTurn,
+        assistantText: "",
+      },
+    ],
+  });
+  for (const keyword of ["兴趣驱动", "独立完成", "避免高互动"]) {
+    assert.ok(
+      richStudyModel.concepts.some((concept) => clean(concept.title).includes(keyword)),
+      `Task 4 study turn should surface concept "${keyword}"`
+    );
+  }
+  assert.equal(
+    richStudyModel.concepts.some((concept) => /久坐|肌肉僵硬|关节活动度下降|前额叶/u.test(clean(concept.title))),
+    false,
+    "Task 4 study graph should not leak Task 3 body-state concepts"
   );
 
   for (const fixture of fixtures) {

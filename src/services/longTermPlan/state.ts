@@ -595,9 +595,18 @@ function normalizeLongTermGoalChunk(raw: string, segment: LongTermSegmentKey): s
   let text = clean(raw, 180);
   if (!text) return "";
 
+  const segmentSpecificDirect =
+    segment === "fitness"
+      ? text.match(/((?:[一二三四五六七八九十0-9]+个?月)?[^，,。；！？!?]{0,18}(?:柔韧|柔韧度|灵活度)[^，,。；！？!?]{0,18}(?:训练|计划|规划))/u)
+      : text.match(/((?:[一二三四五六七八九十0-9]+个?月)?[^，,。；！？!?]{0,18}(?:学习|课程|训练营|计划|规划)[^，,。；！？!?]{0,18})/u);
+  if (segmentSpecificDirect?.[1]) {
+    return clean(segmentSpecificDirect[1], 120);
+  }
+
   const directPatterns =
     segment === "fitness"
       ? [
+          /((?:[一二三四五六七八九十0-9]+个?月)?[^，,。；！？!?]{0,18}(?:柔韧|柔韧度|灵活度)[^，,。；！？!?]{0,18}(?:训练|计划|规划))/u,
           /主要(?:想|是)\s*([^，,。；！？!?]+)/,
           /目标(?:是|想)?\s*([^，,。；！？!?]+)/,
           /(?:我)?(?:最)?(?:想|希望|打算|准备)\s*([^，,。；！？!?]+)/,
@@ -644,6 +653,7 @@ function normalizeLongTermGoalChunk(raw: string, segment: LongTermSegmentKey): s
 function isGenericLongTermGoal(text: string, segment: LongTermSegmentKey): boolean {
   const normalized = clean(text, 120).toLowerCase();
   if (!normalized) return true;
+  if (/^(进行|做|开始|做一个|搞一个)?长期(计划|规划|安排|习惯)?$/i.test(normalized)) return true;
   if (segment === "fitness") {
     return /^(健身|运动|健身计划|运动计划|健身习惯|运动习惯|开始健身|开始运动|build a sustainable fitness plan|start exercising|fitness plan|fitness routine)$/i.test(
       normalized
@@ -742,7 +752,7 @@ function detectConstraints(text: string): string[] {
   const out: string[] = [];
   const src = String(text || "");
   if (
-    /时间(变得)?更?少|时间不够|没时间|抽不出|只能挤出|碎片时间|时间被切碎|时间被切得很碎|时间偏紧|时间更紧|排得更满|多了一门课|多一门课|只有[^，。；\n]{0,12}(小时|分钟)|每周只有[^，。；\n]{0,12}(小时|次)|只剩[^，。；\n]{0,12}(空档|空当)|less time|limited time|busy|only have|only around|one or two hours|1-2 hours|more limited/i.test(
+    /时间很有限|时间有限|时间(变得)?更?少|时间不够|没时间|抽不出|只能挤出|碎片时间|时间被切碎|时间被切得很碎|时间偏紧|时间更紧|排得更满|多了一门课|多一门课|只有[^，。；\n]{0,12}(小时|分钟)|每周只有[^，。；\n]{0,12}(小时|次)|只剩[^，。；\n]{0,12}(空档|空当)|less time|limited time|busy|only have|only around|one or two hours|1-2 hours|more limited/i.test(
       src
     )
   ) {

@@ -1291,6 +1291,7 @@ function buildLongTermVisualModelForRoute(params: {
   baseContexts?: any[];
   manualGraphOverrides?: ManualGraphOverrides | null;
   hasCurrentTaskDialogue?: boolean;
+  recentTurns?: Array<{ turnId?: string; userText?: string; assistantText?: string }>;
 }) {
   let model = buildLongTermVisualConversationModel({
     scenario: params.scenario,
@@ -1302,6 +1303,7 @@ function buildLongTermVisualModelForRoute(params: {
     baseMotifLinks: params.baseMotifLinks || [],
     baseContexts: params.baseContexts || [],
     allowSyntheticGraphFromScenario: params.hasCurrentTaskDialogue !== false,
+    recentTurns: params.recentTurns || [],
   });
   const overriddenGraph = applyManualGraphOverrides(
     model.graph,
@@ -1386,6 +1388,7 @@ async function persistLongTermConversationState(params: {
     baseContexts: params.model.contexts || [],
     manualGraphOverrides: params.manualGraphOverrides,
     hasCurrentTaskDialogue: hasLongTermTaskDialogue(recentTurns),
+    recentTurns: recentTurns.map((turn) => toLongTermRecentTurnDoc(turn)),
   });
 
   let refreshedTransferState = nextMotifTransferState;
@@ -2631,28 +2634,24 @@ async function refreshConversationTransferProjection(params: {
       locale: params.locale,
       nowIso: now.toISOString(),
     });
-    const currentTaskTurns =
-      longTermScenarioState.active_segment === "study" && cleanInput(longTermScenarioState.transfer_source_task_id, 120)
-        ? await loadRecentTurnsForPlan({
-            conversationId: params.oid,
-            userId: params.userId,
-            taskId: currentLongTermTaskId(longTermScenarioState, String(params.oid)),
-            limit: 160,
-            sortDirection: 1,
-            fallbackToConversation: false,
-          })
-        : [];
-    const refreshedScenario =
-      longTermScenarioState.active_segment === "study" && cleanInput(longTermScenarioState.transfer_source_task_id, 120)
-        ? rebuildLongTermScenarioState({
-            previous: longTermScenarioState,
-            conversationId: String(params.oid),
-            locale: params.locale,
-            activeSegment: longTermScenarioState.active_segment,
-            recentTurns: currentTaskTurns.map((turn) => toLongTermRecentTurnDoc(turn)),
-            updatedAt: now.toISOString(),
-          })
-        : longTermScenarioState;
+    const currentTaskTurns = await loadRecentTurnsForPlan({
+      conversationId: params.oid,
+      userId: params.userId,
+      taskId: currentLongTermTaskId(longTermScenarioState, String(params.oid)),
+      limit: 160,
+      sortDirection: 1,
+      fallbackToConversation: false,
+    });
+    const refreshedScenario = hasLongTermTaskDialogue(currentTaskTurns)
+      ? rebuildLongTermScenarioState({
+          previous: longTermScenarioState,
+          conversationId: String(params.oid),
+          locale: params.locale,
+          activeSegment: longTermScenarioState.active_segment,
+          recentTurns: currentTaskTurns.map((turn) => toLongTermRecentTurnDoc(turn)),
+          updatedAt: now.toISOString(),
+        })
+      : longTermScenarioState;
     let visualModel = buildLongTermVisualModelForRoute({
       scenario: refreshedScenario,
       locale: params.locale,
@@ -2663,19 +2662,8 @@ async function refreshConversationTransferProjection(params: {
       baseMotifLinks: (params.conv as any).motifLinks || [],
       baseContexts: (params.conv as any).contexts || [],
       manualGraphOverrides: (params.conv as any).manualGraphOverrides || null,
-      hasCurrentTaskDialogue:
-        longTermScenarioState.active_segment === "study"
-          ? hasLongTermTaskDialogue(currentTaskTurns)
-          : hasLongTermTaskDialogue(
-              await loadRecentTurnsForPlan({
-                conversationId: params.oid,
-                userId: params.userId,
-                taskId: currentLongTermTaskId(refreshedScenario, String(params.oid)),
-                limit: 1,
-                sortDirection: -1,
-                fallbackToConversation: false,
-              })
-            ),
+      hasCurrentTaskDialogue: hasLongTermTaskDialogue(currentTaskTurns),
+      recentTurns: currentTaskTurns.map((turn) => toLongTermRecentTurnDoc(turn)),
     });
     if (allowMotifFeatures(params.experimentArm)) {
       visualModel.motifs = applyTransferStateToMotifs({
@@ -3303,8 +3291,8 @@ convRouter.get("/:id", asyncRoute(async (req: AuthedRequest, res) => {
       conversationId: oid,
       userId,
       taskId: currentLongTermTaskId(longTermScenarioState, id),
-      limit: 1,
-      sortDirection: -1,
+      limit: 160,
+      sortDirection: 1,
       fallbackToConversation: false,
     });
     const model = buildLongTermVisualModelForRoute({
@@ -3318,6 +3306,7 @@ convRouter.get("/:id", asyncRoute(async (req: AuthedRequest, res) => {
       baseContexts: (conv as any).contexts || [],
       manualGraphOverrides: (conv as any).manualGraphOverrides || null,
       hasCurrentTaskDialogue: hasLongTermTaskDialogue(taskTurns),
+      recentTurns: taskTurns.map((turn) => toLongTermRecentTurnDoc(turn)),
     });
     let motifTransferState = motifTransferStateForArm(experimentArm, (conv as any).motifTransferState);
     if (allowMotifFeatures(experimentArm) && longTermScenarioState.active_segment === "study") {
@@ -3500,8 +3489,8 @@ convRouter.post("/:id/task/resume", asyncRoute(async (req: AuthedRequest, res) =
       conversationId: oid,
       userId,
       taskId: currentLongTermTaskId(refreshedScenario, id),
-      limit: 1,
-      sortDirection: -1,
+      limit: 160,
+      sortDirection: 1,
       fallbackToConversation: false,
     });
     const safeModel = sanitizeModelForExperimentArm(
@@ -3518,6 +3507,7 @@ convRouter.post("/:id/task/resume", asyncRoute(async (req: AuthedRequest, res) =
             baseContexts: (refreshedConv as any).contexts || [],
             manualGraphOverrides: (refreshedConv as any).manualGraphOverrides || null,
             hasCurrentTaskDialogue: hasLongTermTaskDialogue(taskTurns),
+            recentTurns: taskTurns.map((turn) => toLongTermRecentTurnDoc(turn)),
           }),
       experimentArm
     );
@@ -3769,8 +3759,8 @@ convRouter.put("/:id/graph", asyncRoute(async (req: AuthedRequest, res) => {
       conversationId: oid,
       userId,
       taskId: currentLongTermTaskId(longTermScenarioState, id),
-      limit: 1,
-      sortDirection: -1,
+      limit: 160,
+      sortDirection: 1,
       fallbackToConversation: false,
     });
     const visualModel = buildLongTermVisualModelForRoute({
@@ -3788,6 +3778,7 @@ convRouter.put("/:id/graph", asyncRoute(async (req: AuthedRequest, res) => {
       baseContexts: Array.isArray(req.body?.contexts) ? req.body.contexts : (conv as any).contexts || [],
       manualGraphOverrides,
       hasCurrentTaskDialogue: hasLongTermTaskDialogue(taskTurns),
+      recentTurns: taskTurns.map((turn) => toLongTermRecentTurnDoc(turn)),
     });
     const persisted = await persistLongTermConversationState({
       conversationId: oid,
@@ -4587,6 +4578,7 @@ convRouter.post("/:id/turn", asyncRoute(async (req: AuthedRequest, res) => {
       baseContexts,
       manualGraphOverrides,
       hasCurrentTaskDialogue: true,
+      recentTurns: longTermBase.recentDocs.map((turn) => toLongTermRecentTurnDoc(turn)),
     });
     if (motifEnabled) {
       preModel.motifs = applyTransferStateToMotifs({
@@ -5265,6 +5257,7 @@ convRouter.post("/:id/turn/stream", asyncRoute(async (req: AuthedRequest, res) =
         baseContexts,
         manualGraphOverrides,
         hasCurrentTaskDialogue: true,
+        recentTurns: longTermBase.recentDocs.map((turn) => toLongTermRecentTurnDoc(turn)),
       });
       preModel.motifs = applyTransferStateToMotifs({
         motifs: annotateMotifExtractionMeta({
